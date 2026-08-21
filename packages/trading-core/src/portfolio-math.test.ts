@@ -84,6 +84,31 @@ describe('KRW weighted-average cost and realized PnL golden', () => {
 });
 
 describe('USD weighted-average cost and PnL golden', () => {
+  it('preserves exact fee significance on buys', () => {
+    const bought = applyFillToPosition(emptyPosition('AAPL'), {
+      symbol: 'AAPL',
+      side: 'BUY',
+      price: '100',
+      quantity: '1',
+      fee: '0.00000000001',
+    });
+
+    expect(bought.totalCost).toBe('100.00000000001');
+  });
+
+  it('applies exact whole-quantity arithmetic beyond 20 significant digits', () => {
+    const bought = applyFillToPosition(emptyPosition('AAPL'), {
+      symbol: 'AAPL',
+      side: 'BUY',
+      price: '1',
+      quantity: '1000000000000000000000000000000',
+      fee: '0',
+    });
+
+    expect(bought.quantity).toBe('1000000000000000000000000000000');
+    expect(bought.totalCost).toBe('1000000000000000000000000000000');
+  });
+
   it('preserves decimal precision without binary floating point', () => {
     const firstBuy = applyFillToPosition(emptyPosition('AAPL'), {
       symbol: 'AAPL',

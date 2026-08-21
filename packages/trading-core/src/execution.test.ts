@@ -75,6 +75,20 @@ describe('price protection', () => {
 });
 
 describe('deterministic order-book walking', () => {
+  it('conserves fills for quantities beyond 20 significant digits', () => {
+    const result = calculateExecution(
+      orderFixture({ quantity: '1000000000000000000000000000000' }),
+      bookFixture({ asks: [{ price: '100', volume: '1' }] }),
+      zeroFeeModel,
+      protection(),
+    );
+
+    expect(result.fills).toEqual([{ price: '100', quantity: '1', fee: '0' }]);
+    expect(result.filledQuantity).toBe('1');
+    expect(result.unfilledQuantity).toBe('999999999999999999999999999999');
+    expect(result.terminalReason).toBe('IOC_REMAINDER');
+  });
+
   it('walks asks low-to-high and cancels a market IOC remainder', () => {
     const result = calculateExecution(
       orderFixture({ quantity: '5' }),
@@ -363,6 +377,25 @@ describe('hand-calculated KRW and USD execution goldens', () => {
 });
 
 describe('book and order validation', () => {
+  it.each(['NaN', '-5', 'abc', 'Infinity', 12 as unknown as string])(
+    'rejects fee model output %s with a stable domain error',
+    (fee) => {
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          { ...zeroFeeModel, calculate: () => fee },
+          protection(),
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
   it.each([
     { bids: [], asks: [{ price: '100', volume: '1' }] },
     { bids: [{ price: '99', volume: '1' }], asks: [] },

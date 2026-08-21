@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 
-import { decimal } from './decimal.js';
+import { decimal, moneyDecimal } from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type { DecimalString, Quantity, Side } from './domain-types.js';
 
@@ -19,7 +19,10 @@ export interface PositionFill {
   readonly fee: DecimalString;
 }
 
-const costPrecision = 10;
+// Weighted-cost division is the only inexact portfolio operation. Round that
+// quotient deterministically; exact additions and subtractions retain every
+// supplied fee/cost digit.
+const DIVISION_DECIMAL_PLACES = 10;
 
 function invariantViolation(message: string): never {
   throw new DomainError('INVARIANT_VIOLATION', message);
@@ -34,7 +37,7 @@ function readFiniteDecimal(
     throw new DomainError(code, `${description} must be a decimal string`);
   }
   try {
-    const result = decimal(value);
+    const result = moneyDecimal(value);
     if (!result.isFinite()) {
       throw new DomainError(code, `${description} must be finite`);
     }
@@ -78,7 +81,7 @@ function readWholeQuantity(
         `${description} must be ${allowZero ? 'non-negative' : 'positive'} and whole`,
       );
     }
-    return quantity;
+    return BigInt(quantity.toFixed());
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -90,8 +93,8 @@ function readWholeQuantity(
   }
 }
 
-function roundCost(value: Decimal): Decimal {
-  return value.toDecimalPlaces(costPrecision, Decimal.ROUND_HALF_UP);
+function roundDivision(value: Decimal): Decimal {
+  return value.toDecimalPlaces(DIVISION_DECIMAL_PLACES, Decimal.ROUND_HALF_UP);
 }
 
 function assertPosition(position: PositionCost) {
@@ -114,7 +117,7 @@ function assertPosition(position: PositionCost) {
   if (totalCost.isNegative()) {
     invariantViolation('Position total cost must not be negative');
   }
-  if (quantity.isZero() && !totalCost.isZero()) {
+  if (quantity === 0n && !totalCost.isZero()) {
     invariantViolation('An empty position must have zero total cost');
   }
   const realizedPnl = readFiniteDecimal(
@@ -151,40 +154,51 @@ export function applyFillToPosition(
   if (fill.side === 'BUY') {
     return {
       ...position,
-      quantity: current.quantity.plus(quantity).toString(),
-      totalCost: roundCost(
-        current.totalCost.plus(price.mul(quantity)).plus(fee),
-      ).toString(),
+      quantity: (current.quantity + quantity).toString(),
+      totalCost: current.totalCost
+        .plus(price.mul(quantity.toString()))
+        .plus(fee)
+        .toString(),
     };
   }
 
-  if (quantity.gt(current.quantity)) {
+  if (quantity > current.quantity) {
     throw new DomainError(
       'INSUFFICIENT_AVAILABLE_POSITION',
       'Sell fill exceeds the held position',
     );
   }
-  const liquidated = quantity.eq(current.quantity);
-  const costRemoved = liquidated
+  const liquidated = quantity === current.quantity;
+  const calculatedCostRemoved = liquidated
     ? current.totalCost
-    : roundCost(current.totalCost.mul(quantity).div(current.quantity));
-  const realizedDelta = price.mul(quantity).minus(fee).minus(costRemoved);
+    : roundDivision(
+        current.totalCost
+          .mul(quantity.toString())
+          .div(current.quantity.toString()),
+      );
+  const costRemoved = calculatedCostRemoved.gt(current.totalCost)
+    ? current.totalCost
+    : calculatedCostRemoved;
+  const realizedDelta = price
+    .mul(quantity.toString())
+    .minus(fee)
+    .minus(costRemoved);
 
   return {
     ...position,
-    quantity: current.quantity.minus(quantity).toString(),
+    quantity: (current.quantity - quantity).toString(),
     totalCost: liquidated
       ? '0'
-      : roundCost(current.totalCost.minus(costRemoved)).toString(),
-    realizedPnl: roundCost(current.realizedPnl.plus(realizedDelta)).toString(),
+      : current.totalCost.minus(costRemoved).toString(),
+    realizedPnl: current.realizedPnl.plus(realizedDelta).toString(),
   };
 }
 
 export function calculateAverageCost(position: PositionCost): DecimalString {
   const { quantity, totalCost } = assertPosition(position);
-  return quantity.isZero()
+  return quantity === 0n
     ? '0'
-    : roundCost(totalCost.div(quantity)).toString();
+    : roundDivision(totalCost.div(quantity.toString())).toString();
 }
 
 export function calculateUnrealizedPnl(
@@ -193,5 +207,5 @@ export function calculateUnrealizedPnl(
 ): DecimalString {
   const { quantity, totalCost } = assertPosition(position);
   const price = readPositivePrice(currentPrice, 'Current price');
-  return roundCost(price.mul(quantity).minus(totalCost)).toString();
+  return price.mul(quantity.toString()).minus(totalCost).toString();
 }

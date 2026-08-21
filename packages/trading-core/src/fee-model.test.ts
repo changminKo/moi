@@ -24,6 +24,37 @@ const usConfig: FeeScheduleConfig = {
 };
 
 describe('versioned fee schedules', () => {
+  it('is immune to caller mutation of the configuration object', () => {
+    const config = { ...usConfig, version: 'v1' };
+    const model = createFeeModel(config);
+    const input = {
+      market: 'US',
+      side: 'BUY',
+      price: '2',
+      quantity: '1',
+    } as const;
+
+    expect(model.calculate(input)).toBe('0.01');
+    config.roundingDecimals = 0;
+    config.market = 'KR';
+    expect(model.calculate(input)).toBe('0.01');
+  });
+
+  it('rejects inherited rounding-mode keys with INVARIANT_VIOLATION', () => {
+    expect(() =>
+      createFeeModel({
+        ...usConfig,
+        roundingMode:
+          '__proto__' as unknown as FeeScheduleConfig['roundingMode'],
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
   it('keeps two explicit schedule versions independent', () => {
     const original = createFeeModel(krConfig);
     const raised = createFeeModel({

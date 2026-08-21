@@ -1,4 +1,4 @@
-import { decimal } from './decimal.js';
+import { decimal, moneyDecimal } from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type {
   Currency,
@@ -78,12 +78,39 @@ function invalidQuantity(message: string): never {
   throw new DomainError('INVALID_QUANTITY', message);
 }
 
+function readFeeModelFee(value: unknown) {
+  if (typeof value !== 'string') {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'Fee model returned an invalid fee',
+    );
+  }
+  try {
+    const fee = moneyDecimal(value);
+    if (!fee.isFinite() || fee.isNegative()) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'Fee model returned an invalid fee',
+      );
+    }
+    return fee;
+  } catch (error) {
+    if (error instanceof DomainError) {
+      throw error;
+    }
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'Fee model returned an invalid fee',
+    );
+  }
+}
+
 function readPositivePrice(value: DecimalString, description: string) {
   if (typeof value !== 'string') {
     invalidPrice(`${description} must be a decimal string`);
   }
   try {
-    const price = decimal(value);
+    const price = moneyDecimal(value);
     if (!price.isFinite() || !price.gt(0)) {
       invalidPrice(`${description} must be positive`);
     }
@@ -105,7 +132,7 @@ function readPositiveWhole(value: Quantity, description: string) {
     if (!quantity.isFinite() || !quantity.isInteger() || !quantity.gt(0)) {
       invalidQuantity(`${description} must be a positive whole quantity`);
     }
-    return quantity;
+    return BigInt(quantity.toFixed());
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -127,7 +154,7 @@ function readNonNegativeWhole(value: Quantity, description: string) {
     ) {
       invalidQuantity(`${description} must be a non-negative whole quantity`);
     }
-    return quantity;
+    return BigInt(quantity.toFixed());
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -194,7 +221,7 @@ function assertOrder(order: ExecutionOrder) {
     order.filledQuantity ?? '0',
     'Filled quantity',
   );
-  if (filled.gte(quantity)) {
+  if (filled >= quantity) {
     invalidOrder('Execution order must have a positive remaining quantity');
   }
 
@@ -297,10 +324,12 @@ export function calculateExecution(
     );
   }
 
-  const remainingOrderQuantity = quantity.minus(filled);
+  // Quantities are exact whole numbers. BigInt keeps the book walk and its
+  // reported fill conservation independent of Decimal's precision setting.
+  const remainingOrderQuantity = quantity - filled;
   let remaining = remainingOrderQuantity;
-  let grossAmount = decimal(0);
-  let feeTotal = decimal(0);
+  let grossAmount = moneyDecimal(0);
+  let feeTotal = moneyDecimal(0);
   let protectionStopped = false;
   const fills: ExecutionFill[] = [];
   const consumedLevels: ConsumedOrderBookLevel[] = [];
@@ -316,7 +345,7 @@ export function calculateExecution(
       : readPositivePrice(order.limitPrice, 'Limit price');
 
   for (const [index, level] of levels.entries()) {
-    if (remaining.isZero()) {
+    if (remaining === 0n) {
       break;
     }
     const levelPrice = readPositivePrice(level.price, 'Order book level price');
@@ -343,17 +372,18 @@ export function calculateExecution(
       break;
     }
 
-    const consumed = levelVolume.lt(remaining) ? levelVolume : remaining;
+    const consumed = levelVolume < remaining ? levelVolume : remaining;
     const quantityString = consumed.toString();
-    const fee = feeModel.calculate({
+    const feeValue = feeModel.calculate({
       market: order.market,
       side: order.side,
       price: level.price,
       quantity: quantityString,
     });
-    const fillNotional = levelPrice.mul(consumed);
+    const fee = readFeeModelFee(feeValue);
+    const fillNotional = levelPrice.mul(quantityString);
 
-    fills.push({ price: level.price, quantity: quantityString, fee });
+    fills.push({ price: level.price, quantity: quantityString, fee: feeValue });
     consumedLevels.push({
       side: levelSide,
       index,
@@ -363,14 +393,14 @@ export function calculateExecution(
     });
     grossAmount = grossAmount.plus(fillNotional);
     feeTotal = feeTotal.plus(fee);
-    remaining = remaining.minus(consumed);
+    remaining -= consumed;
   }
 
-  const filledThisRun = remainingOrderQuantity.minus(remaining);
+  const filledThisRun = remainingOrderQuantity - remaining;
   const referenceNotional = readPositivePrice(
     protection.referenceMid,
     'Protection reference mid',
-  ).mul(filledThisRun);
+  ).mul(filledThisRun.toString());
   const slippageAmount =
     order.side === 'BUY'
       ? grossAmount.minus(referenceNotional)
@@ -379,13 +409,14 @@ export function calculateExecution(
     order.side === 'BUY'
       ? grossAmount.plus(feeTotal)
       : grossAmount.minus(feeTotal);
-  const terminalReason = remaining.isZero()
-    ? undefined
-    : protectionStopped
-      ? 'PRICE_PROTECTION'
-      : marketStyle
-        ? 'IOC_REMAINDER'
-        : undefined;
+  const terminalReason =
+    remaining === 0n
+      ? undefined
+      : protectionStopped
+        ? 'PRICE_PROTECTION'
+        : marketStyle
+          ? 'IOC_REMAINDER'
+          : undefined;
 
   return {
     fills,

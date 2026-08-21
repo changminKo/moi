@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 
-import { decimal } from './decimal.js';
+import { moneyDecimal } from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type {
   Currency,
@@ -55,7 +55,7 @@ function readConfiguredRate(
     invariantViolation(`${description} must be a decimal string`);
   }
   try {
-    const rate = decimal(value);
+    const rate = moneyDecimal(value);
     if (!rate.isFinite() || rate.isNegative()) {
       invariantViolation(
         `${description} must be a finite non-negative decimal`,
@@ -75,7 +75,7 @@ function readPrice(value: DecimalString): Decimal {
     throw new DomainError('INVALID_PRICE', 'Price must be a decimal string');
   }
   try {
-    const price = decimal(value);
+    const price = moneyDecimal(value);
     if (!price.isFinite() || !price.gt(0)) {
       throw new DomainError('INVALID_PRICE', 'Price must be positive');
     }
@@ -96,7 +96,7 @@ function readQuantity(value: Quantity): Decimal {
     );
   }
   try {
-    const quantity = decimal(value);
+    const quantity = moneyDecimal(value);
     if (!quantity.isFinite() || !quantity.isInteger() || !quantity.gt(0)) {
       throw new DomainError(
         'INVALID_QUANTITY',
@@ -141,10 +141,17 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
   ) {
     invariantViolation('Fee rounding decimals must be an integer from 0 to 20');
   }
-  if (!(config.roundingMode in roundingModes)) {
+  if (
+    typeof config.roundingMode !== 'string' ||
+    !Object.hasOwn(roundingModes, config.roundingMode)
+  ) {
     invariantViolation('Fee rounding mode is unsupported');
   }
 
+  const version = config.version;
+  const market = config.market;
+  const currency = config.currency;
+  const roundingDecimals = config.roundingDecimals;
   const commissionRate = readConfiguredRate(
     config.commissionRate,
     'Commission rate',
@@ -153,11 +160,11 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
   const roundingMode = roundingModes[config.roundingMode];
 
   return {
-    version: config.version,
-    market: config.market,
-    currency: config.currency,
+    version,
+    market,
+    currency,
     calculate(input): DecimalString {
-      if (input.market !== config.market) {
+      if (input.market !== market) {
         throw new DomainError(
           'INVALID_ORDER',
           'Fee model does not cover the order market',
@@ -171,9 +178,7 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
       const rawFee = notional
         .mul(commissionRate)
         .plus(input.side === 'SELL' ? notional.mul(sellTaxRate) : 0);
-      return rawFee
-        .toDecimalPlaces(config.roundingDecimals, roundingMode)
-        .toString();
+      return rawFee.toDecimalPlaces(roundingDecimals, roundingMode).toString();
     },
   };
 }

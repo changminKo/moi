@@ -32,9 +32,9 @@ const assertProperty = (property: fc.IProperty<unknown>): void => {
 
 type WalkFixture = {
   readonly side: 'BUY' | 'SELL';
-  readonly quantity: number;
-  readonly alreadyFilled: number;
-  readonly volumes: readonly number[];
+  readonly quantity: string;
+  readonly alreadyFilled: string;
+  readonly volumes: readonly string[];
 };
 
 const walkFixtureArbitrary = fc
@@ -42,19 +42,24 @@ const walkFixtureArbitrary = fc
     side: fc.constantFrom('BUY', 'SELL'),
     quantity: fc.integer({ min: 1, max: 50 }),
     filledSeed: fc.integer({ min: 0, max: 1000 }),
+    magnitude: fc.integer({ min: 0, max: 30 }),
     volumes: fc.array(fc.integer({ min: 1, max: 20 }), {
       minLength: 1,
       maxLength: 8,
     }),
   })
-  .map(
-    ({ side, quantity, filledSeed, volumes }): WalkFixture => ({
+  .map(({ side, quantity, filledSeed, magnitude, volumes }): WalkFixture => {
+    const scale = 10n ** BigInt(magnitude);
+    const scaledQuantity = BigInt(quantity) * scale;
+    const alreadyFilled = BigInt(filledSeed) % scaledQuantity;
+
+    return {
       side,
-      quantity,
-      alreadyFilled: filledSeed % quantity,
-      volumes,
-    }),
-  );
+      quantity: scaledQuantity.toString(),
+      alreadyFilled: alreadyFilled.toString(),
+      volumes: volumes.map((volume) => (BigInt(volume) * scale).toString()),
+    };
+  });
 
 const bookFor = (fixture: WalkFixture): OrderBookSnapshot => {
   const levels: OrderBookLevel[] = fixture.volumes.map((volume, index) => ({
@@ -62,7 +67,7 @@ const bookFor = (fixture: WalkFixture): OrderBookSnapshot => {
       fixture.side === 'BUY'
         ? BigInt(100 + index).toString()
         : BigInt(99 - index).toString(),
-    volume: BigInt(volume).toString(),
+    volume,
   }));
 
   return {
@@ -81,18 +86,26 @@ const orderFor = (fixture: WalkFixture): ExecutionOrder => ({
   market: 'KR',
   currency: 'KRW',
   symbol: '005930',
-  quantity: BigInt(fixture.quantity).toString(),
-  ...(fixture.alreadyFilled === 0
+  quantity: fixture.quantity,
+  ...(fixture.alreadyFilled === '0'
     ? {}
-    : { filledQuantity: BigInt(fixture.alreadyFilled).toString() }),
+    : { filledQuantity: fixture.alreadyFilled }),
 });
+
+const decimalFromScaledInteger = (value: bigint, scale: number): string => {
+  const digits = value.toString().padStart(scale + 1, '0');
+  const whole = digits.slice(0, -scale);
+  const fraction = digits.slice(-scale).replace(/0+$/, '');
+  return fraction.length === 0 ? whole : `${whole}.${fraction}`;
+};
 
 describe('execution metamorphic properties', () => {
   it('conserves remaining quantity across generated deterministic walks', () => {
     assertProperty(
       fc.property(walkFixtureArbitrary, (fixture) => {
         const serialized = JSON.stringify(fixture);
-        const remaining = BigInt(fixture.quantity - fixture.alreadyFilled);
+        const remaining =
+          BigInt(fixture.quantity) - BigInt(fixture.alreadyFilled);
         const available = fixture.volumes.reduce(
           (sum, volume) => sum + BigInt(volume),
           0n,
@@ -239,8 +252,8 @@ describe('execution metamorphic properties', () => {
           secondPrice: fc.integer({ min: 1, max: 100_000 }),
           firstQuantity: fc.integer({ min: 1, max: 50 }),
           secondQuantity: fc.integer({ min: 1, max: 50 }),
-          firstFee: fc.integer({ min: 0, max: 1000 }),
-          secondFee: fc.integer({ min: 0, max: 1000 }),
+          firstFeeUnits: fc.integer({ min: 0, max: 1000 }),
+          secondFeeUnits: fc.integer({ min: 0, max: 1000 }),
         }),
         (fixture) => {
           const serialized = JSON.stringify(fixture);
@@ -255,14 +268,14 @@ describe('execution metamorphic properties', () => {
             side: 'BUY' as const,
             price: BigInt(fixture.firstPrice).toString(),
             quantity: BigInt(fixture.firstQuantity).toString(),
-            fee: BigInt(fixture.firstFee).toString(),
+            fee: `0.${fixture.firstFeeUnits.toString().padStart(11, '0')}`,
           };
           const second = {
             symbol: '005930',
             side: 'BUY' as const,
             price: BigInt(fixture.secondPrice).toString(),
             quantity: BigInt(fixture.secondQuantity).toString(),
-            fee: BigInt(fixture.secondFee).toString(),
+            fee: `0.${fixture.secondFeeUnits.toString().padStart(11, '0')}`,
           };
 
           const forward = applyFillToPosition(
@@ -276,15 +289,22 @@ describe('execution metamorphic properties', () => {
           const expectedQuantity = BigInt(
             fixture.firstQuantity + fixture.secondQuantity,
           );
-          const expectedCost =
-            BigInt(fixture.firstPrice) * BigInt(fixture.firstQuantity) +
-            BigInt(fixture.firstFee) +
-            BigInt(fixture.secondPrice) * BigInt(fixture.secondQuantity) +
-            BigInt(fixture.secondFee);
+          const moneyScale = 100_000_000_000n;
+          const expectedCost = decimalFromScaledInteger(
+            BigInt(fixture.firstPrice) *
+              BigInt(fixture.firstQuantity) *
+              moneyScale +
+              BigInt(fixture.firstFeeUnits) +
+              BigInt(fixture.secondPrice) *
+                BigInt(fixture.secondQuantity) *
+                moneyScale +
+              BigInt(fixture.secondFeeUnits),
+            11,
+          );
 
           expect(forward).toEqual(reversed);
           expect(BigInt(forward.quantity)).toBe(expectedQuantity);
-          expect(BigInt(forward.totalCost)).toBe(expectedCost);
+          expect(forward.totalCost).toBe(expectedCost);
           expect(JSON.stringify(fixture)).toBe(serialized);
           return true;
         },
