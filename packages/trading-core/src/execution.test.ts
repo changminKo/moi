@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { DomainError } from './domain-errors.js';
 import type {
   ExecutionOrder,
   OrderBookSnapshot,
@@ -374,6 +375,222 @@ describe('hand-calculated KRW and USD execution goldens', () => {
       feeModelVersion: 'us-2026-08-01',
     });
   });
+});
+
+describe('fee model boundary snapshot', () => {
+  it('maps a class-constructor callback failure to INVARIANT_VIOLATION', () => {
+    class FeeConstructor {}
+    const feeModel = {
+      ...zeroFeeModel,
+      calculate: FeeConstructor,
+    } as unknown as FeeModel;
+
+    expect(() =>
+      calculateExecution(orderFixture(), bookFixture(), feeModel, protection()),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
+  it('reads a changing calculate accessor exactly once', () => {
+    let reads = 0;
+    const calculate = () => '0';
+    const feeModel = {
+      version: 'accessor-1',
+      market: 'KR',
+      currency: 'KRW',
+      get calculate() {
+        reads += 1;
+        return reads === 1 ? calculate : null;
+      },
+    } as unknown as FeeModel;
+
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      feeModel,
+      protection(),
+    );
+
+    expect(result.fills[0]?.fee).toBe('0');
+    expect(reads).toBe(1);
+  });
+
+  it('snapshots every fee model property exactly once', () => {
+    const reads = { version: 0, market: 0, currency: 0, calculate: 0 };
+    const feeModel = {
+      get version() {
+        reads.version += 1;
+        return 'snapshot-1';
+      },
+      get market() {
+        reads.market += 1;
+        return 'KR';
+      },
+      get currency() {
+        reads.currency += 1;
+        return 'KRW';
+      },
+      get calculate() {
+        reads.calculate += 1;
+        return () => '0';
+      },
+    } as FeeModel;
+
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      feeModel,
+      protection(),
+    );
+
+    expect(result.feeModelVersion).toBe('snapshot-1');
+    expect(reads).toEqual({
+      version: 1,
+      market: 1,
+      currency: 1,
+      calculate: 1,
+    });
+  });
+
+  it('returns the snapshotted version after callback identity mutation', () => {
+    const feeModel: {
+      version: string;
+      market: FeeModel['market'];
+      currency: FeeModel['currency'];
+      calculate(): string;
+    } = {
+      version: 'audit-1',
+      market: 'KR',
+      currency: 'KRW',
+      calculate() {
+        this.version = '';
+        this.market = 'US';
+        this.currency = 'USD';
+        return '0';
+      },
+    };
+
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      feeModel,
+      protection(),
+    );
+
+    expect(result.feeModelVersion).toBe('audit-1');
+  });
+
+  it('invokes the snapshotted callback with its original receiver', () => {
+    const feeModel = {
+      version: 'receiver-1',
+      market: 'KR',
+      currency: 'KRW',
+      flatFee: '0',
+      calculate() {
+        return this.flatFee;
+      },
+    } as FeeModel & { flatFee: string };
+
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      feeModel,
+      protection(),
+    );
+
+    expect(result.fills).toEqual([{ price: '100', quantity: '1', fee: '0' }]);
+  });
+
+  it('maps a raw callback exception to INVARIANT_VIOLATION', () => {
+    const feeModel: FeeModel = {
+      ...zeroFeeModel,
+      calculate() {
+        throw new RangeError('boom');
+      },
+    };
+
+    expect(() =>
+      calculateExecution(orderFixture(), bookFixture(), feeModel, protection()),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
+  it('preserves an intentional DomainError thrown by the callback', () => {
+    const veto = new DomainError('INVALID_ORDER', 'custom veto');
+    const feeModel: FeeModel = {
+      ...zeroFeeModel,
+      calculate() {
+        throw veto;
+      },
+    };
+    let caught: unknown;
+
+    try {
+      calculateExecution(orderFixture(), bookFixture(), feeModel, protection());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(veto);
+    expect(caught).toMatchObject({
+      code: 'INVALID_ORDER',
+      retryable: false,
+      message: 'custom veto',
+    });
+  });
+
+  it.each(['version', 'market', 'currency', 'calculate'] as const)(
+    'maps a throwing %s getter to INVARIANT_VIOLATION',
+    (field) => {
+      const feeModel = { ...zeroFeeModel };
+      Object.defineProperty(feeModel, field, {
+        get() {
+          throw new Error(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          feeModel,
+          protection(),
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each([null, undefined, 'not-protection'])(
+    'rejects invalid protection root %# with INVALID_ORDER',
+    (invalidProtection) => {
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          zeroFeeModel,
+          invalidProtection as unknown as PriceProtection,
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVALID_ORDER',
+          retryable: false,
+        }),
+      );
+    },
+  );
 });
 
 describe('book and order validation', () => {

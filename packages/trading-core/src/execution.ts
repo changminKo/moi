@@ -162,6 +162,9 @@ function readNonNegativeWhole(value: Quantity, description: string) {
 }
 
 function assertProtection(protection: PriceProtection): void {
+  if (typeof protection !== 'object' || protection === null) {
+    invalidOrder('Price protection must be an object');
+  }
   readPositivePrice(protection.referenceMid, 'Protection reference mid');
   if (
     !Number.isSafeInteger(protection.maxDeviationBps) ||
@@ -317,20 +320,44 @@ export function calculateExecution(
   const { quantity, filled } = assertOrder(order);
   assertProtection(protection);
   assertBook(order, book);
+  if (typeof feeModel !== 'object' || feeModel === null) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'Fee model must match the execution market and currency',
+    );
+  }
+  let feeModelVersion: unknown;
+  let feeModelMarket: unknown;
+  let feeModelCurrency: unknown;
+  let feeModelCalculate: unknown;
+  try {
+    feeModelVersion = feeModel.version;
+    feeModelMarket = feeModel.market;
+    feeModelCurrency = feeModel.currency;
+    feeModelCalculate = feeModel.calculate;
+  } catch (error) {
+    if (error instanceof DomainError) {
+      throw error;
+    }
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'Fee model properties must be readable',
+    );
+  }
   if (
-    typeof feeModel !== 'object' ||
-    feeModel === null ||
-    feeModel.market !== order.market ||
-    feeModel.currency !== order.currency ||
-    typeof feeModel.version !== 'string' ||
-    feeModel.version.trim().length === 0 ||
-    typeof feeModel.calculate !== 'function'
+    feeModelMarket !== order.market ||
+    feeModelCurrency !== order.currency ||
+    typeof feeModelVersion !== 'string' ||
+    feeModelVersion.trim().length === 0 ||
+    typeof feeModelCalculate !== 'function'
   ) {
     throw new DomainError(
       'INVARIANT_VIOLATION',
       'Fee model must match the execution market and currency',
     );
   }
+  const snapshotVersion: string = feeModelVersion;
+  const snapshotCalculate = feeModelCalculate as FeeModel['calculate'];
 
   // Quantities are exact whole numbers. BigInt keeps the book walk and its
   // reported fill conservation independent of Decimal's precision setting.
@@ -382,12 +409,25 @@ export function calculateExecution(
 
     const consumed = levelVolume < remaining ? levelVolume : remaining;
     const quantityString = consumed.toString();
-    const feeValue = feeModel.calculate({
-      market: order.market,
-      side: order.side,
-      price: level.price,
-      quantity: quantityString,
-    });
+    let feeValue: unknown;
+    try {
+      feeValue = Reflect.apply(snapshotCalculate, feeModel, [
+        {
+          market: order.market,
+          side: order.side,
+          price: level.price,
+          quantity: quantityString,
+        },
+      ]);
+    } catch (error) {
+      if (error instanceof DomainError) {
+        throw error;
+      }
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'Fee model calculation failed',
+      );
+    }
     const fee = readFeeModelFee(feeValue);
     const normalizedFee = fee.toString();
     const fillNotional = assertExactMoney(
@@ -454,7 +494,7 @@ export function calculateExecution(
     feeTotal: feeTotal.toString(),
     netAmount: netAmount.toString(),
     slippageAmount: slippageAmount.toString(),
-    feeModelVersion: feeModel.version,
+    feeModelVersion: snapshotVersion,
     ...(terminalReason === undefined ? {} : { terminalReason }),
   };
 }

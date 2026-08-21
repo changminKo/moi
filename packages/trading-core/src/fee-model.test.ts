@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { FeeScheduleConfig } from './fee-model.js';
+import type { FeeCalculationInput, FeeScheduleConfig } from './fee-model.js';
 import { createFeeModel } from './fee-model.js';
 
 const krConfig: FeeScheduleConfig = {
@@ -304,6 +304,38 @@ describe('fee calculation validation', () => {
       ).toThrowError(
         expect.objectContaining({
           code: 'INVALID_QUANTITY',
+          retryable: false,
+        }),
+      );
+    },
+  );
+});
+
+describe('fee model root guards', () => {
+  it.each([null, undefined, 'not-a-config'])(
+    'rejects invalid configuration root %#',
+    (config) => {
+      expect(() =>
+        createFeeModel(config as unknown as FeeScheduleConfig),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each([null, undefined, 'not-an-input'])(
+    'rejects invalid calculation input root %#',
+    (input) => {
+      const model = createFeeModel(krConfig);
+
+      expect(() =>
+        model.calculate(input as unknown as FeeCalculationInput),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVALID_ORDER',
           retryable: false,
         }),
       );

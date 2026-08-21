@@ -101,6 +101,9 @@ function roundDivision(value: Decimal): Decimal {
 }
 
 function assertPosition(position: PositionCost) {
+  if (typeof position !== 'object' || position === null) {
+    invariantViolation('Position must be an object');
+  }
   if (
     typeof position.symbol !== 'string' ||
     position.symbol.trim().length === 0
@@ -136,6 +139,9 @@ export function applyFillToPosition(
   fill: PositionFill,
 ): PositionCost {
   const current = assertPosition(position);
+  if (typeof fill !== 'object' || fill === null) {
+    throw new DomainError('INVALID_ORDER', 'Fill must be an object');
+  }
   if (
     typeof fill.symbol !== 'string' ||
     fill.symbol.trim().length === 0 ||

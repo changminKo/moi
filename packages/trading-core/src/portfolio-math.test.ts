@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { PositionCost } from './portfolio-math.js';
+import type { PositionCost, PositionFill } from './portfolio-math.js';
 import {
   applyFillToPosition,
   calculateAverageCost,
@@ -274,4 +274,74 @@ describe('portfolio math validation', () => {
       expect.objectContaining({ code: 'INVALID_PRICE', retryable: false }),
     );
   });
+});
+
+describe('portfolio root guards', () => {
+  const position = emptyPosition('AAPL');
+  const fill: PositionFill = {
+    symbol: 'AAPL',
+    side: 'BUY',
+    price: '100',
+    quantity: '1',
+    fee: '0',
+  };
+
+  it.each([null, undefined, 'not-a-position'])(
+    'rejects invalid apply-fill position root %#',
+    (invalidPosition) => {
+      expect(() =>
+        applyFillToPosition(invalidPosition as unknown as PositionCost, fill),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each([null, undefined, 'not-a-fill'])(
+    'rejects invalid fill root %#',
+    (invalidFill) => {
+      expect(() =>
+        applyFillToPosition(position, invalidFill as unknown as PositionFill),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVALID_ORDER',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each([null, undefined, 'not-a-position'])(
+    'rejects invalid average-cost position root %#',
+    (invalidPosition) => {
+      expect(() =>
+        calculateAverageCost(invalidPosition as unknown as PositionCost),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each([null, undefined, 'not-a-position'])(
+    'rejects invalid unrealized-PnL position root %#',
+    (invalidPosition) => {
+      expect(() =>
+        calculateUnrealizedPnl(
+          invalidPosition as unknown as PositionCost,
+          '100',
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
 });

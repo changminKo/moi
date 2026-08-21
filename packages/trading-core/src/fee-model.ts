@@ -116,6 +116,9 @@ function readQuantity(value: Quantity): bigint {
 }
 
 export function createFeeModel(config: FeeScheduleConfig): FeeModel {
+  if (typeof config !== 'object' || config === null) {
+    invariantViolation('Fee schedule config must be an object');
+  }
   if (
     typeof config.version !== 'string' ||
     config.version.trim().length === 0
@@ -164,6 +167,12 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
     market,
     currency,
     calculate(input): DecimalString {
+      if (typeof input !== 'object' || input === null) {
+        throw new DomainError(
+          'INVALID_ORDER',
+          'Fee calculation input must be an object',
+        );
+      }
       if (input.market !== market) {
         throw new DomainError(
           'INVALID_ORDER',
