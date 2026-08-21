@@ -17,7 +17,10 @@ function nonNegativeDecimal(value: string, description: string) {
   }
   try {
     const result = decimal(value);
-    if (!result.isFinite() || result.isNegative()) {
+    if (!result.isFinite()) {
+      invariantViolation(`${description} must be a finite decimal`);
+    }
+    if (result.isNegative()) {
       invariantViolation(`${description} must not be negative`);
     }
     return result;

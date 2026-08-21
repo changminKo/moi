@@ -325,6 +325,55 @@ describe('reservation planning', () => {
     ).toEqual({ position: { symbol: 'AAPL', quantity: '0' } });
   });
 
+  it.each([
+    {
+      status: 'CANCELLED',
+      side: 'BUY',
+      type: 'LIMIT',
+      currency: 'KRW',
+      symbol: '005930',
+      limitPrice: '70000',
+    },
+    {
+      status: 'EXPIRED',
+      side: 'BUY',
+      type: 'MARKET',
+      currency: 'USD',
+      symbol: 'AAPL',
+      referencePrice: '200',
+    },
+    {
+      status: 'CANCELLED',
+      side: 'SELL',
+      type: 'LIMIT',
+      currency: 'KRW',
+      symbol: '005930',
+      limitPrice: '70000',
+    },
+    {
+      status: 'EXPIRED',
+      side: 'SELL',
+      type: 'MARKET',
+      currency: 'USD',
+      symbol: 'AAPL',
+      referencePrice: '200',
+    },
+  ] as const)(
+    'rejects a fully filled $status $side order instead of treating it as terminal release',
+    (order) => {
+      expect(() =>
+        planReservation({
+          id: `${order.status}-${order.side}-complete`,
+          ...order,
+          quantity: '10',
+          filledQuantity: '10',
+        }),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
   it('rejects a filled order whose fill quantity is absent or inconsistent', () => {
     const incompleteFilled: ReservationOrder = {
       id: 'incomplete',
@@ -557,6 +606,36 @@ describe('reservation planning', () => {
         },
       ]),
     ).toEqual({ cash: { currency: 'USD', amount: '0' } });
+  });
+
+  it('rejects an OCO tuple with two progressed winners', () => {
+    expect(() =>
+      planOcoReservation([
+        {
+          id: 'first-winner',
+          status: 'FILLED',
+          side: 'BUY',
+          type: 'LIMIT',
+          currency: 'USD',
+          symbol: 'AAPL',
+          quantity: '2',
+          filledQuantity: '2',
+          limitPrice: '190',
+        },
+        {
+          id: 'second-winner',
+          status: 'OPEN',
+          side: 'BUY',
+          type: 'LIMIT',
+          currency: 'USD',
+          symbol: 'AAPL',
+          quantity: '2',
+          limitPrice: '210',
+        },
+      ]),
+    ).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+    );
   });
 
   it('rejects OCO plans with duplicate leg identities', () => {

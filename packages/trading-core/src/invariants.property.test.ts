@@ -284,6 +284,26 @@ describe('account reservation invariants', () => {
     },
   );
 
+  it('describes non-finite account values as non-finite invariant violations', () => {
+    expect(() =>
+      assertAccountInvariants({
+        wallets: [
+          {
+            ...initialWallet(),
+            total: 'Infinity',
+            available: 'Infinity',
+          },
+        ],
+        positions: [],
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        message: expect.stringContaining('finite decimal'),
+      }),
+    );
+  });
+
   it('rejects runtime numeric account balances at decimal-string boundaries', () => {
     expect(() =>
       assertAccountInvariants({

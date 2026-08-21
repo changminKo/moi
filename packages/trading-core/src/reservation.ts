@@ -76,6 +76,12 @@ const terminalStatuses = new Set<string>([
   'EXPIRED',
   'REJECTED',
 ]);
+const progressedOcoStatuses = new Set<string>([
+  'TRIGGERED',
+  'OPEN',
+  'PARTIALLY_FILLED',
+  'FILLED',
+]);
 
 function invalidOrder(message: string): never {
   throw new DomainError('INVALID_ORDER', message);
@@ -371,6 +377,8 @@ function remainingQuantity(order: ReservationOrder) {
     (order.status === 'FILLED' &&
       (order.filledQuantity === undefined || !filled.eq(quantity))) ||
     (order.status === 'REJECTED' && !filled.isZero()) ||
+    ((order.status === 'CANCELLED' || order.status === 'EXPIRED') &&
+      !filled.lt(quantity)) ||
     (order.status === 'PARTIALLY_FILLED' &&
       (order.filledQuantity === undefined ||
         !filled.gt(0) ||
@@ -457,6 +465,12 @@ export function planOcoReservation(
     invalidOrder(
       'OCO reservation legs must have the same side, currency, and symbol',
     );
+  }
+  if (
+    progressedOcoStatuses.has(first.status) &&
+    progressedOcoStatuses.has(second.status)
+  ) {
+    invalidOrder('OCO reservation cannot have two progressed legs');
   }
 
   const firstPlan = planReservation(first);
