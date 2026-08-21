@@ -43,6 +43,11 @@ export interface DomainErrorOptions {
   readonly retryAfterSeconds?: number;
 }
 
+// Identity-only brand. `WeakSet.prototype.has` compares by SameValue, so
+// classification never reads a property or triggers a proxy trap on a value
+// thrown by untrusted code.
+const domainErrorBrand = new WeakSet<object>();
+
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
   readonly retryable: boolean;
@@ -67,5 +72,13 @@ export class DomainError extends Error {
 
       this.retryAfterSeconds = options.retryAfterSeconds;
     }
+
+    domainErrorBrand.add(this);
   }
+}
+
+export function isDomainError(value: unknown): value is DomainError {
+  return (
+    typeof value === 'object' && value !== null && domainErrorBrand.has(value)
+  );
 }

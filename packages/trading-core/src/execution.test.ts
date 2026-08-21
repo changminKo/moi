@@ -1290,3 +1290,117 @@ describe('deterministic execution input snapshots', () => {
     });
   });
 });
+
+describe('hostile fee model error classification', () => {
+  const trapProxy = () =>
+    new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new RangeError('trap');
+        },
+      },
+    );
+
+  const forgery = () => Object.create(DomainError.prototype) as unknown;
+
+  const throwingGetterModel = (thrown: () => unknown): FeeModel => {
+    const feeModel = { ...zeroFeeModel };
+    Object.defineProperty(feeModel, 'version', {
+      get() {
+        throw thrown();
+      },
+    });
+    return feeModel;
+  };
+
+  const throwingCalculateModel = (thrown: () => unknown): FeeModel => ({
+    ...zeroFeeModel,
+    calculate() {
+      throw thrown();
+    },
+  });
+
+  const runAndCatch = (feeModel: FeeModel): unknown => {
+    try {
+      calculateExecution(orderFixture(), bookFixture(), feeModel, protection());
+    } catch (error) {
+      return error;
+    }
+    throw new Error('calculateExecution unexpectedly returned a result');
+  };
+
+  it('classifies a getPrototypeOf-trap throw from a property read', () => {
+    const caught = runAndCatch(throwingGetterModel(trapProxy));
+
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      message: 'Fee model properties must be readable',
+    });
+    expect(caught).toBeInstanceOf(DomainError);
+  });
+
+  it('classifies a getPrototypeOf-trap throw from the fee callback', () => {
+    const caught = runAndCatch(throwingCalculateModel(trapProxy));
+
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      message: 'Fee model calculation failed',
+    });
+    expect(caught).toBeInstanceOf(DomainError);
+  });
+
+  it('rejects a prototype-only DomainError forgery from a property read', () => {
+    const forged = forgery();
+    const caught = runAndCatch(throwingGetterModel(() => forged));
+
+    expect(caught).not.toBe(forged);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      message: 'Fee model properties must be readable',
+    });
+    expect(caught).toBeInstanceOf(DomainError);
+  });
+
+  it('rejects a prototype-only DomainError forgery from the fee callback', () => {
+    const forged = forgery();
+    const caught = runAndCatch(throwingCalculateModel(() => forged));
+
+    expect(caught).not.toBe(forged);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      message: 'Fee model calculation failed',
+    });
+    expect(caught).toBeInstanceOf(DomainError);
+  });
+
+  it('preserves a genuine DomainError thrown by a property read', () => {
+    const veto = new DomainError('CANCEL_ONLY', 'getter veto');
+
+    expect(runAndCatch(throwingGetterModel(() => veto))).toBe(veto);
+  });
+
+  it('preserves a genuine DomainError thrown by the fee callback', () => {
+    const veto = new DomainError('MARKET_CLOSED', 'callback veto');
+
+    expect(runAndCatch(throwingCalculateModel(() => veto))).toBe(veto);
+  });
+
+  it('preserves a DomainError subclass thrown by a property read', () => {
+    class SubError extends DomainError {}
+    const veto = new SubError('CANCEL_ONLY', 'subclass getter veto');
+
+    expect(runAndCatch(throwingGetterModel(() => veto))).toBe(veto);
+  });
+
+  it('preserves a DomainError subclass thrown by the fee callback', () => {
+    class SubError extends DomainError {}
+    const veto = new SubError('CANCEL_ONLY', 'subclass callback veto');
+
+    expect(runAndCatch(throwingCalculateModel(() => veto))).toBe(veto);
+  });
+});

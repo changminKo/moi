@@ -4,7 +4,7 @@ import {
   moneyDecimal,
   readExactMoney,
 } from './decimal.js';
-import { DomainError } from './domain-errors.js';
+import { DomainError, isDomainError } from './domain-errors.js';
 import type {
   Currency,
   DecimalString,
@@ -417,7 +417,7 @@ export function calculateExecution(
     feeModelCurrency = feeModel.currency;
     feeModelCalculate = feeModel.calculate;
   } catch (error) {
-    if (error instanceof DomainError) {
+    if (isDomainError(error)) {
       throw error;
     }
     throw new DomainError(
@@ -499,7 +499,7 @@ export function calculateExecution(
         },
       ]);
     } catch (error) {
-      if (error instanceof DomainError) {
+      if (isDomainError(error)) {
         throw error;
       }
       throw new DomainError(
