@@ -870,3 +870,423 @@ describe('book and order validation', () => {
     );
   });
 });
+
+describe('deterministic execution input snapshots', () => {
+  it('reads every order field exactly once and uses only the snapshot', () => {
+    const reads = {
+      id: 0,
+      side: 0,
+      type: 0,
+      market: 0,
+      currency: 0,
+      symbol: 0,
+      quantity: 0,
+      filledQuantity: 0,
+      limitPrice: 0,
+    };
+    const order = {
+      get id() {
+        reads.id += 1;
+        return 'snapshot-order';
+      },
+      get side() {
+        reads.side += 1;
+        return 'BUY';
+      },
+      get type() {
+        reads.type += 1;
+        return 'LIMIT';
+      },
+      get market() {
+        reads.market += 1;
+        return 'KR';
+      },
+      get currency() {
+        reads.currency += 1;
+        return 'KRW';
+      },
+      get symbol() {
+        reads.symbol += 1;
+        return '005930';
+      },
+      get quantity() {
+        reads.quantity += 1;
+        return '2';
+      },
+      get filledQuantity() {
+        reads.filledQuantity += 1;
+        return '0';
+      },
+      get limitPrice() {
+        reads.limitPrice += 1;
+        return '100';
+      },
+    } as ExecutionOrder;
+
+    const result = calculateExecution(
+      order,
+      bookFixture({ asks: [{ price: '100', volume: '2' }] }),
+      zeroFeeModel,
+      protection(),
+    );
+
+    expect(result).toMatchObject({
+      fills: [{ price: '100', quantity: '2', fee: '0' }],
+      grossAmount: '200',
+      netAmount: '200',
+      slippageAmount: '0',
+    });
+    expect(reads).toEqual({
+      id: 1,
+      side: 1,
+      type: 1,
+      market: 1,
+      currency: 1,
+      symbol: 1,
+      quantity: 1,
+      filledQuantity: 1,
+      limitPrice: 1,
+    });
+  });
+
+  it.each([
+    'id',
+    'side',
+    'type',
+    'market',
+    'currency',
+    'symbol',
+    'quantity',
+    'filledQuantity',
+    'limitPrice',
+  ] as const)('maps a throwing order %s getter to INVALID_ORDER', (field) => {
+    const order = orderFixture({
+      type: 'LIMIT',
+      quantity: '2',
+      filledQuantity: '0',
+      limitPrice: '100',
+    });
+    Object.defineProperty(order, field, {
+      get() {
+        throw new RangeError(`cannot read ${field}`);
+      },
+    });
+
+    expect(() =>
+      calculateExecution(order, bookFixture(), zeroFeeModel, protection()),
+    ).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+    );
+  });
+
+  it('reads both protection fields exactly once and cannot widen the band', () => {
+    const reads = { referenceMid: 0, maxDeviationBps: 0 };
+    const guardedProtection = {
+      get referenceMid() {
+        reads.referenceMid += 1;
+        return '100';
+      },
+      get maxDeviationBps() {
+        reads.maxDeviationBps += 1;
+        return reads.maxDeviationBps === 1 ? 0 : 10_000;
+      },
+    } as PriceProtection;
+
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture({ asks: [{ price: '110', volume: '1' }] }),
+      zeroFeeModel,
+      guardedProtection,
+    );
+
+    expect(result).toMatchObject({
+      fills: [],
+      filledQuantity: '0',
+      unfilledQuantity: '1',
+      terminalReason: 'PRICE_PROTECTION',
+    });
+    expect(reads).toEqual({ referenceMid: 1, maxDeviationBps: 1 });
+  });
+
+  it.each(['referenceMid', 'maxDeviationBps'] as const)(
+    'maps a throwing protection %s getter to INVALID_ORDER',
+    (field) => {
+      const guardedProtection = protection();
+      Object.defineProperty(guardedProtection, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          zeroFeeModel,
+          guardedProtection,
+        ),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it('deep-snapshots book identity, arrays, and every level field once', () => {
+    const reads = {
+      symbol: 0,
+      market: 0,
+      currency: 0,
+      bids: 0,
+      asks: 0,
+      bidPrice: 0,
+      bidVolume: 0,
+      askPrice: 0,
+      askVolume: 0,
+    };
+    const bid = {
+      get price() {
+        reads.bidPrice += 1;
+        return '99';
+      },
+      get volume() {
+        reads.bidVolume += 1;
+        return '5';
+      },
+    };
+    const ask = {
+      get price() {
+        reads.askPrice += 1;
+        return '100';
+      },
+      get volume() {
+        reads.askVolume += 1;
+        return '2';
+      },
+    };
+    const bids = [bid];
+    const asks = [ask];
+    const book = {
+      get symbol() {
+        reads.symbol += 1;
+        return '005930';
+      },
+      get market() {
+        reads.market += 1;
+        return 'KR';
+      },
+      get currency() {
+        reads.currency += 1;
+        return 'KRW';
+      },
+      get bids() {
+        reads.bids += 1;
+        return bids;
+      },
+      get asks() {
+        reads.asks += 1;
+        return asks;
+      },
+    } as OrderBookSnapshot;
+
+    const result = calculateExecution(
+      orderFixture({ quantity: '2' }),
+      book,
+      zeroFeeModel,
+      protection(),
+    );
+
+    expect(result.fills).toEqual([{ price: '100', quantity: '2', fee: '0' }]);
+    expect(reads).toEqual({
+      symbol: 1,
+      market: 1,
+      currency: 1,
+      bids: 1,
+      asks: 1,
+      bidPrice: 1,
+      bidVolume: 1,
+      askPrice: 1,
+      askVolume: 1,
+    });
+  });
+
+  it.each(['symbol', 'market', 'currency', 'bids', 'asks'] as const)(
+    'maps a throwing book %s getter to INVALID_ORDER',
+    (field) => {
+      const book = bookFixture();
+      Object.defineProperty(book, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        calculateExecution(orderFixture(), book, zeroFeeModel, protection()),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it.each([
+    { side: 'bids', field: 'price' },
+    { side: 'bids', field: 'volume' },
+    { side: 'asks', field: 'price' },
+    { side: 'asks', field: 'volume' },
+  ] as const)(
+    'maps a throwing $side level $field getter to INVALID_ORDER',
+    ({ side, field }) => {
+      const book = bookFixture();
+      const level = book[side][0];
+      if (level === undefined) {
+        throw new Error('fixture must contain a level');
+      }
+      Object.defineProperty(level, field, {
+        get() {
+          throw new RangeError(`cannot read ${side}.${field}`);
+        },
+      });
+
+      expect(() =>
+        calculateExecution(orderFixture(), book, zeroFeeModel, protection()),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it('maps a proxied book-array read failure to INVALID_ORDER', () => {
+    const brokenBids = new Proxy([{ price: '99', volume: '1' }], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          throw new RangeError('cannot inspect bids');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() =>
+      calculateExecution(
+        orderFixture(),
+        bookFixture({ bids: brokenBids }),
+        zeroFeeModel,
+        protection(),
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+    );
+  });
+
+  it('maps a throwing book-array iterator to INVALID_ORDER', () => {
+    const brokenAsks = [{ price: '100', volume: '1' }];
+    Object.defineProperty(brokenAsks, Symbol.iterator, {
+      get() {
+        throw new RangeError('cannot iterate asks');
+      },
+    });
+
+    expect(() =>
+      calculateExecution(
+        orderFixture(),
+        bookFixture({ asks: brokenAsks }),
+        zeroFeeModel,
+        protection(),
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+    );
+  });
+
+  it('isolates execution from fee-callback mutation of every original input', () => {
+    const order: {
+      id: string;
+      side: ExecutionOrder['side'];
+      type: ExecutionOrder['type'];
+      market: ExecutionOrder['market'];
+      currency: ExecutionOrder['currency'];
+      symbol: string;
+      quantity: string;
+    } = {
+      id: 'mutable-order',
+      side: 'BUY',
+      type: 'MARKET',
+      market: 'KR',
+      currency: 'KRW',
+      symbol: '005930',
+      quantity: '2',
+    };
+    const firstAsk = { price: '100', volume: '1' };
+    const secondAsk = { price: '101', volume: '1' };
+    const book: {
+      symbol: string;
+      market: OrderBookSnapshot['market'];
+      currency: OrderBookSnapshot['currency'];
+      bids: { price: string; volume: string }[];
+      asks: { price: string; volume: string }[];
+    } = {
+      symbol: '005930',
+      market: 'KR',
+      currency: 'KRW',
+      bids: [{ price: '99', volume: '2' }],
+      asks: [firstAsk, secondAsk],
+    };
+    const guardedProtection = { referenceMid: '100', maxDeviationBps: 500 };
+    const seenInputs: unknown[] = [];
+    const feeModel: FeeModel = {
+      ...zeroFeeModel,
+      calculate(input) {
+        seenInputs.push({ ...input });
+        if (seenInputs.length === 1) {
+          order.side = 'SELL';
+          order.type = 'LIMIT';
+          order.market = 'US';
+          order.currency = 'USD';
+          order.symbol = 'MUTATED';
+          order.quantity = '999';
+          guardedProtection.referenceMid = '1000';
+          guardedProtection.maxDeviationBps = 10_000;
+          firstAsk.price = '1';
+          firstAsk.volume = '999';
+          book.asks.splice(1);
+          book.bids.splice(0);
+        }
+        return input.side === 'BUY' ? '1' : '9';
+      },
+    };
+
+    const result = calculateExecution(order, book, feeModel, guardedProtection);
+
+    expect(seenInputs).toEqual([
+      { market: 'KR', side: 'BUY', price: '100', quantity: '1' },
+      { market: 'KR', side: 'BUY', price: '101', quantity: '1' },
+    ]);
+    expect(result).toEqual({
+      fills: [
+        { price: '100', quantity: '1', fee: '1' },
+        { price: '101', quantity: '1', fee: '1' },
+      ],
+      consumedLevels: [
+        {
+          side: 'ASK',
+          index: 0,
+          price: '100',
+          availableVolume: '1',
+          consumedQuantity: '1',
+        },
+        {
+          side: 'ASK',
+          index: 1,
+          price: '101',
+          availableVolume: '1',
+          consumedQuantity: '1',
+        },
+      ],
+      filledQuantity: '2',
+      unfilledQuantity: '0',
+      grossAmount: '201',
+      feeTotal: '2',
+      netAmount: '203',
+      slippageAmount: '1',
+      feeModelVersion: 'test-zero-kr',
+    });
+  });
+});

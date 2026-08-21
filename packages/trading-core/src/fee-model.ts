@@ -47,6 +47,49 @@ function invariantViolation(message: string): never {
   throw new DomainError('INVARIANT_VIOLATION', message);
 }
 
+function snapshotFeeSchedule(config: FeeScheduleConfig): FeeScheduleConfig {
+  if (typeof config !== 'object' || config === null) {
+    invariantViolation('Fee schedule config must be an object');
+  }
+  try {
+    return {
+      version: config.version,
+      market: config.market,
+      currency: config.currency,
+      commissionRate: config.commissionRate,
+      sellTaxRate: config.sellTaxRate,
+      roundingDecimals: config.roundingDecimals,
+      roundingMode: config.roundingMode,
+    };
+  } catch {
+    invariantViolation('Fee schedule properties must be readable');
+  }
+}
+
+function snapshotFeeCalculationInput(
+  input: FeeCalculationInput,
+): FeeCalculationInput {
+  if (typeof input !== 'object' || input === null) {
+    throw new DomainError(
+      'INVALID_ORDER',
+      'Fee calculation input must be an object',
+    );
+  }
+  try {
+    return {
+      market: input.market,
+      side: input.side,
+      price: input.price,
+      quantity: input.quantity,
+    };
+  } catch {
+    throw new DomainError(
+      'INVALID_ORDER',
+      'Fee calculation properties must be readable',
+    );
+  }
+}
+
 function readConfiguredRate(
   value: DecimalString,
   description: string,
@@ -116,76 +159,69 @@ function readQuantity(value: Quantity): bigint {
 }
 
 export function createFeeModel(config: FeeScheduleConfig): FeeModel {
-  if (typeof config !== 'object' || config === null) {
-    invariantViolation('Fee schedule config must be an object');
-  }
+  const snapshot = snapshotFeeSchedule(config);
   if (
-    typeof config.version !== 'string' ||
-    config.version.trim().length === 0
+    typeof snapshot.version !== 'string' ||
+    snapshot.version.trim().length === 0
   ) {
     invariantViolation('Fee model version must not be empty');
   }
-  if (config.market !== 'KR' && config.market !== 'US') {
+  if (snapshot.market !== 'KR' && snapshot.market !== 'US') {
     invariantViolation('Fee model market must be KR or US');
   }
-  if (config.currency !== 'KRW' && config.currency !== 'USD') {
+  if (snapshot.currency !== 'KRW' && snapshot.currency !== 'USD') {
     invariantViolation('Fee model currency must be KRW or USD');
   }
   if (
-    (config.market === 'KR' && config.currency !== 'KRW') ||
-    (config.market === 'US' && config.currency !== 'USD')
+    (snapshot.market === 'KR' && snapshot.currency !== 'KRW') ||
+    (snapshot.market === 'US' && snapshot.currency !== 'USD')
   ) {
     invariantViolation('Fee model currency must match its market');
   }
   if (
-    !Number.isInteger(config.roundingDecimals) ||
-    config.roundingDecimals < 0 ||
-    config.roundingDecimals > 20
+    !Number.isInteger(snapshot.roundingDecimals) ||
+    snapshot.roundingDecimals < 0 ||
+    snapshot.roundingDecimals > 20
   ) {
     invariantViolation('Fee rounding decimals must be an integer from 0 to 20');
   }
   if (
-    typeof config.roundingMode !== 'string' ||
-    !Object.hasOwn(roundingModes, config.roundingMode)
+    typeof snapshot.roundingMode !== 'string' ||
+    !Object.hasOwn(roundingModes, snapshot.roundingMode)
   ) {
     invariantViolation('Fee rounding mode is unsupported');
   }
 
-  const version = config.version;
-  const market = config.market;
-  const currency = config.currency;
-  const roundingDecimals = config.roundingDecimals;
+  const version = snapshot.version;
+  const market = snapshot.market;
+  const currency = snapshot.currency;
+  const roundingDecimals = snapshot.roundingDecimals;
   const commissionRate = readConfiguredRate(
-    config.commissionRate,
+    snapshot.commissionRate,
     'Commission rate',
   );
-  const sellTaxRate = readConfiguredRate(config.sellTaxRate, 'Sell tax rate');
-  const roundingMode = roundingModes[config.roundingMode];
+  const sellTaxRate = readConfiguredRate(snapshot.sellTaxRate, 'Sell tax rate');
+  const roundingMode = roundingModes[snapshot.roundingMode];
 
   return {
     version,
     market,
     currency,
     calculate(input): DecimalString {
-      if (typeof input !== 'object' || input === null) {
-        throw new DomainError(
-          'INVALID_ORDER',
-          'Fee calculation input must be an object',
-        );
-      }
-      if (input.market !== market) {
+      const calculation = snapshotFeeCalculationInput(input);
+      if (calculation.market !== market) {
         throw new DomainError(
           'INVALID_ORDER',
           'Fee model does not cover the order market',
         );
       }
-      if (input.side !== 'BUY' && input.side !== 'SELL') {
+      if (calculation.side !== 'BUY' && calculation.side !== 'SELL') {
         throw new DomainError('INVALID_ORDER', 'Order side is invalid');
       }
 
-      const quantity = readQuantity(input.quantity);
+      const quantity = readQuantity(calculation.quantity);
       const notional = assertExactMoney(
-        readPrice(input.price).mul(quantity.toString()),
+        readPrice(calculation.price).mul(quantity.toString()),
         'Fee notional',
       );
       const commission = assertExactMoney(
@@ -193,7 +229,7 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
         'Commission amount',
       );
       const sellTax =
-        input.side === 'SELL'
+        calculation.side === 'SELL'
           ? assertExactMoney(notional.mul(sellTaxRate), 'Sell tax amount')
           : readExactMoney('0', 'INVARIANT_VIOLATION', 'Sell tax amount');
       const rawFee = assertExactMoney(

@@ -71,6 +71,14 @@ export interface ExecutionResult {
   readonly terminalReason?: 'IOC_REMAINDER' | 'PRICE_PROTECTION';
 }
 
+type ExecutionOrderSnapshot = Omit<
+  ExecutionOrder,
+  'filledQuantity' | 'limitPrice'
+> & {
+  readonly filledQuantity: Quantity | undefined;
+  readonly limitPrice: DecimalString | undefined;
+};
+
 function invalidOrder(message: string): never {
   throw new DomainError('INVALID_ORDER', message);
 }
@@ -161,10 +169,42 @@ function readNonNegativeWhole(value: Quantity, description: string) {
   }
 }
 
-function assertProtection(protection: PriceProtection): void {
+function snapshotOrder(order: ExecutionOrder): ExecutionOrderSnapshot {
+  if (typeof order !== 'object' || order === null) {
+    invalidOrder('Execution order must be an object');
+  }
+  try {
+    return {
+      id: order.id,
+      side: order.side,
+      type: order.type,
+      market: order.market,
+      currency: order.currency,
+      symbol: order.symbol,
+      quantity: order.quantity,
+      filledQuantity: order.filledQuantity,
+      limitPrice: order.limitPrice,
+    };
+  } catch {
+    invalidOrder('Execution order properties must be readable');
+  }
+}
+
+function snapshotProtection(protection: PriceProtection): PriceProtection {
   if (typeof protection !== 'object' || protection === null) {
     invalidOrder('Price protection must be an object');
   }
+  try {
+    return {
+      referenceMid: protection.referenceMid,
+      maxDeviationBps: protection.maxDeviationBps,
+    };
+  } catch {
+    invalidOrder('Price protection properties must be readable');
+  }
+}
+
+function assertProtection(protection: PriceProtection): void {
   readPositivePrice(protection.referenceMid, 'Protection reference mid');
   if (
     !Number.isSafeInteger(protection.maxDeviationBps) ||
@@ -199,10 +239,8 @@ export function withinProtection(
   return scaledDeviation.lte(permittedDeviation);
 }
 
-function assertOrder(order: ExecutionOrder) {
+function assertOrder(order: ExecutionOrderSnapshot) {
   if (
-    typeof order !== 'object' ||
-    order === null ||
     typeof order.id !== 'string' ||
     order.id.trim().length === 0 ||
     typeof order.symbol !== 'string' ||
@@ -246,16 +284,50 @@ function assertOrder(order: ExecutionOrder) {
   return { quantity, filled };
 }
 
-function assertBook(order: ExecutionOrder, book: OrderBookSnapshot): void {
+function snapshotBookLevels(
+  levels: readonly OrderBookLevel[],
+): OrderBookLevel[] {
+  const snapshot: OrderBookLevel[] = [];
+  for (const level of levels) {
+    snapshot.push({
+      price: level?.price as DecimalString,
+      volume: level?.volume as Quantity,
+    });
+  }
+  return snapshot;
+}
+
+function snapshotBook(book: OrderBookSnapshot): OrderBookSnapshot {
+  if (typeof book !== 'object' || book === null) {
+    invalidOrder('Order book must be an object');
+  }
+  try {
+    const symbol = book.symbol;
+    const market = book.market;
+    const currency = book.currency;
+    const bids = book.bids;
+    const asks = book.asks;
+    if (!Array.isArray(bids) || !Array.isArray(asks)) {
+      invalidOrder('Order book sides must be arrays');
+    }
+    return {
+      symbol,
+      market,
+      currency,
+      bids: snapshotBookLevels(bids),
+      asks: snapshotBookLevels(asks),
+    };
+  } catch {
+    invalidOrder('Order book properties must be readable');
+  }
+}
+
+function assertBook(order: ExecutionOrderSnapshot, book: OrderBookSnapshot) {
   if (
-    typeof book !== 'object' ||
-    book === null ||
     typeof book.symbol !== 'string' ||
     book.symbol !== order.symbol ||
     book.market !== order.market ||
-    book.currency !== order.currency ||
-    !Array.isArray(book.bids) ||
-    !Array.isArray(book.asks)
+    book.currency !== order.currency
   ) {
     invalidOrder('Order book does not match the execution order');
   }
@@ -265,13 +337,17 @@ function assertBook(order: ExecutionOrder, book: OrderBookSnapshot): void {
 
   const validatedBids = book.bids.map((level, index) => ({
     index,
-    price: readPositivePrice(level?.price, 'Bid price'),
-    volume: readPositiveWhole(level?.volume, 'Bid volume'),
+    inputPrice: level.price,
+    inputVolume: level.volume,
+    price: readPositivePrice(level.price, 'Bid price'),
+    volume: readPositiveWhole(level.volume, 'Bid volume'),
   }));
   const validatedAsks = book.asks.map((level, index) => ({
     index,
-    price: readPositivePrice(level?.price, 'Ask price'),
-    volume: readPositiveWhole(level?.volume, 'Ask volume'),
+    inputPrice: level.price,
+    inputVolume: level.volume,
+    price: readPositivePrice(level.price, 'Ask price'),
+    volume: readPositiveWhole(level.volume, 'Ask volume'),
   }));
 
   for (let index = 1; index < validatedBids.length; index += 1) {
@@ -309,6 +385,8 @@ function assertBook(order: ExecutionOrder, book: OrderBookSnapshot): void {
       'Order book must not be locked or crossed',
     );
   }
+
+  return { bids: validatedBids, asks: validatedAsks };
 }
 
 export function calculateExecution(
@@ -317,9 +395,12 @@ export function calculateExecution(
   feeModel: FeeModel,
   protection: PriceProtection,
 ): ExecutionResult {
-  const { quantity, filled } = assertOrder(order);
-  assertProtection(protection);
-  assertBook(order, book);
+  const orderSnapshot = snapshotOrder(order);
+  const { quantity, filled } = assertOrder(orderSnapshot);
+  const protectionSnapshot = snapshotProtection(protection);
+  assertProtection(protectionSnapshot);
+  const bookSnapshot = snapshotBook(book);
+  const validatedBook = assertBook(orderSnapshot, bookSnapshot);
   if (typeof feeModel !== 'object' || feeModel === null) {
     throw new DomainError(
       'INVARIANT_VIOLATION',
@@ -345,8 +426,8 @@ export function calculateExecution(
     );
   }
   if (
-    feeModelMarket !== order.market ||
-    feeModelCurrency !== order.currency ||
+    feeModelMarket !== orderSnapshot.market ||
+    feeModelCurrency !== orderSnapshot.currency ||
     typeof feeModelVersion !== 'string' ||
     feeModelVersion.trim().length === 0 ||
     typeof feeModelCalculate !== 'function'
@@ -368,39 +449,37 @@ export function calculateExecution(
   let protectionStopped = false;
   const fills: ExecutionFill[] = [];
   const consumedLevels: ConsumedOrderBookLevel[] = [];
-  const levels = order.side === 'BUY' ? book.asks : book.bids;
-  const levelSide = order.side === 'BUY' ? 'ASK' : 'BID';
+  const levels =
+    orderSnapshot.side === 'BUY' ? validatedBook.asks : validatedBook.bids;
+  const levelSide = orderSnapshot.side === 'BUY' ? 'ASK' : 'BID';
   const marketStyle =
-    order.type === 'MARKET' ||
-    ((order.type === 'STOP' || order.type === 'TAKE_PROFIT') &&
-      order.limitPrice === undefined);
+    orderSnapshot.type === 'MARKET' ||
+    ((orderSnapshot.type === 'STOP' || orderSnapshot.type === 'TAKE_PROFIT') &&
+      orderSnapshot.limitPrice === undefined);
   const limitPrice =
-    order.limitPrice === undefined
+    orderSnapshot.limitPrice === undefined
       ? undefined
-      : readPositivePrice(order.limitPrice, 'Limit price');
+      : readPositivePrice(orderSnapshot.limitPrice, 'Limit price');
 
-  for (const [index, level] of levels.entries()) {
+  for (const level of levels) {
     if (remaining === 0n) {
       break;
     }
-    const levelPrice = readPositivePrice(level.price, 'Order book level price');
-    const levelVolume = readPositiveWhole(
-      level.volume,
-      'Order book level volume',
-    );
+    const levelPrice = level.price;
+    const levelVolume = level.volume;
     if (
       limitPrice !== undefined &&
-      ((order.side === 'BUY' && levelPrice.gt(limitPrice)) ||
-        (order.side === 'SELL' && levelPrice.lt(limitPrice)))
+      ((orderSnapshot.side === 'BUY' && levelPrice.gt(limitPrice)) ||
+        (orderSnapshot.side === 'SELL' && levelPrice.lt(limitPrice)))
     ) {
       break;
     }
     if (
       marketStyle &&
       !withinProtection(
-        level.price,
-        protection.referenceMid,
-        protection.maxDeviationBps,
+        level.inputPrice,
+        protectionSnapshot.referenceMid,
+        protectionSnapshot.maxDeviationBps,
       )
     ) {
       protectionStopped = true;
@@ -413,9 +492,9 @@ export function calculateExecution(
     try {
       feeValue = Reflect.apply(snapshotCalculate, feeModel, [
         {
-          market: order.market,
-          side: order.side,
-          price: level.price,
+          market: orderSnapshot.market,
+          side: orderSnapshot.side,
+          price: level.inputPrice,
           quantity: quantityString,
         },
       ]);
@@ -436,15 +515,15 @@ export function calculateExecution(
     );
 
     fills.push({
-      price: level.price,
+      price: level.inputPrice,
       quantity: quantityString,
       fee: normalizedFee,
     });
     consumedLevels.push({
       side: levelSide,
-      index,
-      price: level.price,
-      availableVolume: level.volume,
+      index: level.index,
+      price: level.inputPrice,
+      availableVolume: level.inputVolume,
       consumedQuantity: quantityString,
     });
     grossAmount = assertExactMoney(
@@ -457,13 +536,14 @@ export function calculateExecution(
 
   const filledThisRun = remainingOrderQuantity - remaining;
   const referenceNotional = assertExactMoney(
-    readPositivePrice(protection.referenceMid, 'Protection reference mid').mul(
-      filledThisRun.toString(),
-    ),
+    readPositivePrice(
+      protectionSnapshot.referenceMid,
+      'Protection reference mid',
+    ).mul(filledThisRun.toString()),
     'Execution reference notional',
   );
   const slippageAmount =
-    order.side === 'BUY'
+    orderSnapshot.side === 'BUY'
       ? assertExactMoney(
           grossAmount.minus(referenceNotional),
           'Execution slippage amount',
@@ -473,7 +553,7 @@ export function calculateExecution(
           'Execution slippage amount',
         );
   const netAmount =
-    order.side === 'BUY'
+    orderSnapshot.side === 'BUY'
       ? assertExactMoney(grossAmount.plus(feeTotal), 'Execution net amount')
       : assertExactMoney(grossAmount.minus(feeTotal), 'Execution net amount');
   const terminalReason =

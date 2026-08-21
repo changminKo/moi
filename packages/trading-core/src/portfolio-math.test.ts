@@ -345,3 +345,213 @@ describe('portfolio root guards', () => {
     },
   );
 });
+
+describe('deterministic portfolio input snapshots', () => {
+  it('reads every position field exactly once and never spreads the source', () => {
+    const reads = { symbol: 0, quantity: 0, totalCost: 0, realizedPnl: 0 };
+    const position = {
+      get symbol() {
+        reads.symbol += 1;
+        return 'AAPL';
+      },
+      get quantity() {
+        reads.quantity += 1;
+        return '1';
+      },
+      get totalCost() {
+        reads.totalCost += 1;
+        return '100';
+      },
+      get realizedPnl() {
+        reads.realizedPnl += 1;
+        return '5';
+      },
+    } as PositionCost;
+
+    const result = applyFillToPosition(position, {
+      symbol: 'AAPL',
+      side: 'BUY',
+      price: '20',
+      quantity: '1',
+      fee: '1',
+    });
+
+    expect(result).toEqual({
+      symbol: 'AAPL',
+      quantity: '2',
+      totalCost: '121',
+      realizedPnl: '5',
+    });
+    expect(reads).toEqual({
+      symbol: 1,
+      quantity: 1,
+      totalCost: 1,
+      realizedPnl: 1,
+    });
+  });
+
+  it('reads every fill field exactly once and fixes the branch before math', () => {
+    const reads = { symbol: 0, side: 0, price: 0, quantity: 0, fee: 0 };
+    const fill = {
+      get symbol() {
+        reads.symbol += 1;
+        return 'AAPL';
+      },
+      get side() {
+        reads.side += 1;
+        return reads.side === 1 ? 'BUY' : 'SELL';
+      },
+      get price() {
+        reads.price += 1;
+        return reads.price === 1 ? '20' : '999';
+      },
+      get quantity() {
+        reads.quantity += 1;
+        return reads.quantity === 1 ? '1' : '9';
+      },
+      get fee() {
+        reads.fee += 1;
+        return reads.fee === 1 ? '1' : '999';
+      },
+    } as PositionFill;
+
+    const result = applyFillToPosition(
+      {
+        symbol: 'AAPL',
+        quantity: '1',
+        totalCost: '100',
+        realizedPnl: '5',
+      },
+      fill,
+    );
+
+    expect(result).toEqual({
+      symbol: 'AAPL',
+      quantity: '2',
+      totalCost: '121',
+      realizedPnl: '5',
+    });
+    expect(reads).toEqual({
+      symbol: 1,
+      side: 1,
+      price: 1,
+      quantity: 1,
+      fee: 1,
+    });
+  });
+
+  it.each(['symbol', 'quantity', 'totalCost', 'realizedPnl'] as const)(
+    'maps a throwing position %s getter to INVARIANT_VIOLATION',
+    (field) => {
+      const position = {
+        symbol: 'AAPL',
+        quantity: '1',
+        totalCost: '100',
+        realizedPnl: '0',
+      };
+      Object.defineProperty(position, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        applyFillToPosition(position, {
+          symbol: 'AAPL',
+          side: 'BUY',
+          price: '20',
+          quantity: '1',
+          fee: '0',
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it.each(['symbol', 'side', 'price', 'quantity', 'fee'] as const)(
+    'maps a throwing fill %s getter to INVALID_ORDER',
+    (field) => {
+      const fill = {
+        symbol: 'AAPL',
+        side: 'BUY',
+        price: '20',
+        quantity: '1',
+        fee: '0',
+      } as PositionFill;
+      Object.defineProperty(fill, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        applyFillToPosition(emptyPosition('AAPL'), fill),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it.each([
+    { name: 'average cost', run: calculateAverageCost },
+    {
+      name: 'unrealized PnL',
+      run: (position: PositionCost) => calculateUnrealizedPnl(position, '120'),
+    },
+  ])('guards every position getter in $name', ({ run }) => {
+    for (const field of [
+      'symbol',
+      'quantity',
+      'totalCost',
+      'realizedPnl',
+    ] as const) {
+      const position = {
+        symbol: 'AAPL',
+        quantity: '1',
+        totalCost: '100',
+        realizedPnl: '0',
+      };
+      Object.defineProperty(position, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() => run(position)).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    }
+  });
+
+  it('does not modify successful caller-owned position or fill objects', () => {
+    const position: PositionCost = {
+      symbol: 'AAPL',
+      quantity: '1',
+      totalCost: '100',
+      realizedPnl: '5',
+    };
+    const fill: PositionFill = {
+      symbol: 'AAPL',
+      side: 'BUY',
+      price: '20',
+      quantity: '1',
+      fee: '1',
+    };
+    const before = JSON.stringify({ position, fill });
+
+    expect(applyFillToPosition(position, fill)).toEqual({
+      symbol: 'AAPL',
+      quantity: '2',
+      totalCost: '121',
+      realizedPnl: '5',
+    });
+    expect(JSON.stringify({ position, fill })).toBe(before);
+  });
+});

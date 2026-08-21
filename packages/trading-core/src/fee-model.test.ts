@@ -342,3 +342,152 @@ describe('fee model root guards', () => {
     },
   );
 });
+
+describe('deterministic fee-model input snapshots', () => {
+  it('reads every schedule field exactly once and keeps the snapshotted values', () => {
+    const reads = {
+      version: 0,
+      market: 0,
+      currency: 0,
+      commissionRate: 0,
+      sellTaxRate: 0,
+      roundingDecimals: 0,
+      roundingMode: 0,
+    };
+    const config = {
+      get version() {
+        reads.version += 1;
+        return reads.version === 1 ? 'snapshot-v1' : '';
+      },
+      get market() {
+        reads.market += 1;
+        return reads.market === 1 ? 'KR' : 'US';
+      },
+      get currency() {
+        reads.currency += 1;
+        return reads.currency === 1 ? 'KRW' : 'USD';
+      },
+      get commissionRate() {
+        reads.commissionRate += 1;
+        return reads.commissionRate === 1 ? '0.01' : '9';
+      },
+      get sellTaxRate() {
+        reads.sellTaxRate += 1;
+        return reads.sellTaxRate === 1 ? '0.02' : '9';
+      },
+      get roundingDecimals() {
+        reads.roundingDecimals += 1;
+        return reads.roundingDecimals === 1 ? 0 : 20;
+      },
+      get roundingMode() {
+        reads.roundingMode += 1;
+        return reads.roundingMode === 1 ? 'HALF_UP' : 'UP';
+      },
+    } as FeeScheduleConfig;
+
+    const model = createFeeModel(config);
+
+    expect(model).toMatchObject({
+      version: 'snapshot-v1',
+      market: 'KR',
+      currency: 'KRW',
+    });
+    expect(
+      model.calculate({
+        market: 'KR',
+        side: 'SELL',
+        price: '100',
+        quantity: '1',
+      }),
+    ).toBe('3');
+    expect(reads).toEqual({
+      version: 1,
+      market: 1,
+      currency: 1,
+      commissionRate: 1,
+      sellTaxRate: 1,
+      roundingDecimals: 1,
+      roundingMode: 1,
+    });
+  });
+
+  it.each([
+    'version',
+    'market',
+    'currency',
+    'commissionRate',
+    'sellTaxRate',
+    'roundingDecimals',
+    'roundingMode',
+  ] as const)(
+    'maps a throwing schedule %s getter to INVARIANT_VIOLATION',
+    (field) => {
+      const config = { ...krConfig };
+      Object.defineProperty(config, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() => createFeeModel(config)).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it('reads every calculation input field exactly once before calculating', () => {
+    const reads = { market: 0, side: 0, price: 0, quantity: 0 };
+    const model = createFeeModel({
+      ...krConfig,
+      commissionRate: '0',
+      sellTaxRate: '0.1',
+    });
+    const input = {
+      get market() {
+        reads.market += 1;
+        return 'KR';
+      },
+      get side() {
+        reads.side += 1;
+        return reads.side === 1 ? 'BUY' : 'SELL';
+      },
+      get price() {
+        reads.price += 1;
+        return reads.price === 1 ? '100' : '999';
+      },
+      get quantity() {
+        reads.quantity += 1;
+        return reads.quantity === 1 ? '1' : '9';
+      },
+    } as FeeCalculationInput;
+
+    expect(model.calculate(input)).toBe('0');
+    expect(reads).toEqual({ market: 1, side: 1, price: 1, quantity: 1 });
+  });
+
+  it.each(['market', 'side', 'price', 'quantity'] as const)(
+    'maps a throwing calculation %s getter to INVALID_ORDER',
+    (field) => {
+      const input = {
+        market: 'KR',
+        side: 'BUY',
+        price: '100',
+        quantity: '1',
+      };
+      Object.defineProperty(input, field, {
+        get() {
+          throw new RangeError(`cannot read ${field}`);
+        },
+      });
+
+      expect(() =>
+        createFeeModel(krConfig).calculate(input as FeeCalculationInput),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+});

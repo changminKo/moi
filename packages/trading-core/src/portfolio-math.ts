@@ -28,6 +28,39 @@ function invariantViolation(message: string): never {
   throw new DomainError('INVARIANT_VIOLATION', message);
 }
 
+function snapshotPosition(position: PositionCost): PositionCost {
+  if (typeof position !== 'object' || position === null) {
+    invariantViolation('Position must be an object');
+  }
+  try {
+    return {
+      symbol: position.symbol,
+      quantity: position.quantity,
+      totalCost: position.totalCost,
+      realizedPnl: position.realizedPnl,
+    };
+  } catch {
+    invariantViolation('Position properties must be readable');
+  }
+}
+
+function snapshotFill(fill: PositionFill): PositionFill {
+  if (typeof fill !== 'object' || fill === null) {
+    throw new DomainError('INVALID_ORDER', 'Fill must be an object');
+  }
+  try {
+    return {
+      symbol: fill.symbol,
+      side: fill.side,
+      price: fill.price,
+      quantity: fill.quantity,
+      fee: fill.fee,
+    };
+  } catch {
+    throw new DomainError('INVALID_ORDER', 'Fill properties must be readable');
+  }
+}
+
 function readFiniteDecimal(
   value: DecimalString,
   code: 'INVALID_ORDER' | 'INVALID_PRICE' | 'INVARIANT_VIOLATION',
@@ -101,22 +134,20 @@ function roundDivision(value: Decimal): Decimal {
 }
 
 function assertPosition(position: PositionCost) {
-  if (typeof position !== 'object' || position === null) {
-    invariantViolation('Position must be an object');
-  }
+  const snapshot = snapshotPosition(position);
   if (
-    typeof position.symbol !== 'string' ||
-    position.symbol.trim().length === 0
+    typeof snapshot.symbol !== 'string' ||
+    snapshot.symbol.trim().length === 0
   ) {
     invariantViolation('Position symbol must be a non-empty string');
   }
   const quantity = readWholeQuantity(
-    position.quantity,
+    snapshot.quantity,
     true,
     'Position quantity',
   );
   const totalCost = readFiniteDecimal(
-    position.totalCost,
+    snapshot.totalCost,
     'INVARIANT_VIOLATION',
     'Position total cost',
   );
@@ -127,11 +158,17 @@ function assertPosition(position: PositionCost) {
     invariantViolation('An empty position must have zero total cost');
   }
   const realizedPnl = readFiniteDecimal(
-    position.realizedPnl,
+    snapshot.realizedPnl,
     'INVARIANT_VIOLATION',
     'Position realized PnL',
   );
-  return { quantity, totalCost, realizedPnl };
+  return {
+    symbol: snapshot.symbol,
+    quantity,
+    totalCost,
+    realizedPnl,
+    realizedPnlInput: snapshot.realizedPnl,
+  };
 }
 
 export function applyFillToPosition(
@@ -139,28 +176,26 @@ export function applyFillToPosition(
   fill: PositionFill,
 ): PositionCost {
   const current = assertPosition(position);
-  if (typeof fill !== 'object' || fill === null) {
-    throw new DomainError('INVALID_ORDER', 'Fill must be an object');
-  }
+  const snapshot = snapshotFill(fill);
   if (
-    typeof fill.symbol !== 'string' ||
-    fill.symbol.trim().length === 0 ||
-    fill.symbol !== position.symbol ||
-    (fill.side !== 'BUY' && fill.side !== 'SELL')
+    typeof snapshot.symbol !== 'string' ||
+    snapshot.symbol.trim().length === 0 ||
+    snapshot.symbol !== current.symbol ||
+    (snapshot.side !== 'BUY' && snapshot.side !== 'SELL')
   ) {
     throw new DomainError(
       'INVALID_ORDER',
       'Fill identity must match the position',
     );
   }
-  const price = readPositivePrice(fill.price, 'Fill price');
-  const quantity = readWholeQuantity(fill.quantity, false, 'Fill quantity');
-  const fee = readFiniteDecimal(fill.fee, 'INVALID_ORDER', 'Fill fee');
+  const price = readPositivePrice(snapshot.price, 'Fill price');
+  const quantity = readWholeQuantity(snapshot.quantity, false, 'Fill quantity');
+  const fee = readFiniteDecimal(snapshot.fee, 'INVALID_ORDER', 'Fill fee');
   if (fee.isNegative()) {
     throw new DomainError('INVALID_ORDER', 'Fill fee must not be negative');
   }
 
-  if (fill.side === 'BUY') {
+  if (snapshot.side === 'BUY') {
     const notional = assertExactMoney(
       price.mul(quantity.toString()),
       'Portfolio buy notional',
@@ -170,12 +205,13 @@ export function applyFillToPosition(
       'Portfolio cost before fee',
     );
     return {
-      ...position,
+      symbol: current.symbol,
       quantity: (current.quantity + quantity).toString(),
       totalCost: assertExactMoney(
         costBeforeFee.plus(fee),
         'Portfolio total cost',
       ).toString(),
+      realizedPnl: current.realizedPnlInput,
     };
   }
 
@@ -211,7 +247,7 @@ export function applyFillToPosition(
   );
 
   return {
-    ...position,
+    symbol: current.symbol,
     quantity: (current.quantity - quantity).toString(),
     totalCost: liquidated
       ? '0'
