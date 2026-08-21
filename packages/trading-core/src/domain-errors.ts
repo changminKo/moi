@@ -18,15 +18,28 @@ export type DomainErrorCode =
   | 'INVALID_ORDER'
   | 'INVARIANT_VIOLATION';
 
-const retryableCodes: ReadonlySet<DomainErrorCode> = new Set([
-  'MARKET_DATA_DEGRADED',
-  'RECOVERY_IN_PROGRESS',
-  'SERVICE_UNAVAILABLE',
-  'RATE_LIMITED',
-]);
+const retryabilityByCode: Record<DomainErrorCode, boolean> = {
+  SYMBOL_NOT_TRADABLE: false,
+  MARKET_CLOSED: false,
+  MARKET_DATA_DEGRADED: true,
+  RECOVERY_IN_PROGRESS: true,
+  CANCEL_ONLY: false,
+  ACCOUNT_READ_ONLY: false,
+  SERVICE_UNAVAILABLE: true,
+  INSUFFICIENT_AVAILABLE_CASH: false,
+  INSUFFICIENT_AVAILABLE_POSITION: false,
+  PRICE_PROTECTION: false,
+  ORDER_STATE_CONFLICT: false,
+  IDEMPOTENCY_CONFLICT: false,
+  RATE_LIMITED: true,
+  CAPACITY_REACHED: false,
+  INVALID_QUANTITY: false,
+  INVALID_PRICE: false,
+  INVALID_ORDER: false,
+  INVARIANT_VIOLATION: false,
+};
 
 export interface DomainErrorOptions {
-  readonly retryable?: boolean;
   readonly retryAfterSeconds?: number;
 }
 
@@ -43,9 +56,15 @@ export class DomainError extends Error {
     super(message);
     this.name = 'DomainError';
     this.code = code;
-    this.retryable = options.retryable ?? retryableCodes.has(code);
+    this.retryable = retryabilityByCode[code];
 
     if (options.retryAfterSeconds !== undefined) {
+      if (!this.retryable) {
+        throw new RangeError(
+          'retryAfterSeconds is only valid for retryable domain errors',
+        );
+      }
+
       this.retryAfterSeconds = options.retryAfterSeconds;
     }
   }

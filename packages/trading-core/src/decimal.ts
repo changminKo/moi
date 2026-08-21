@@ -11,7 +11,16 @@ export const canonicalDecimal = (...values: Decimal.Value[]): DecimalString =>
     .toString();
 
 export function assertPositiveWholeQuantity(value: DecimalString): void {
-  const quantity = decimal(value);
+  let quantity: Decimal;
+
+  try {
+    quantity = decimal(value);
+  } catch {
+    throw new DomainError(
+      'INVALID_QUANTITY',
+      'Quantity must be a positive whole number',
+    );
+  }
 
   if (!quantity.isInteger() || !quantity.gt(0)) {
     throw new DomainError(
