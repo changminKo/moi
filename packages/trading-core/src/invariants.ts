@@ -12,9 +12,12 @@ function invariantViolation(message: string): never {
 }
 
 function nonNegativeDecimal(value: string, description: string) {
+  if (typeof value !== 'string') {
+    invariantViolation(`${description} must be a decimal string`);
+  }
   try {
     const result = decimal(value);
-    if (result.isNegative()) {
+    if (!result.isFinite() || result.isNegative()) {
       invariantViolation(`${description} must not be negative`);
     }
     return result;
@@ -24,6 +27,14 @@ function nonNegativeDecimal(value: string, description: string) {
     }
     invariantViolation(`${description} must be a decimal string`);
   }
+}
+
+function nonNegativeWholeQuantity(value: string, description: string) {
+  const result = nonNegativeDecimal(value, description);
+  if (!result.isInteger()) {
+    invariantViolation(`${description} must be a whole quantity`);
+  }
+  return result;
 }
 
 export function assertAccountInvariants(account: AccountSnapshot): void {
@@ -67,15 +78,15 @@ export function assertAccountInvariants(account: AccountSnapshot): void {
     }
     symbols.add(position.symbol);
 
-    const total = nonNegativeDecimal(
+    const total = nonNegativeWholeQuantity(
       position.total,
       `Position ${position.symbol} total`,
     );
-    const available = nonNegativeDecimal(
+    const available = nonNegativeWholeQuantity(
       position.available,
       `Position ${position.symbol} available`,
     );
-    const reserved = nonNegativeDecimal(
+    const reserved = nonNegativeWholeQuantity(
       position.reserved,
       `Position ${position.symbol} reserved`,
     );

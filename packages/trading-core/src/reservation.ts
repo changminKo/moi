@@ -51,6 +51,31 @@ export interface ReservationOrder {
 }
 
 const priceProtectionMultiplier = decimal('1.05');
+const orderStatuses = new Set<string>([
+  'RECEIVED',
+  'PENDING_TRIGGER',
+  'TRIGGERED',
+  'OPEN',
+  'PARTIALLY_FILLED',
+  'FILLED',
+  'CANCELLED',
+  'EXPIRED',
+  'REJECTED',
+]);
+const sides = new Set<string>(['BUY', 'SELL']);
+const reservationOrderTypes = new Set<string>([
+  'MARKET',
+  'LIMIT',
+  'STOP',
+  'TAKE_PROFIT',
+]);
+const currencies = new Set<string>(['KRW', 'USD']);
+const terminalStatuses = new Set<string>([
+  'FILLED',
+  'CANCELLED',
+  'EXPIRED',
+  'REJECTED',
+]);
 
 function invalidOrder(message: string): never {
   throw new DomainError('INVALID_ORDER', message);
@@ -65,8 +90,15 @@ function readDecimal(
   code: 'INVALID_ORDER' | 'INVARIANT_VIOLATION',
   description: string,
 ) {
+  if (typeof value !== 'string') {
+    throw new DomainError(code, `${description} must be a decimal string`);
+  }
   try {
-    return decimal(value);
+    const result = decimal(value);
+    if (!result.isFinite()) {
+      throw new Error('Decimal must be finite');
+    }
+    return result;
   } catch {
     throw new DomainError(code, `${description} must be a decimal string`);
   }
@@ -96,6 +128,17 @@ function assertNonNegativeWhole(value: DecimalString, description: string) {
   const result = readDecimal(value, 'INVALID_ORDER', description);
   if (!result.isInteger() || result.isNegative()) {
     invalidOrder(`${description} must be a non-negative whole quantity`);
+  }
+  return result;
+}
+
+function assertNonNegativeInvariantWhole(
+  value: DecimalString,
+  description: string,
+) {
+  const result = assertNonNegative(value, 'INVARIANT_VIOLATION', description);
+  if (!result.isInteger()) {
+    invariantViolation(`${description} must be a whole quantity`);
   }
   return result;
 }
@@ -130,19 +173,16 @@ function assertPositionSnapshot(position: PositionSnapshot): void {
     invariantViolation('Position symbol must not be empty');
   }
 
-  const total = assertNonNegative(
+  const total = assertNonNegativeInvariantWhole(
     position.total,
-    'INVARIANT_VIOLATION',
     'Position total quantity',
   );
-  const available = assertNonNegative(
+  const available = assertNonNegativeInvariantWhole(
     position.available,
-    'INVARIANT_VIOLATION',
     'Position available quantity',
   );
-  const reserved = assertNonNegative(
+  const reserved = assertNonNegativeInvariantWhole(
     position.reserved,
-    'INVARIANT_VIOLATION',
     'Position reserved quantity',
   );
   if (!total.eq(available.plus(reserved))) {
@@ -181,9 +221,8 @@ export function reservePosition(
   quantity: Quantity,
 ): PositionSnapshot {
   assertPositionSnapshot(position);
-  const requested = assertNonNegative(
+  const requested = assertNonNegativeInvariantWhole(
     quantity,
-    'INVARIANT_VIOLATION',
     'Position reservation',
   );
   const available = decimal(position.available);
@@ -221,11 +260,9 @@ export function releaseReservation(
     assertPositionSnapshot(asset);
   }
 
-  const requested = assertNonNegative(
-    amount,
-    'INVARIANT_VIOLATION',
-    'Reservation release',
-  );
+  const requested = isWallet
+    ? assertNonNegative(amount, 'INVARIANT_VIOLATION', 'Reservation release')
+    : assertNonNegativeInvariantWhole(amount, 'Reservation release');
   const reserved = decimal(asset.reserved);
   if (reserved.lt(requested)) {
     invariantViolation('Reservation release exceeds reserved balance');
@@ -239,11 +276,89 @@ export function releaseReservation(
   };
 }
 
-function remainingQuantity(order: ReservationOrder) {
-  if (order.id.trim().length === 0 || order.symbol.trim().length === 0) {
-    invalidOrder('Reservation order must identify an order and symbol');
+function assertReservationOrderShape(
+  order: unknown,
+): asserts order is ReservationOrder {
+  if (typeof order !== 'object' || order === null) {
+    invalidOrder('Reservation order must be an object');
   }
 
+  const candidate = order as Record<string, unknown>;
+  if (
+    typeof candidate.id !== 'string' ||
+    candidate.id.trim().length === 0 ||
+    typeof candidate.symbol !== 'string' ||
+    candidate.symbol.trim().length === 0 ||
+    typeof candidate.quantity !== 'string' ||
+    typeof candidate.status !== 'string' ||
+    !orderStatuses.has(candidate.status) ||
+    typeof candidate.side !== 'string' ||
+    !sides.has(candidate.side) ||
+    typeof candidate.type !== 'string' ||
+    !reservationOrderTypes.has(candidate.type) ||
+    typeof candidate.currency !== 'string' ||
+    !currencies.has(candidate.currency)
+  ) {
+    invalidOrder('Reservation order has an invalid identity or discriminant');
+  }
+
+  for (const field of [
+    'filledQuantity',
+    'limitPrice',
+    'referencePrice',
+    'estimatedFee',
+  ]) {
+    const value = candidate[field];
+    if (value !== undefined && typeof value !== 'string') {
+      invalidOrder(`${field} must be a decimal string when present`);
+    }
+  }
+
+  const isLimit = candidate.type === 'LIMIT';
+  if (
+    (isLimit &&
+      (candidate.limitPrice === undefined ||
+        candidate.referencePrice !== undefined)) ||
+    (!isLimit &&
+      (candidate.referencePrice === undefined ||
+        candidate.limitPrice !== undefined))
+  ) {
+    invalidOrder('Order price fields do not match its order type');
+  }
+
+  if (candidate.limitPrice !== undefined) {
+    const limitPrice = readDecimal(
+      candidate.limitPrice as DecimalString,
+      'INVALID_ORDER',
+      'Limit price',
+    );
+    if (!limitPrice.gt(0)) {
+      throw new DomainError('INVALID_PRICE', 'Limit price must be positive');
+    }
+  }
+  if (candidate.referencePrice !== undefined) {
+    const referencePrice = readDecimal(
+      candidate.referencePrice as DecimalString,
+      'INVALID_ORDER',
+      'Reference price',
+    );
+    if (!referencePrice.gt(0)) {
+      throw new DomainError(
+        'INVALID_PRICE',
+        'Reference price must be positive',
+      );
+    }
+  }
+  if (candidate.estimatedFee !== undefined) {
+    assertNonNegative(
+      candidate.estimatedFee as DecimalString,
+      'INVALID_ORDER',
+      'Estimated fee',
+    );
+  }
+}
+
+function remainingQuantity(order: ReservationOrder) {
   const quantity = assertPositiveWhole(order.quantity, 'Order quantity');
   const filled = assertNonNegativeWhole(
     order.filledQuantity ?? '0',
@@ -251,6 +366,22 @@ function remainingQuantity(order: ReservationOrder) {
   );
   if (filled.gt(quantity)) {
     invalidOrder('Filled quantity must not exceed order quantity');
+  }
+  if (
+    (order.status === 'FILLED' &&
+      (order.filledQuantity === undefined || !filled.eq(quantity))) ||
+    (order.status === 'REJECTED' && !filled.isZero()) ||
+    (order.status === 'PARTIALLY_FILLED' &&
+      (order.filledQuantity === undefined ||
+        !filled.gt(0) ||
+        !filled.lt(quantity))) ||
+    ((order.status === 'RECEIVED' ||
+      order.status === 'PENDING_TRIGGER' ||
+      order.status === 'TRIGGERED' ||
+      order.status === 'OPEN') &&
+      !filled.isZero())
+  ) {
+    invalidOrder('Filled quantity is inconsistent with order status');
   }
   return quantity.minus(filled);
 }
@@ -267,36 +398,23 @@ function plannedBuyCash(
   if (remaining.isZero()) {
     return { currency: order.currency, amount: '0' };
   }
-  const isLimitBuy = order.type === 'LIMIT' || order.limitPrice !== undefined;
-  if (isLimitBuy) {
-    if (order.limitPrice === undefined) {
-      invalidOrder('Limit buy reservation requires a limit price');
-    }
+  if (order.type === 'LIMIT') {
     const limitPrice = readDecimal(
-      order.limitPrice,
+      order.limitPrice as DecimalString,
       'INVALID_ORDER',
       'Limit price',
     );
-    if (!limitPrice.gt(0)) {
-      throw new DomainError('INVALID_PRICE', 'Limit price must be positive');
-    }
     return {
       currency: order.currency,
       amount: remaining.mul(limitPrice).plus(fee).toString(),
     };
   }
 
-  if (order.referencePrice === undefined) {
-    invalidOrder('Market buy reservation requires a reference price');
-  }
   const referencePrice = readDecimal(
-    order.referencePrice,
+    order.referencePrice as DecimalString,
     'INVALID_ORDER',
     'Reference price',
   );
-  if (!referencePrice.gt(0)) {
-    throw new DomainError('INVALID_PRICE', 'Reference price must be positive');
-  }
   return {
     currency: order.currency,
     amount: remaining
@@ -308,7 +426,13 @@ function plannedBuyCash(
 }
 
 export function planReservation(order: ReservationOrder): ReservationPlan {
+  assertReservationOrderShape(order);
   const remaining = remainingQuantity(order);
+  if (terminalStatuses.has(order.status)) {
+    return order.side === 'BUY'
+      ? { cash: { currency: order.currency, amount: '0' } }
+      : { position: { symbol: order.symbol, quantity: '0' } };
+  }
   if (order.side === 'BUY') {
     return { cash: plannedBuyCash(order, remaining) };
   }
@@ -318,11 +442,17 @@ export function planReservation(order: ReservationOrder): ReservationPlan {
 export function planOcoReservation(
   legs: readonly [ReservationOrder, ReservationOrder],
 ): ReservationPlan {
+  if (!Array.isArray(legs) || legs.length !== 2) {
+    invalidOrder('OCO reservation must contain exactly two legs');
+  }
   const [first, second] = legs;
+  assertReservationOrderShape(first);
+  assertReservationOrderShape(second);
   if (
     first.side !== second.side ||
     first.currency !== second.currency ||
-    first.symbol !== second.symbol
+    first.symbol !== second.symbol ||
+    first.id === second.id
   ) {
     invalidOrder(
       'OCO reservation legs must have the same side, currency, and symbol',
