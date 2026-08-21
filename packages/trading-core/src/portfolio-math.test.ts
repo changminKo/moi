@@ -154,6 +154,56 @@ describe('USD weighted-average cost and PnL golden', () => {
 });
 
 describe('portfolio math validation', () => {
+  it('accepts the 80-digit boundary and rejects 81-digit price input', () => {
+    const boundaryPrice = '1'.repeat(80);
+    const accepted = applyFillToPosition(emptyPosition('AAPL'), {
+      symbol: 'AAPL',
+      side: 'BUY',
+      price: boundaryPrice,
+      quantity: '1',
+      fee: '0',
+    });
+
+    expect(accepted.totalCost).toBe(boundaryPrice);
+    expect(() =>
+      applyFillToPosition(emptyPosition('AAPL'), {
+        symbol: 'AAPL',
+        side: 'BUY',
+        price: '1'.repeat(81),
+        quantity: '1',
+        fee: '0',
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'INVALID_PRICE', retryable: false }),
+    );
+  });
+
+  it.each([
+    { price: '9'.repeat(80), fee: '1', boundary: 'carry' },
+    { price: '100', fee: `0.${'0'.repeat(79)}1`, boundary: 'scale' },
+  ])(
+    'rejects portfolio $boundary overflow before mutation',
+    ({ price, fee }) => {
+      const position = emptyPosition('AAPL');
+
+      expect(() =>
+        applyFillToPosition(position, {
+          symbol: 'AAPL',
+          side: 'BUY',
+          price,
+          quantity: '1',
+          fee,
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+      expect(position).toEqual(emptyPosition('AAPL'));
+    },
+  );
+
   it('rejects a sell beyond holdings without changing the position', () => {
     const position: PositionCost = {
       symbol: 'AAPL',

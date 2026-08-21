@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 
-import { moneyDecimal } from './decimal.js';
+import { assertExactMoney, decimal, readExactMoney } from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type {
   Currency,
@@ -55,7 +55,7 @@ function readConfiguredRate(
     invariantViolation(`${description} must be a decimal string`);
   }
   try {
-    const rate = moneyDecimal(value);
+    const rate = readExactMoney(value, 'INVARIANT_VIOLATION', description);
     if (!rate.isFinite() || rate.isNegative()) {
       invariantViolation(
         `${description} must be a finite non-negative decimal`,
@@ -75,7 +75,7 @@ function readPrice(value: DecimalString): Decimal {
     throw new DomainError('INVALID_PRICE', 'Price must be a decimal string');
   }
   try {
-    const price = moneyDecimal(value);
+    const price = readExactMoney(value, 'INVALID_PRICE', 'Price');
     if (!price.isFinite() || !price.gt(0)) {
       throw new DomainError('INVALID_PRICE', 'Price must be positive');
     }
@@ -88,7 +88,7 @@ function readPrice(value: DecimalString): Decimal {
   }
 }
 
-function readQuantity(value: Quantity): Decimal {
+function readQuantity(value: Quantity): bigint {
   if (typeof value !== 'string') {
     throw new DomainError(
       'INVALID_QUANTITY',
@@ -96,14 +96,14 @@ function readQuantity(value: Quantity): Decimal {
     );
   }
   try {
-    const quantity = moneyDecimal(value);
+    const quantity = decimal(value);
     if (!quantity.isFinite() || !quantity.isInteger() || !quantity.gt(0)) {
       throw new DomainError(
         'INVALID_QUANTITY',
         'Quantity must be a positive whole number',
       );
     }
-    return quantity;
+    return BigInt(quantity.toFixed());
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -174,11 +174,27 @@ export function createFeeModel(config: FeeScheduleConfig): FeeModel {
         throw new DomainError('INVALID_ORDER', 'Order side is invalid');
       }
 
-      const notional = readPrice(input.price).mul(readQuantity(input.quantity));
-      const rawFee = notional
-        .mul(commissionRate)
-        .plus(input.side === 'SELL' ? notional.mul(sellTaxRate) : 0);
-      return rawFee.toDecimalPlaces(roundingDecimals, roundingMode).toString();
+      const quantity = readQuantity(input.quantity);
+      const notional = assertExactMoney(
+        readPrice(input.price).mul(quantity.toString()),
+        'Fee notional',
+      );
+      const commission = assertExactMoney(
+        notional.mul(commissionRate),
+        'Commission amount',
+      );
+      const sellTax =
+        input.side === 'SELL'
+          ? assertExactMoney(notional.mul(sellTaxRate), 'Sell tax amount')
+          : readExactMoney('0', 'INVARIANT_VIOLATION', 'Sell tax amount');
+      const rawFee = assertExactMoney(
+        commission.plus(sellTax),
+        'Combined fee amount',
+      );
+      return assertExactMoney(
+        rawFee.toDecimalPlaces(roundingDecimals, roundingMode),
+        'Rounded fee amount',
+      ).toString();
     },
   };
 }

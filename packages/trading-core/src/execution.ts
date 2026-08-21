@@ -1,4 +1,9 @@
-import { decimal, moneyDecimal } from './decimal.js';
+import {
+  assertExactMoney,
+  decimal,
+  moneyDecimal,
+  readExactMoney,
+} from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type {
   Currency,
@@ -79,21 +84,14 @@ function invalidQuantity(message: string): never {
 }
 
 function readFeeModelFee(value: unknown) {
-  if (typeof value !== 'string') {
+  if (typeof value !== 'string' || value.startsWith('-')) {
     throw new DomainError(
       'INVARIANT_VIOLATION',
       'Fee model returned an invalid fee',
     );
   }
   try {
-    const fee = moneyDecimal(value);
-    if (!fee.isFinite() || fee.isNegative()) {
-      throw new DomainError(
-        'INVARIANT_VIOLATION',
-        'Fee model returned an invalid fee',
-      );
-    }
-    return fee;
+    return readExactMoney(value, 'INVARIANT_VIOLATION', 'Fee model result');
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -110,7 +108,7 @@ function readPositivePrice(value: DecimalString, description: string) {
     invalidPrice(`${description} must be a decimal string`);
   }
   try {
-    const price = moneyDecimal(value);
+    const price = readExactMoney(value, 'INVALID_PRICE', description);
     if (!price.isFinite() || !price.gt(0)) {
       invalidPrice(`${description} must be positive`);
     }
@@ -183,12 +181,19 @@ export function withinProtection(
   if (!Number.isSafeInteger(bps) || bps < 0) {
     invalidOrder('Protection basis points must be a non-negative integer');
   }
-  return executionPrice
-    .minus(referenceMid)
-    .abs()
-    .div(referenceMid)
-    .mul(10_000)
-    .lte(bps);
+  const deviation = assertExactMoney(
+    executionPrice.minus(referenceMid).abs(),
+    'Price protection deviation',
+  );
+  const scaledDeviation = assertExactMoney(
+    deviation.mul(10_000),
+    'Scaled price protection deviation',
+  );
+  const permittedDeviation = assertExactMoney(
+    referenceMid.mul(bps.toString()),
+    'Permitted price protection deviation',
+  );
+  return scaledDeviation.lte(permittedDeviation);
 }
 
 function assertOrder(order: ExecutionOrder) {
@@ -313,10 +318,13 @@ export function calculateExecution(
   assertProtection(protection);
   assertBook(order, book);
   if (
+    typeof feeModel !== 'object' ||
+    feeModel === null ||
     feeModel.market !== order.market ||
     feeModel.currency !== order.currency ||
     typeof feeModel.version !== 'string' ||
-    feeModel.version.trim().length === 0
+    feeModel.version.trim().length === 0 ||
+    typeof feeModel.calculate !== 'function'
   ) {
     throw new DomainError(
       'INVARIANT_VIOLATION',
@@ -381,9 +389,17 @@ export function calculateExecution(
       quantity: quantityString,
     });
     const fee = readFeeModelFee(feeValue);
-    const fillNotional = levelPrice.mul(quantityString);
+    const normalizedFee = fee.toString();
+    const fillNotional = assertExactMoney(
+      levelPrice.mul(quantityString),
+      'Fill notional',
+    );
 
-    fills.push({ price: level.price, quantity: quantityString, fee: feeValue });
+    fills.push({
+      price: level.price,
+      quantity: quantityString,
+      fee: normalizedFee,
+    });
     consumedLevels.push({
       side: levelSide,
       index,
@@ -391,24 +407,35 @@ export function calculateExecution(
       availableVolume: level.volume,
       consumedQuantity: quantityString,
     });
-    grossAmount = grossAmount.plus(fillNotional);
-    feeTotal = feeTotal.plus(fee);
+    grossAmount = assertExactMoney(
+      grossAmount.plus(fillNotional),
+      'Execution gross amount',
+    );
+    feeTotal = assertExactMoney(feeTotal.plus(fee), 'Execution fee total');
     remaining -= consumed;
   }
 
   const filledThisRun = remainingOrderQuantity - remaining;
-  const referenceNotional = readPositivePrice(
-    protection.referenceMid,
-    'Protection reference mid',
-  ).mul(filledThisRun.toString());
+  const referenceNotional = assertExactMoney(
+    readPositivePrice(protection.referenceMid, 'Protection reference mid').mul(
+      filledThisRun.toString(),
+    ),
+    'Execution reference notional',
+  );
   const slippageAmount =
     order.side === 'BUY'
-      ? grossAmount.minus(referenceNotional)
-      : referenceNotional.minus(grossAmount);
+      ? assertExactMoney(
+          grossAmount.minus(referenceNotional),
+          'Execution slippage amount',
+        )
+      : assertExactMoney(
+          referenceNotional.minus(grossAmount),
+          'Execution slippage amount',
+        );
   const netAmount =
     order.side === 'BUY'
-      ? grossAmount.plus(feeTotal)
-      : grossAmount.minus(feeTotal);
+      ? assertExactMoney(grossAmount.plus(feeTotal), 'Execution net amount')
+      : assertExactMoney(grossAmount.minus(feeTotal), 'Execution net amount');
   const terminalReason =
     remaining === 0n
       ? undefined

@@ -377,6 +377,112 @@ describe('hand-calculated KRW and USD execution goldens', () => {
 });
 
 describe('book and order validation', () => {
+  it.each(['0x10', '0b10', '+1', '.5', '1.', '1e1', ' 1', '1 ', '-0', '-0.0'])(
+    'rejects non-plain custom fee output %s',
+    (fee) => {
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          { ...zeroFeeModel, calculate: () => fee },
+          protection(),
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
+  it('normalizes accepted redundant fee zeros before recording the fill', () => {
+    const result = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      { ...zeroFeeModel, calculate: () => '0001.2300' },
+      protection(),
+    );
+
+    expect(result.fills).toEqual([
+      { price: '100', quantity: '1', fee: '1.23' },
+    ]);
+    expect(result.feeTotal).toBe('1.23');
+    expect(result.netAmount).toBe('101.23');
+  });
+
+  it('accepts an exact 80-digit fee and rejects an 81-digit fee', () => {
+    const boundaryFee = '1'.repeat(80);
+    const accepted = calculateExecution(
+      orderFixture(),
+      bookFixture(),
+      { ...zeroFeeModel, calculate: () => boundaryFee },
+      protection(),
+    );
+
+    expect(accepted.fills[0]?.fee).toBe(boundaryFee);
+    expect(accepted.feeTotal).toBe(boundaryFee);
+    expect(() =>
+      calculateExecution(
+        orderFixture(),
+        bookFixture(),
+        { ...zeroFeeModel, calculate: () => '1'.repeat(81) },
+        protection(),
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
+  it.each([
+    { fee: '9'.repeat(80), boundary: 'carry' },
+    { fee: `0.${'0'.repeat(79)}1`, boundary: 'scale' },
+  ])('rejects execution $boundary overflow before returning', ({ fee }) => {
+    expect(() =>
+      calculateExecution(
+        orderFixture(),
+        bookFixture(),
+        { ...zeroFeeModel, calculate: () => fee },
+        protection(),
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
+  it.each([
+    null,
+    {
+      version: 'invalid-shape',
+      market: 'KR',
+      currency: 'KRW',
+      calculate: 'not-callable',
+    },
+  ])(
+    'rejects invalid fee model shape %# with a stable domain error',
+    (model) => {
+      expect(() =>
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          model as unknown as FeeModel,
+          protection(),
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
+
   it.each(['NaN', '-5', 'abc', 'Infinity', 12 as unknown as string])(
     'rejects fee model output %s with a stable domain error',
     (fee) => {

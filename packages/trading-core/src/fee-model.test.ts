@@ -189,6 +189,69 @@ describe('hand-calculated market fee goldens', () => {
 describe('fee calculation validation', () => {
   const model = createFeeModel(krConfig);
 
+  it('accepts the 80-digit boundary and rejects 81-digit money input', () => {
+    const boundaryPrice = '1'.repeat(80);
+    const boundaryModel = createFeeModel({
+      ...krConfig,
+      commissionRate: '1',
+      sellTaxRate: '0',
+    });
+
+    expect(
+      boundaryModel.calculate({
+        market: 'KR',
+        side: 'BUY',
+        price: boundaryPrice,
+        quantity: '1',
+      }),
+    ).toBe(boundaryPrice);
+    expect(() =>
+      createFeeModel({
+        ...krConfig,
+        commissionRate: '1'.repeat(81),
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: 'carry',
+      price: '9'.repeat(80),
+      commissionRate: '2',
+    },
+    {
+      name: 'scale',
+      price: `0.${'0'.repeat(79)}1`,
+      commissionRate: `0.${'0'.repeat(79)}1`,
+    },
+  ])('rejects fee-calculation $name overflow before rounding', (fixture) => {
+    const boundaryModel = createFeeModel({
+      ...krConfig,
+      commissionRate: fixture.commissionRate,
+      sellTaxRate: '0',
+      roundingDecimals: 20,
+    });
+
+    expect(() =>
+      boundaryModel.calculate({
+        market: 'KR',
+        side: 'BUY',
+        price: fixture.price,
+        quantity: '1',
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVARIANT_VIOLATION',
+        retryable: false,
+      }),
+    );
+  });
+
   it('rejects a market or side outside the schedule contract', () => {
     expect(() =>
       model.calculate({

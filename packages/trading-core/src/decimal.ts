@@ -5,18 +5,69 @@ import type { DecimalString } from './domain-types.js';
 
 export const decimal = (value: Decimal.Value): Decimal => new Decimal(value);
 
-// Money calculations share a deterministic 80-significant-digit bound. The
-// wide exponent range keeps public decimal strings in plain notation, while
-// quantities use exact BigInt arithmetic at their accounting boundaries.
+// Public money is plain base-10 with a bounded coefficient and exponent. The
+// internal precision is wide enough to inspect any binary operation on two
+// accepted values exactly; callers must validate every operation immediately.
 export const MONEY_PRECISION = 80;
+export const MONEY_MAX_INTEGER_DIGITS = 80;
+export const MONEY_MAX_DECIMAL_PLACES = 80;
+const MONEY_OPERATION_PRECISION = MONEY_PRECISION * 2 + 1;
+const MAX_PLAIN_MONEY_LENGTH =
+  MONEY_MAX_INTEGER_DIGITS + MONEY_MAX_DECIMAL_PLACES + 2;
 const MoneyDecimal = Decimal.clone({
-  precision: MONEY_PRECISION,
+  precision: MONEY_OPERATION_PRECISION,
   toExpNeg: -9e15,
   toExpPos: 9e15,
 });
 
 export const moneyDecimal = (value: Decimal.Value): Decimal =>
   new MoneyDecimal(value);
+
+type MoneyErrorCode = 'INVALID_ORDER' | 'INVALID_PRICE' | 'INVARIANT_VIOLATION';
+
+function moneyDomainError(code: MoneyErrorCode, description: string): never {
+  throw new DomainError(code, `${description} exceeds the exact money domain`);
+}
+
+export function assertExactMoney(
+  value: Decimal,
+  description: string,
+  code: MoneyErrorCode = 'INVARIANT_VIOLATION',
+): Decimal {
+  const integerDigits = value.isZero() ? 1 : Math.max(value.e + 1, 1);
+  if (
+    !value.isFinite() ||
+    value.precision() > MONEY_PRECISION ||
+    integerDigits > MONEY_MAX_INTEGER_DIGITS ||
+    value.decimalPlaces() > MONEY_MAX_DECIMAL_PLACES
+  ) {
+    moneyDomainError(code, description);
+  }
+  return value;
+}
+
+export function readExactMoney(
+  value: unknown,
+  code: MoneyErrorCode,
+  description: string,
+): Decimal {
+  if (
+    typeof value !== 'string' ||
+    value.length > MAX_PLAIN_MONEY_LENGTH ||
+    value.match(/-?[0-9]+(?:\.[0-9]+)?/u)?.[0] !== value
+  ) {
+    moneyDomainError(code, description);
+  }
+
+  try {
+    return assertExactMoney(moneyDecimal(value), description, code);
+  } catch (error) {
+    if (error instanceof DomainError) {
+      throw error;
+    }
+    moneyDomainError(code, description);
+  }
+}
 
 export const canonicalDecimal = (...values: Decimal.Value[]): DecimalString =>
   values

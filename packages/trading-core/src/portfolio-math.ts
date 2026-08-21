@@ -1,6 +1,6 @@
 import { Decimal } from 'decimal.js';
 
-import { decimal, moneyDecimal } from './decimal.js';
+import { assertExactMoney, decimal, readExactMoney } from './decimal.js';
 import { DomainError } from './domain-errors.js';
 import type { DecimalString, Quantity, Side } from './domain-types.js';
 
@@ -37,7 +37,7 @@ function readFiniteDecimal(
     throw new DomainError(code, `${description} must be a decimal string`);
   }
   try {
-    const result = moneyDecimal(value);
+    const result = readExactMoney(value, code, description);
     if (!result.isFinite()) {
       throw new DomainError(code, `${description} must be finite`);
     }
@@ -94,7 +94,10 @@ function readWholeQuantity(
 }
 
 function roundDivision(value: Decimal): Decimal {
-  return value.toDecimalPlaces(DIVISION_DECIMAL_PLACES, Decimal.ROUND_HALF_UP);
+  return assertExactMoney(
+    value.toDecimalPlaces(DIVISION_DECIMAL_PLACES, Decimal.ROUND_HALF_UP),
+    'Rounded portfolio division',
+  );
 }
 
 function assertPosition(position: PositionCost) {
@@ -152,13 +155,21 @@ export function applyFillToPosition(
   }
 
   if (fill.side === 'BUY') {
+    const notional = assertExactMoney(
+      price.mul(quantity.toString()),
+      'Portfolio buy notional',
+    );
+    const costBeforeFee = assertExactMoney(
+      current.totalCost.plus(notional),
+      'Portfolio cost before fee',
+    );
     return {
       ...position,
       quantity: (current.quantity + quantity).toString(),
-      totalCost: current.totalCost
-        .plus(price.mul(quantity.toString()))
-        .plus(fee)
-        .toString(),
+      totalCost: assertExactMoney(
+        costBeforeFee.plus(fee),
+        'Portfolio total cost',
+      ).toString(),
     };
   }
 
@@ -172,25 +183,40 @@ export function applyFillToPosition(
   const calculatedCostRemoved = liquidated
     ? current.totalCost
     : roundDivision(
-        current.totalCost
-          .mul(quantity.toString())
-          .div(current.quantity.toString()),
+        assertExactMoney(
+          current.totalCost.mul(quantity.toString()),
+          'Weighted cost numerator',
+        ).div(current.quantity.toString()),
       );
   const costRemoved = calculatedCostRemoved.gt(current.totalCost)
     ? current.totalCost
     : calculatedCostRemoved;
-  const realizedDelta = price
-    .mul(quantity.toString())
-    .minus(fee)
-    .minus(costRemoved);
+  const proceeds = assertExactMoney(
+    price.mul(quantity.toString()),
+    'Portfolio sell proceeds',
+  );
+  const proceedsAfterFee = assertExactMoney(
+    proceeds.minus(fee),
+    'Portfolio proceeds after fee',
+  );
+  const realizedDelta = assertExactMoney(
+    proceedsAfterFee.minus(costRemoved),
+    'Portfolio realized delta',
+  );
 
   return {
     ...position,
     quantity: (current.quantity - quantity).toString(),
     totalCost: liquidated
       ? '0'
-      : current.totalCost.minus(costRemoved).toString(),
-    realizedPnl: current.realizedPnl.plus(realizedDelta).toString(),
+      : assertExactMoney(
+          current.totalCost.minus(costRemoved),
+          'Remaining portfolio cost',
+        ).toString(),
+    realizedPnl: assertExactMoney(
+      current.realizedPnl.plus(realizedDelta),
+      'Portfolio realized PnL',
+    ).toString(),
   };
 }
 
@@ -207,5 +233,12 @@ export function calculateUnrealizedPnl(
 ): DecimalString {
   const { quantity, totalCost } = assertPosition(position);
   const price = readPositivePrice(currentPrice, 'Current price');
-  return price.mul(quantity.toString()).minus(totalCost).toString();
+  const marketValue = assertExactMoney(
+    price.mul(quantity.toString()),
+    'Portfolio market value',
+  );
+  return assertExactMoney(
+    marketValue.minus(totalCost),
+    'Portfolio unrealized PnL',
+  ).toString();
 }

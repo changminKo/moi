@@ -100,6 +100,49 @@ const decimalFromScaledInteger = (value: bigint, scale: number): string => {
 };
 
 describe('execution metamorphic properties', () => {
+  it('classifies exact integer and scale money boundaries', () => {
+    assertProperty(
+      fc.property(
+        fc.constantFrom('integer', 'scale'),
+        fc.integer({ min: 79, max: 81 }),
+        (kind, width) => {
+          const price =
+            kind === 'integer'
+              ? `1${'0'.repeat(width - 1)}`
+              : `0.${'0'.repeat(width - 1)}1`;
+          const apply = () =>
+            applyFillToPosition(
+              {
+                symbol: 'BOUNDARY',
+                quantity: '0',
+                totalCost: '0',
+                realizedPnl: '0',
+              },
+              {
+                symbol: 'BOUNDARY',
+                side: 'BUY',
+                price,
+                quantity: '1',
+                fee: '0',
+              },
+            );
+
+          if (width <= 80) {
+            expect(apply().totalCost).toBe(price);
+          } else {
+            expect(apply).toThrowError(
+              expect.objectContaining({
+                code: 'INVALID_PRICE',
+                retryable: false,
+              }),
+            );
+          }
+          return true;
+        },
+      ),
+    );
+  });
+
   it('conserves remaining quantity across generated deterministic walks', () => {
     assertProperty(
       fc.property(walkFixtureArbitrary, (fixture) => {
