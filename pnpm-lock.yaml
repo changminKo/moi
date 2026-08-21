@@ -34,6 +34,10 @@ importers:
       '@skipjack/trading-core':
         specifier: workspace:*
         version: link:../trading-core
+    devDependencies:
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3))
 
   packages/trading-core:
     dependencies:

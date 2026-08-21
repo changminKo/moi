@@ -12,20 +12,18 @@ import {
   type WalletSnapshot,
 } from '@skipjack/trading-core';
 
-const MARKETS: readonly Market[] = ['KR', 'US'];
-const SIDES: readonly Side[] = ['BUY', 'SELL'];
-const ORDER_TYPES: readonly OrderType[] = [
-  'MARKET',
-  'LIMIT',
-  'STOP',
-  'TAKE_PROFIT',
-  'OCO',
-];
+import {
+  assertCommandObject,
+  assertIdentifier,
+  isPositiveMoneyAmount,
+  isPositiveWholeQuantity,
+} from './validation.js';
 
-const MAX_IDENTIFIER_LENGTH = 200;
-const MAX_PRICE_LENGTH = 82;
-const PLAIN_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u;
-const ZERO_DECIMAL = /^0(?:\.0+)?$/u;
+// Keyed by the domain union rather than listed, so adding a `Market`, a `Side`,
+// or an `OrderType` in trading-core breaks this build until the new member is
+// given a rule here.
+const MARKETS: Readonly<Record<Market, true>> = { KR: true, US: true };
+const SIDES: Readonly<Record<Side, true>> = { BUY: true, SELL: true };
 
 interface PlaceOrderCommandBase {
   readonly sessionId: string;
@@ -50,21 +48,42 @@ export interface PlaceLimitOrderCommand extends PlaceOrderCommandBase {
   readonly triggerPrice?: never;
 }
 
-/** A stop order needs a trigger; the limit price makes it a stop-limit. */
+/**
+ * A stop order is defined by its trigger and carries no limit price. That is
+ * trading-core's executable rule, not a preference: `planReservation` requires
+ * `limitPrice` to be absent for every non-`LIMIT` type and rejects the order
+ * outright otherwise, so a stop-limit is not a shape the domain can represent
+ * today. `broker.test.ts` pins this against that gate.
+ */
 export interface PlaceStopOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'STOP';
   readonly triggerPrice: DecimalString;
-  readonly limitPrice?: DecimalString;
+  readonly limitPrice?: never;
 }
 
-/** Take-profit mirrors stop: a trigger, optionally capped by a limit price. */
+/** Take-profit mirrors stop: a trigger, and no limit price, for the same reason. */
 export interface PlaceTakeProfitOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'TAKE_PROFIT';
   readonly triggerPrice: DecimalString;
-  readonly limitPrice?: DecimalString;
+  readonly limitPrice?: never;
 }
 
-/** OCO pairs a limit leg with a triggered leg, so both prices are required. */
+/**
+ * OCO pairs a limit leg with a triggered leg, so both prices are required.
+ *
+ * This is a single-command *request* shape that the server desugars into the
+ * two-leg group trading-core models: `limitPrice` becomes the `LIMIT` leg's
+ * limit price and `triggerPrice` becomes the triggered leg's reference price,
+ * which is exactly what `planOcoReservation` accepts. trading-core excludes
+ * `'OCO'` from single-order reservation (`Exclude<OrderType, 'OCO'>`), so an
+ * OCO placement is only ever the group.
+ *
+ * Known limitation: `Broker.placeOrder` returns one `OrderSnapshot`, so an OCO
+ * placement cannot name its sibling leg or its group id, and
+ * `CancelOrderCommand` cannot address the group. A strategy that needs to track
+ * or cancel both legs individually must place two separate orders — a `LIMIT`
+ * and a `STOP`/`TAKE_PROFIT` — and manage the either-or itself.
+ */
 export interface PlaceOcoOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'OCO';
   readonly limitPrice: DecimalString;
@@ -120,7 +139,20 @@ export interface PortfolioSnapshot {
   readonly accountSequence: DecimalString;
 }
 
-/** The only surface a strategy needs. Every command carries its own key. */
+/**
+ * The only surface a strategy needs. Every command carries its own key.
+ *
+ * Session semantics: the implementation owns the session — a `PaperBroker`'s
+ * transport holds the cookie — so a command's `sessionId` is a scoping
+ * assertion, not routing information. It is validated on every command and
+ * checked back against every response that names a session: `getPortfolio`
+ * compares the returned portfolio's session and `exchange` compares the
+ * receipt's, both failing with `INVARIANT_VIOLATION` on a mismatch.
+ * `placeOrder` and `cancelOrder` return an `OrderSnapshot`, which carries no
+ * session, so there is nothing to compare — a write is only ever applied to the
+ * session the implementation is bound to. Do not treat `sessionId` as a way to
+ * multiplex accounts over one broker instance; use one broker per session.
+ */
 export interface Broker {
   placeOrder(command: PlaceOrderCommand): Promise<OrderSnapshot>;
   cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot>;
@@ -128,73 +160,64 @@ export interface Broker {
   getPortfolio(sessionId: string): Promise<PortfolioSnapshot>;
 }
 
-type PriceRule = 'required' | 'optional' | 'forbidden';
+export type PriceRule = 'required' | 'optional' | 'forbidden';
 
-interface PriceRules {
+export interface PriceRules {
   readonly limitPrice: PriceRule;
   readonly triggerPrice: PriceRule;
 }
 
-// The runtime mirror of the discriminated union above, so a JavaScript caller
-// or a decoded payload is held to the same rule as a TypeScript caller.
-const PRICE_RULES: Readonly<Record<OrderType, PriceRules>> = {
-  MARKET: { limitPrice: 'forbidden', triggerPrice: 'forbidden' },
-  LIMIT: { limitPrice: 'required', triggerPrice: 'forbidden' },
-  STOP: { limitPrice: 'optional', triggerPrice: 'required' },
-  TAKE_PROFIT: { limitPrice: 'optional', triggerPrice: 'required' },
-  OCO: { limitPrice: 'required', triggerPrice: 'required' },
-};
-
-function assertIdentifier(
-  value: unknown,
-  field: string,
-): asserts value is string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > MAX_IDENTIFIER_LENGTH
-  ) {
-    throw new DomainError(
-      'INVALID_ORDER',
-      `${field} must be a non-empty identifier of at most ${MAX_IDENTIFIER_LENGTH} characters`,
-    );
-  }
-}
+/**
+ * The runtime mirror of the discriminated union above, so a JavaScript caller
+ * or a decoded payload is held to the same rule as a TypeScript caller. It is
+ * exported so a test can pin it against trading-core's own executable gates
+ * instead of restating them: no type may carry an `optional` limit price,
+ * because `planReservation` has no such rule for any type.
+ */
+export const PLACE_ORDER_PRICE_RULES: Readonly<Record<OrderType, PriceRules>> =
+  {
+    MARKET: { limitPrice: 'forbidden', triggerPrice: 'forbidden' },
+    LIMIT: { limitPrice: 'required', triggerPrice: 'forbidden' },
+    STOP: { limitPrice: 'forbidden', triggerPrice: 'required' },
+    TAKE_PROFIT: { limitPrice: 'forbidden', triggerPrice: 'required' },
+    OCO: { limitPrice: 'required', triggerPrice: 'required' },
+  };
 
 function assertMember<T extends string>(
   value: unknown,
-  allowed: readonly T[],
+  allowed: Readonly<Record<T, unknown>>,
   field: string,
 ): asserts value is T {
-  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+  // `Object.hasOwn` rather than a property read, so `__proto__` and
+  // `constructor` are rejected like any other unknown member.
+  if (typeof value !== 'string' || !Object.hasOwn(allowed, value)) {
     throw new DomainError(
       'INVALID_ORDER',
-      `${field} must be one of ${allowed.join(', ')}`,
+      `${field} must be one of ${Object.keys(allowed).join(', ')}`,
     );
   }
 }
 
 function assertPositivePrice(value: unknown, field: string): void {
-  if (
-    typeof value !== 'string' ||
-    value.length > MAX_PRICE_LENGTH ||
-    !PLAIN_DECIMAL.test(value) ||
-    ZERO_DECIMAL.test(value)
-  ) {
+  if (!isPositiveMoneyAmount(value)) {
     throw new DomainError(
       'INVALID_PRICE',
-      `${field} must be a positive plain decimal string`,
+      `${field} must be a positive plain decimal string inside the money domain`,
     );
   }
 }
 
 function assertPriceField(
-  value: unknown,
+  candidate: Record<string, unknown>,
   field: 'limitPrice' | 'triggerPrice',
   rule: PriceRule,
   type: OrderType,
 ): void {
-  if (value === undefined) {
+  // `exactOptionalPropertyTypes` makes an explicit `undefined` a compile error,
+  // so presence of the key — not its value — is what the runtime mirror checks.
+  // Otherwise `{ ...marketOrder, limitPrice: undefined }` would be rejected by
+  // `tsc` and accepted here.
+  if (!Object.hasOwn(candidate, field)) {
     if (rule === 'required') {
       throw new DomainError(
         'INVALID_ORDER',
@@ -212,7 +235,7 @@ function assertPriceField(
     );
   }
 
-  assertPositivePrice(value, field);
+  assertPositivePrice(candidate[field], field);
 }
 
 /**
@@ -223,41 +246,34 @@ function assertPriceField(
 export function assertPlaceOrderCommand(
   command: unknown,
 ): asserts command is PlaceOrderCommand {
-  if (typeof command !== 'object' || command === null) {
-    throw new DomainError(
-      'INVALID_ORDER',
-      'a place order command must be an object',
-    );
-  }
+  assertCommandObject(command, 'place order command');
 
-  const candidate = command as Record<string, unknown>;
+  const candidate: Record<string, unknown> = command;
 
   assertIdentifier(candidate.sessionId, 'sessionId');
   assertIdentifier(candidate.idempotencyKey, 'idempotencyKey');
   assertIdentifier(candidate.symbol, 'symbol');
   assertMember(candidate.market, MARKETS, 'market');
   assertMember(candidate.side, SIDES, 'side');
-  assertMember(candidate.type, ORDER_TYPES, 'type');
+  assertMember(candidate.type, PLACE_ORDER_PRICE_RULES, 'type');
 
-  if (typeof candidate.quantity !== 'string') {
+  // trading-core parses quantities with decimal.js, which reads `'1e3'`,
+  // `'0x10'`, and `'+1'` as positive whole numbers. The wire carries the string
+  // verbatim, so the plain form is settled here before delegating.
+  if (!isPositiveWholeQuantity(candidate.quantity)) {
     throw new DomainError(
       'INVALID_QUANTITY',
-      'quantity must be a positive whole number',
+      'quantity must be a positive whole number in plain decimal form',
     );
   }
 
   assertPositiveWholeQuantity(candidate.quantity);
 
-  const rules = PRICE_RULES[candidate.type];
+  const rules = PLACE_ORDER_PRICE_RULES[candidate.type];
 
+  assertPriceField(candidate, 'limitPrice', rules.limitPrice, candidate.type);
   assertPriceField(
-    candidate.limitPrice,
-    'limitPrice',
-    rules.limitPrice,
-    candidate.type,
-  );
-  assertPriceField(
-    candidate.triggerPrice,
+    candidate,
     'triggerPrice',
     rules.triggerPrice,
     candidate.type,

@@ -18,12 +18,18 @@ import {
   type PlaceOrderCommand,
   type PortfolioSnapshot,
 } from './broker.js';
+import {
+  assertCommandObject,
+  assertIdentifier,
+  isIsoInstant,
+  isMoneyAmount,
+  isNonNegativeWholeQuantity,
+  isWholeNumber,
+} from './validation.js';
 
 const ORDERS_PATH = '/api/v1/orders';
 const CONVERSIONS_PATH = '/api/v1/fx/conversions';
 const PORTFOLIO_PATH = '/api/v1/portfolio';
-
-const WHOLE_NUMBER = /^(?:0|[1-9][0-9]*)$/u;
 
 /**
  * The paths this adapter is allowed to reach. There is no configurable base
@@ -133,18 +139,46 @@ function readString(value: unknown, description: string): string {
   return value;
 }
 
-function readDecimalString(value: unknown, description: string): DecimalString {
-  return readString(value, description);
-}
-
-function readVersion(value: unknown, description: string): bigint {
-  const raw = readString(value, description);
-
-  if (!WHOLE_NUMBER.test(raw)) {
+/**
+ * A money field is the whole reason this decoder exists. An unchecked balance
+ * decodes fine and then detonates as a raw `DecimalError` deep inside strategy
+ * arithmetic, far from the response that caused it, so every decimal the paper
+ * API sends is held to trading-core's money domain right here.
+ */
+function readMoneyAmount(value: unknown, description: string): DecimalString {
+  if (!isMoneyAmount(value)) {
     malformed(description);
   }
 
-  return BigInt(raw);
+  return value;
+}
+
+function readWholeNumber(value: unknown, description: string): DecimalString {
+  if (!isWholeNumber(value)) {
+    malformed(description);
+  }
+
+  return value;
+}
+
+function readQuantity(value: unknown, description: string): Quantity {
+  if (!isNonNegativeWholeQuantity(value)) {
+    malformed(description);
+  }
+
+  return value;
+}
+
+function readInstant(value: unknown, description: string): string {
+  if (!isIsoInstant(value)) {
+    malformed(description);
+  }
+
+  return value;
+}
+
+function readVersion(value: unknown, description: string): bigint {
+  return BigInt(readWholeNumber(value, description));
 }
 
 function readArray(value: unknown, description: string): readonly unknown[] {
@@ -171,7 +205,7 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
   const filledQuantity =
     body.filledQuantity === undefined
       ? undefined
-      : (readDecimalString(body.filledQuantity, 'filled quantity') as Quantity);
+      : readQuantity(body.filledQuantity, 'filled quantity');
 
   if (
     body.terminalReason !== undefined &&
@@ -204,9 +238,9 @@ function decodeWallet(payload: unknown): WalletSnapshot {
 
   return {
     currency: decodeCurrency(body.currency, 'wallet currency'),
-    total: readDecimalString(body.total, 'wallet total'),
-    available: readDecimalString(body.available, 'wallet available'),
-    reserved: readDecimalString(body.reserved, 'wallet reserved'),
+    total: readMoneyAmount(body.total, 'wallet total'),
+    available: readMoneyAmount(body.available, 'wallet available'),
+    reserved: readMoneyAmount(body.reserved, 'wallet reserved'),
     version: readVersion(body.version, 'wallet version'),
   };
 }
@@ -216,34 +250,57 @@ function decodePosition(payload: unknown): PositionSnapshot {
 
   return {
     symbol: readString(body.symbol, 'position symbol'),
-    total: readDecimalString(body.total, 'position total'),
-    available: readDecimalString(body.available, 'position available'),
-    reserved: readDecimalString(body.reserved, 'position reserved'),
+    total: readQuantity(body.total, 'position total'),
+    available: readQuantity(body.available, 'position available'),
+    reserved: readQuantity(body.reserved, 'position reserved'),
     version: readVersion(body.version, 'position version'),
   };
 }
 
-function decodeExchangeReceipt(payload: unknown): ExchangeReceipt {
+function decodeExchangeReceipt(
+  payload: unknown,
+  expectedSessionId: string,
+): ExchangeReceipt {
   const body = readObject(payload, 'exchange receipt');
 
   return {
     id: readString(body.id, 'exchange id'),
     quoteId: readString(body.quoteId, 'exchange quote id'),
-    sessionId: readString(body.sessionId, 'exchange session id'),
+    sessionId: readSessionId(
+      body.sessionId,
+      expectedSessionId,
+      'a conversion receipt',
+    ),
     from: decodeCurrency(body.from, 'exchange source currency'),
     to: decodeCurrency(body.to, 'exchange target currency'),
-    sourceAmount: readDecimalString(
-      body.sourceAmount,
-      'exchange source amount',
-    ),
-    rate: readDecimalString(body.rate, 'exchange rate'),
-    fee: readDecimalString(body.fee, 'exchange fee'),
-    targetAmount: readDecimalString(
-      body.targetAmount,
-      'exchange target amount',
-    ),
-    executedAt: readString(body.executedAt, 'exchange execution time'),
+    sourceAmount: readMoneyAmount(body.sourceAmount, 'exchange source amount'),
+    rate: readMoneyAmount(body.rate, 'exchange rate'),
+    fee: readMoneyAmount(body.fee, 'exchange fee'),
+    targetAmount: readMoneyAmount(body.targetAmount, 'exchange target amount'),
+    executedAt: readInstant(body.executedAt, 'exchange execution time'),
   };
+}
+
+/**
+ * Every session-scoped response is checked back against the session the caller
+ * named, so a transport wired to a different account cannot be mistaken for the
+ * requested one on a read or on a write receipt.
+ */
+function readSessionId(
+  value: unknown,
+  expectedSessionId: string,
+  description: string,
+): string {
+  const sessionId = readString(value, `${description} session id`);
+
+  if (sessionId !== expectedSessionId) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `the paper API returned ${description} for session ${sessionId}`,
+    );
+  }
+
+  return sessionId;
 }
 
 function decodePortfolioSnapshot(
@@ -251,15 +308,11 @@ function decodePortfolioSnapshot(
   expectedSessionId: string,
 ): PortfolioSnapshot {
   const body = readObject(payload, 'portfolio snapshot');
-  const sessionId = readString(body.sessionId, 'portfolio session id');
-
-  if (sessionId !== expectedSessionId) {
-    throw new DomainError(
-      'INVARIANT_VIOLATION',
-      `the paper API returned a portfolio for session ${sessionId}`,
-    );
-  }
-
+  const sessionId = readSessionId(
+    body.sessionId,
+    expectedSessionId,
+    'a portfolio',
+  );
   const wallets = readArray(body.wallets, 'portfolio wallets').map(
     decodeWallet,
   );
@@ -271,23 +324,59 @@ function decodePortfolioSnapshot(
     malformed('portfolio wallet set');
   }
 
+  const positions = readArray(body.positions, 'portfolio positions').map(
+    decodePosition,
+  );
+  const symbols = new Set(positions.map((position) => position.symbol));
+
+  // The same guard for positions: trading-core's own account invariant allows
+  // at most one position per symbol, so a duplicate double-counts an exposure.
+  if (symbols.size !== positions.length) {
+    malformed('portfolio position set');
+  }
+
   return {
     sessionId,
     wallets,
-    positions: readArray(body.positions, 'portfolio positions').map(
-      decodePosition,
-    ),
+    positions,
     activeOrders: readArray(body.activeOrders, 'portfolio orders').map(
       decodeOrderSnapshot,
     ),
-    accountSequence: readDecimalString(
+    // A sequence counts durable effects, so it is a whole number, not a rate.
+    accountSequence: readWholeNumber(
       body.accountSequence,
       'portfolio account sequence',
     ),
   };
 }
 
+/**
+ * Classifies a status the paper API did not pair with a code this SDK knows.
+ * Every branch names the honest failure: telling a strategy its order was
+ * invalid when the session expired or the key is already in flight invites the
+ * one recovery that must not happen — reformulate and resend under a new key.
+ */
 function fallbackCode(status: number): DomainErrorCode {
+  // 3xx is not an error envelope at all. The transport owns redirects, so a
+  // redirect reaching the adapter is a broken contract, not a bad order.
+  if (status < 400) {
+    return 'INVARIANT_VIOLATION';
+  }
+
+  if (status === 401 || status === 403) {
+    return 'ACCOUNT_READ_ONLY';
+  }
+
+  // 408 and 425 are transient by definition, and every write carries an
+  // unchanged idempotency key, so a retry replays rather than duplicates.
+  if (status === 408 || status === 425) {
+    return 'SERVICE_UNAVAILABLE';
+  }
+
+  if (status === 409) {
+    return 'ORDER_STATE_CONFLICT';
+  }
+
   if (status === 429) {
     return 'RATE_LIMITED';
   }
@@ -297,8 +386,11 @@ function fallbackCode(status: number): DomainErrorCode {
 
 /**
  * Decodes a stable paper-API error envelope. A code trading-core already knows
- * is preserved exactly; anything else is classified by status so an unknown
- * server code never becomes a silently retried order.
+ * is preserved exactly — deliberately in both directions, so a server that
+ * reports `SERVICE_UNAVAILABLE` on a 4xx is believed over the status; that is
+ * safe because retries replay under the same idempotency key. Anything else is
+ * classified by status, and retryability always comes from trading-core's own
+ * table rather than the wire.
  */
 function decodeError(response: PaperBrokerResponse): DomainError {
   const body =
@@ -331,6 +423,7 @@ function decodeError(response: PaperBrokerResponse): DomainError {
   if (
     typeof retryAfter === 'number' &&
     Number.isFinite(retryAfter) &&
+    retryAfter >= 0 &&
     error.retryable
   ) {
     return new DomainError(code, message, { retryAfterSeconds: retryAfter });
@@ -378,6 +471,7 @@ export class PaperBroker implements Broker {
   }
 
   async cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot> {
+    assertCommandObject(command, 'cancel order command');
     assertCommandIdentifiers(command.sessionId, command.idempotencyKey);
     assertIdentifier(command.orderId, 'orderId');
 
@@ -391,6 +485,7 @@ export class PaperBroker implements Broker {
   }
 
   async exchange(command: ExchangeCommand): Promise<ExchangeReceipt> {
+    assertCommandObject(command, 'exchange command');
     assertCommandIdentifiers(command.sessionId, command.idempotencyKey);
     assertIdentifier(command.quoteId, 'quoteId');
 
@@ -401,6 +496,7 @@ export class PaperBroker implements Broker {
         idempotencyKey: command.idempotencyKey,
         body: { quoteId: command.quoteId },
       }),
+      command.sessionId,
     );
   }
 
@@ -424,20 +520,9 @@ export class PaperBroker implements Broker {
   }
 }
 
-const MAX_IDENTIFIER_LENGTH = 200;
-
-function assertIdentifier(value: string, field: string): void {
-  if (value.length === 0 || value.length > MAX_IDENTIFIER_LENGTH) {
-    throw new DomainError(
-      'INVALID_ORDER',
-      `${field} must be a non-empty identifier of at most ${MAX_IDENTIFIER_LENGTH} characters`,
-    );
-  }
-}
-
 function assertCommandIdentifiers(
-  sessionId: string,
-  idempotencyKey: string,
+  sessionId: unknown,
+  idempotencyKey: unknown,
 ): void {
   assertIdentifier(sessionId, 'sessionId');
   assertIdentifier(idempotencyKey, 'idempotencyKey');

@@ -3,14 +3,26 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/broker-contract.d.ts",
+      "default": "./dist/broker-contract.js"
+    }
+  },
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc --build",
     "test": "vitest run --passWithNoTests --dir src",
-    "typecheck": "tsc --build --pretty false"
+    "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"
   },
   "dependencies": {
     "@skipjack/trading-core": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "4.1.11"
   }
 }

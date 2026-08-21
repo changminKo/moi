@@ -1,3 +1,11 @@
+/**
+ * The executable Broker contract, published as `@skipjack/strategy-sdk/testing`.
+ *
+ * This is a source module rather than a test file so an implementation outside
+ * this package can import and run it. It declares no vendor, server, or browser
+ * type, and its signature carries no test-runner type, so R4's declaration
+ * surface is unaffected.
+ */
 import {
   type Currency,
   canonicalDecimal,
@@ -7,7 +15,7 @@ import {
   transitionOrder,
   type WalletSnapshot,
 } from '@skipjack/trading-core';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import {
   assertPlaceOrderCommand,
   type Broker,
@@ -114,8 +122,12 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
   });
 
   it('replays an identical idempotency key without a second effect', async () => {
-    const command = marketBuy('replay-key-1');
+    // A LIMIT order stays OPEN, so it appears in `activeOrders` and a second
+    // effect shows up as a second entry. A MARKET order fills immediately and
+    // would leave that assertion trivially satisfied in both directions.
+    const command = limitBuy('replay-key-1');
 
+    const before = await broker.getPortfolio(harness.sessionId);
     const first = await broker.placeOrder(command);
     const afterFirst = await broker.getPortfolio(harness.sessionId);
 
@@ -124,8 +136,18 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
 
     expect(second).toStrictEqual(first);
     expect(afterSecond.accountSequence).toBe(afterFirst.accountSequence);
-    expect(afterSecond.activeOrders).toStrictEqual(afterFirst.activeOrders);
     expect(afterSecond.wallets).toStrictEqual(afterFirst.wallets);
+
+    // The placed order is observable, and it is there exactly once.
+    const placed = afterFirst.activeOrders.filter(
+      (order) => order.id === first.id,
+    );
+    expect(placed).toHaveLength(1);
+    expect(before.activeOrders).not.toContainEqual(placed[0]);
+    expect(
+      afterSecond.activeOrders.filter((order) => order.id === first.id),
+    ).toHaveLength(1);
+    expect(afterSecond.activeOrders).toStrictEqual(afterFirst.activeOrders);
   });
 
   it('rejects a reused idempotency key that carries a different payload', async () => {
@@ -514,60 +536,3 @@ export function createFakeBroker(account: PaperAccountFake): Broker {
     getPortfolio: async (sessionId) => account.portfolio(sessionId),
   };
 }
-
-describe('broker contract (deterministic in-memory fake)', () => {
-  runBrokerContract(() => ({
-    broker: createFakeBroker(createPaperAccountFake()),
-    sessionId: CONTRACT_SESSION_ID,
-    terminalOrderId: CONTRACT_TERMINAL_ORDER_ID,
-    openOrderId: CONTRACT_OPEN_ORDER_ID,
-    exchangeQuoteId: CONTRACT_QUOTE_ID,
-  }));
-});
-
-// --- Type-level contract ----------------------------------------------------
-// Compile-time assertions: `tsc` fails if any of these stops being an error,
-// which is exactly the regression that would let an impossible order through.
-// The calls are inert at runtime; only their types matter.
-const acceptsPlaceOrderCommand = (
-  command: PlaceOrderCommand,
-): PlaceOrderCommand => command;
-
-const orderBase = {
-  sessionId: CONTRACT_SESSION_ID,
-  idempotencyKey: 'type-level',
-  market: 'US',
-  symbol: 'AAPL',
-  side: 'BUY',
-  quantity: '1',
-} as const;
-
-const marketBase = { ...orderBase, type: 'MARKET' } as const;
-const limitBase = { ...orderBase, type: 'LIMIT' } as const;
-const stopBase = { ...orderBase, type: 'STOP' } as const;
-const ocoBase = { ...orderBase, type: 'OCO' } as const;
-const prices = { limitPrice: '190.25', triggerPrice: '180.00' } as const;
-
-// @ts-expect-error a MARKET order cannot carry a limit price.
-acceptsPlaceOrderCommand({ ...marketBase, limitPrice: '190.25' });
-
-// @ts-expect-error a MARKET order cannot carry a trigger price.
-acceptsPlaceOrderCommand({ ...marketBase, triggerPrice: '190.25' });
-
-// @ts-expect-error a LIMIT order must carry a limit price.
-acceptsPlaceOrderCommand({ ...limitBase });
-
-// @ts-expect-error a LIMIT order cannot carry a trigger price.
-acceptsPlaceOrderCommand({ ...limitBase, ...prices });
-
-// @ts-expect-error a STOP order must carry a trigger price.
-acceptsPlaceOrderCommand({ ...stopBase });
-
-// @ts-expect-error an OCO order must carry both prices.
-acceptsPlaceOrderCommand({ ...ocoBase });
-
-// Positive controls: the legal shapes must stay legal.
-acceptsPlaceOrderCommand(marketBase);
-acceptsPlaceOrderCommand({ ...limitBase, limitPrice: '190.25' });
-acceptsPlaceOrderCommand({ ...stopBase, triggerPrice: '180.00' });
-acceptsPlaceOrderCommand({ ...ocoBase, ...prices });

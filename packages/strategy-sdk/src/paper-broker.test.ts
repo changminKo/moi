@@ -5,6 +5,11 @@ import {
   type WalletSnapshot,
 } from '@skipjack/trading-core';
 import { describe, expect, it } from 'vitest';
+import type {
+  ExchangeReceipt,
+  PlaceOrderCommand,
+  PortfolioSnapshot,
+} from './broker.js';
 import {
   CONTRACT_OPEN_ORDER_ID,
   CONTRACT_QUOTE_ID,
@@ -13,12 +18,7 @@ import {
   createPaperAccountFake,
   type PaperAccountFake,
   runBrokerContract,
-} from './broker.contract.test.js';
-import type {
-  ExchangeReceipt,
-  PlaceOrderCommand,
-  PortfolioSnapshot,
-} from './broker.js';
+} from './broker-contract.js';
 import {
   PaperBroker,
   type PaperBrokerRequest,
