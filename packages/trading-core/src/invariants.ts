@@ -74,6 +74,9 @@ export function assertAccountInvariants(account: AccountSnapshot): void {
 
   const symbols = new Set<string>();
   for (const position of account.positions) {
+    if (typeof position.symbol !== 'string') {
+      invariantViolation('Position symbol must be a string');
+    }
     if (position.symbol.trim().length === 0 || symbols.has(position.symbol)) {
       invariantViolation(
         'Account must contain at most one position per symbol',

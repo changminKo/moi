@@ -221,6 +221,34 @@ describe('position reservations', () => {
       }),
     );
   });
+
+  it.each([123, null, undefined, {}])(
+    'rejects a non-string position symbol %s on both mutators',
+    (symbol) => {
+      const malformed = {
+        ...positionFixture(),
+        symbol: symbol as unknown as string,
+      };
+
+      expect(() => reservePosition(malformed, '1')).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+      expect(() =>
+        releaseReservation(
+          { ...malformed, available: '0', reserved: '10' },
+          '1',
+        ),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'INVARIANT_VIOLATION',
+          retryable: false,
+        }),
+      );
+    },
+  );
 });
 
 describe('reservation planning', () => {
@@ -577,7 +605,7 @@ describe('reservation planning', () => {
           referencePrice: '75000',
         },
       ]),
-    ).toEqual({ position: { symbol: '005930', quantity: '10' } });
+    ).toEqual({ position: { symbol: '005930', quantity: '8' } });
   });
 
   it('releases the group reservation after an OCO winner fills and sibling cancels', () => {
@@ -654,6 +682,184 @@ describe('reservation planning', () => {
       expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
     );
   });
+
+  const sellLeg = (
+    id: string,
+    status: ReservationOrder['status'],
+    filledQuantity?: string,
+    quantity = '10',
+  ): ReservationOrder => ({
+    id,
+    status,
+    side: 'SELL',
+    type: 'STOP',
+    currency: 'KRW',
+    symbol: '005930',
+    quantity,
+    referencePrice: '70000',
+    ...(filledQuantity === undefined ? {} : { filledQuantity }),
+  });
+
+  const buyLeg = (
+    id: string,
+    status: ReservationOrder['status'],
+    filledQuantity?: string,
+    quantity = '10',
+  ): ReservationOrder => ({
+    id,
+    status,
+    side: 'BUY',
+    type: 'LIMIT',
+    currency: 'USD',
+    symbol: 'AAPL',
+    quantity,
+    limitPrice: '100',
+    ...(filledQuantity === undefined ? {} : { filledQuantity }),
+  });
+
+  const dualFillTuples = [
+    { first: ['FILLED', '10'], second: ['CANCELLED', '2'] },
+    { first: ['CANCELLED', '2'], second: ['FILLED', '10'] },
+    { first: ['PARTIALLY_FILLED', '3'], second: ['CANCELLED', '2'] },
+    { first: ['CANCELLED', '2'], second: ['PARTIALLY_FILLED', '3'] },
+    { first: ['CANCELLED', '3'], second: ['EXPIRED', '2'] },
+    { first: ['EXPIRED', '2'], second: ['CANCELLED', '3'] },
+    { first: ['CANCELLED', '3'], second: ['CANCELLED', '2'] },
+    { first: ['EXPIRED', '3'], second: ['EXPIRED', '2'] },
+  ] as const;
+
+  it.each(dualFillTuples)(
+    'rejects an OCO group whose legs both carry fills ($first + $second) for sells',
+    ({ first, second }) => {
+      expect(() =>
+        planOcoReservation([
+          sellLeg('first', first[0], first[1]),
+          sellLeg('second', second[0], second[1]),
+        ]),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it.each(dualFillTuples)(
+    'rejects an OCO group whose legs both carry fills ($first + $second) for buys',
+    ({ first, second }) => {
+      expect(() =>
+        planOcoReservation([
+          buyLeg('first', first[0], first[1]),
+          buyLeg('second', second[0], second[1]),
+        ]),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
+
+  it.each([
+    { label: 'winner first', order: 'forward' },
+    { label: 'winner second', order: 'reversed' },
+  ] as const)(
+    'keeps a resolved partial IOC cancellation with an unfilled cancelled sibling at zero exposure ($label)',
+    ({ order }) => {
+      const winner = sellLeg('winner', 'CANCELLED', '3');
+      const sibling = sellLeg('sibling', 'CANCELLED');
+
+      expect(
+        planOcoReservation(
+          order === 'forward' ? [winner, sibling] : [sibling, winner],
+        ),
+      ).toEqual({ position: { symbol: '005930', quantity: '0' } });
+    },
+  );
+
+  it.each([
+    { label: 'winner first', order: 'forward' },
+    { label: 'winner second', order: 'reversed' },
+  ] as const)(
+    'releases the whole shared exposure once an OCO leg is completely filled while its sibling is still pending ($label)',
+    ({ order }) => {
+      const winner = sellLeg('winner', 'FILLED', '10');
+      const sibling = sellLeg('sibling', 'PENDING_TRIGGER');
+
+      expect(
+        planOcoReservation(
+          order === 'forward' ? [winner, sibling] : [sibling, winner],
+        ),
+      ).toEqual({ position: { symbol: '005930', quantity: '0' } });
+    },
+  );
+
+  it.each([
+    { label: 'winner first', order: 'forward' },
+    { label: 'winner second', order: 'reversed' },
+  ] as const)(
+    'reserves the shared remainder once for a partially filled OCO leg with a pending sibling ($label)',
+    ({ order }) => {
+      const winner = sellLeg('winner', 'PARTIALLY_FILLED', '4');
+      const sibling = sellLeg('sibling', 'PENDING_TRIGGER');
+
+      expect(
+        planOcoReservation(
+          order === 'forward' ? [winner, sibling] : [sibling, winner],
+        ),
+      ).toEqual({ position: { symbol: '005930', quantity: '6' } });
+    },
+  );
+
+  it.each([
+    { status: 'CANCELLED', order: 'forward' },
+    { status: 'CANCELLED', order: 'reversed' },
+    { status: 'EXPIRED', order: 'forward' },
+    { status: 'EXPIRED', order: 'reversed' },
+  ] as const)(
+    'reserves only the shared remainder when a terminal $status partial winner still has a live sibling ($order)',
+    ({ status, order }) => {
+      const winner = sellLeg('winner', status, '3');
+      const sibling = sellLeg('sibling', 'PENDING_TRIGGER');
+
+      expect(
+        planOcoReservation(
+          order === 'forward' ? [winner, sibling] : [sibling, winner],
+        ),
+      ).toEqual({ position: { symbol: '005930', quantity: '7' } });
+    },
+  );
+
+  it('prices a buy OCO shared remainder from the live sibling only', () => {
+    expect(
+      planOcoReservation([
+        buyLeg('terminal-winner', 'CANCELLED', '3'),
+        buyLeg('live-sibling', 'PENDING_TRIGGER'),
+      ]),
+    ).toEqual({ cash: { currency: 'USD', amount: '700' } });
+  });
+
+  it('plans zero cash for a fully filled buy OCO leg with a pending sibling', () => {
+    expect(
+      planOcoReservation([
+        buyLeg('winner', 'FILLED', '10'),
+        buyLeg('sibling', 'PENDING_TRIGGER'),
+      ]),
+    ).toEqual({ cash: { currency: 'USD', amount: '0' } });
+  });
+
+  it.each([
+    { first: '10', second: '4' },
+    { first: '4', second: '10' },
+  ])(
+    'rejects an OCO group whose legs do not share one quantity ($first vs $second)',
+    ({ first, second }) => {
+      expect(() =>
+        planOcoReservation([
+          sellLeg('first', 'PENDING_TRIGGER', undefined, first),
+          sellLeg('second', 'PENDING_TRIGGER', undefined, second),
+        ]),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ORDER', retryable: false }),
+      );
+    },
+  );
 
   it('rejects an OCO plan that mixes currencies or symbols', () => {
     expect(() =>

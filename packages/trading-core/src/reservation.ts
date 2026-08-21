@@ -87,6 +87,20 @@ function invalidOrder(message: string): never {
   throw new DomainError('INVALID_ORDER', message);
 }
 
+function legFilledQuantity(order: ReservationOrder) {
+  return assertNonNegativeWhole(order.filledQuantity ?? '0', 'Filled quantity');
+}
+
+// An OCO leg has group progress when it is currently progressed or when it
+// already realized a fill. Terminal CANCELLED/EXPIRED legs legitimately keep a
+// positive partial fill, so status alone cannot detect execution.
+function hasGroupProgress(
+  order: ReservationOrder,
+  filled: ReturnType<typeof legFilledQuantity>,
+): boolean {
+  return progressedOcoStatuses.has(order.status) || filled.gt(0);
+}
+
 function invariantViolation(message: string): never {
   throw new DomainError('INVARIANT_VIOLATION', message);
 }
@@ -175,6 +189,9 @@ function assertWalletSnapshot(wallet: WalletSnapshot): void {
 }
 
 function assertPositionSnapshot(position: PositionSnapshot): void {
+  if (typeof position.symbol !== 'string') {
+    invariantViolation('Position symbol must be a string');
+  }
   if (position.symbol.trim().length === 0) {
     invariantViolation('Position symbol must not be empty');
   }
@@ -466,42 +483,49 @@ export function planOcoReservation(
       'OCO reservation legs must have the same side, currency, and symbol',
     );
   }
+
+  // Each leg must be individually consistent before any group reasoning.
+  remainingQuantity(first);
+  remainingQuantity(second);
+
+  const quantity = assertPositiveWhole(first.quantity, 'Order quantity');
+  if (!quantity.eq(assertPositiveWhole(second.quantity, 'Order quantity'))) {
+    invalidOrder('OCO reservation legs must share one quantity');
+  }
+
+  const firstFilled = legFilledQuantity(first);
+  const secondFilled = legFilledQuantity(second);
   if (
-    progressedOcoStatuses.has(first.status) &&
-    progressedOcoStatuses.has(second.status)
+    hasGroupProgress(first, firstFilled) &&
+    hasGroupProgress(second, secondFilled)
   ) {
     invalidOrder('OCO reservation cannot have two progressed legs');
   }
 
-  const firstPlan = planReservation(first);
-  const secondPlan = planReservation(second);
+  // At most one leg may execute, so the group's realized fill is whichever leg
+  // progressed, and the shared exposure is the single remainder after it.
+  const groupRemaining = quantity.minus(
+    firstFilled.gte(secondFilled) ? firstFilled : secondFilled,
+  );
+  const liveLegs = [first, second].filter(
+    (leg) => !terminalStatuses.has(leg.status),
+  );
+  if (groupRemaining.isZero() || liveLegs.length === 0) {
+    return first.side === 'BUY'
+      ? { cash: { currency: first.currency, amount: '0' } }
+      : { position: { symbol: first.symbol, quantity: '0' } };
+  }
+
   if (first.side === 'BUY') {
-    const firstCash = firstPlan.cash;
-    const secondCash = secondPlan.cash;
-    if (firstCash === undefined || secondCash === undefined) {
-      invalidOrder('Buy OCO legs must reserve cash');
-    }
+    const amount = liveLegs
+      .map((leg) => decimal(plannedBuyCash(leg, groupRemaining).amount))
+      .reduce((highest, value) => (value.gt(highest) ? value : highest));
     return {
-      cash: {
-        currency: first.currency,
-        amount: decimal(firstCash.amount).gte(secondCash.amount)
-          ? firstCash.amount
-          : secondCash.amount,
-      },
+      cash: { currency: first.currency, amount: amount.toString() },
     };
   }
 
-  const firstPosition = firstPlan.position;
-  const secondPosition = secondPlan.position;
-  if (firstPosition === undefined || secondPosition === undefined) {
-    invalidOrder('Sell OCO legs must reserve position');
-  }
   return {
-    position: {
-      symbol: first.symbol,
-      quantity: decimal(firstPosition.quantity).gte(secondPosition.quantity)
-        ? firstPosition.quantity
-        : secondPosition.quantity,
-    },
+    position: { symbol: first.symbol, quantity: groupRemaining.toString() },
   };
 }
