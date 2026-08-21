@@ -45,8 +45,14 @@ export interface DomainErrorOptions {
 
 // Identity-only brand. `WeakSet.prototype.has` compares by SameValue, so
 // classification never reads a property or triggers a proxy trap on a value
-// thrown by untrusted code.
+// thrown by untrusted code. The brand methods and `Reflect.apply` are captured
+// at module load, before any untrusted fee model can run, and invoked
+// reflectively: same-realm code that later patches those intrinsics can
+// neither break registration nor forge classification.
 const domainErrorBrand = new WeakSet<object>();
+const reflectApply = Reflect.apply;
+const brandAdd = WeakSet.prototype.add;
+const brandHas = WeakSet.prototype.has;
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
@@ -73,12 +79,14 @@ export class DomainError extends Error {
       this.retryAfterSeconds = options.retryAfterSeconds;
     }
 
-    domainErrorBrand.add(this);
+    reflectApply(brandAdd, domainErrorBrand, [this]);
   }
 }
 
 export function isDomainError(value: unknown): value is DomainError {
   return (
-    typeof value === 'object' && value !== null && domainErrorBrand.has(value)
+    typeof value === 'object' &&
+    value !== null &&
+    reflectApply(brandHas, domainErrorBrand, [value])
   );
 }

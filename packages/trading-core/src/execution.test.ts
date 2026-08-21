@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { DomainError } from './domain-errors.js';
 import type {
@@ -1402,5 +1402,167 @@ describe('hostile fee model error classification', () => {
     const veto = new SubError('CANCEL_ONLY', 'subclass callback veto');
 
     expect(runAndCatch(throwingCalculateModel(() => veto))).toBe(veto);
+  });
+});
+
+describe('domain-error brand under WeakSet intrinsic tampering', () => {
+  const originalWeakSetHas = WeakSet.prototype.has;
+
+  afterEach(() => {
+    WeakSet.prototype.has = originalWeakSetHas;
+  });
+
+  const throwingHas = (): void => {
+    WeakSet.prototype.has = () => {
+      throw new RangeError('has trap');
+    };
+  };
+
+  const forcedTrueHas = (): void => {
+    WeakSet.prototype.has = () => true;
+  };
+
+  const retryableForgery = (): unknown =>
+    Object.assign(Object.create(DomainError.prototype) as object, {
+      code: 'RATE_LIMITED',
+      retryable: true,
+      retryAfterSeconds: 1,
+    });
+
+  const tamperingGetterModel = (
+    tamper: () => void,
+    thrown: () => unknown,
+  ): FeeModel => {
+    const feeModel = { ...zeroFeeModel };
+    Object.defineProperty(feeModel, 'version', {
+      get() {
+        tamper();
+        throw thrown();
+      },
+    });
+    return feeModel;
+  };
+
+  const tamperingCalculateModel = (
+    tamper: () => void,
+    thrown: () => unknown,
+  ): FeeModel => ({
+    ...zeroFeeModel,
+    calculate() {
+      tamper();
+      throw thrown();
+    },
+  });
+
+  const runAndCatch = (feeModel: FeeModel): unknown => {
+    try {
+      try {
+        calculateExecution(
+          orderFixture(),
+          bookFixture(),
+          feeModel,
+          protection(),
+        );
+      } finally {
+        WeakSet.prototype.has = originalWeakSetHas;
+      }
+    } catch (error) {
+      return error;
+    }
+    throw new Error('calculateExecution unexpectedly returned a result');
+  };
+
+  it('normalizes a fee callback that breaks WeakSet.prototype.has before throwing', () => {
+    const caught = runAndCatch(
+      tamperingCalculateModel(throwingHas, () => new RangeError('payload')),
+    );
+
+    expect(caught).toBeInstanceOf(DomainError);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      retryAfterSeconds: undefined,
+      message: 'Fee model calculation failed',
+    });
+  });
+
+  it('normalizes a property read that breaks WeakSet.prototype.has before throwing', () => {
+    const caught = runAndCatch(
+      tamperingGetterModel(throwingHas, () => new RangeError('payload')),
+    );
+
+    expect(caught).toBeInstanceOf(DomainError);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      retryAfterSeconds: undefined,
+      message: 'Fee model properties must be readable',
+    });
+  });
+
+  it('rejects a forgery admitted by a forced-true WeakSet.prototype.has in the fee callback', () => {
+    const forged = retryableForgery();
+    const caught = runAndCatch(
+      tamperingCalculateModel(forcedTrueHas, () => forged),
+    );
+
+    expect(caught).not.toBe(forged);
+    expect(caught).toBeInstanceOf(DomainError);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      retryAfterSeconds: undefined,
+      message: 'Fee model calculation failed',
+    });
+  });
+
+  it('rejects a forgery admitted by a forced-true WeakSet.prototype.has in a property read', () => {
+    const forged = retryableForgery();
+    const caught = runAndCatch(
+      tamperingGetterModel(forcedTrueHas, () => forged),
+    );
+
+    expect(caught).not.toBe(forged);
+    expect(caught).toBeInstanceOf(DomainError);
+    expect(caught).toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      retryable: false,
+      retryAfterSeconds: undefined,
+      message: 'Fee model properties must be readable',
+    });
+  });
+
+  it('preserves a genuine DomainError thrown by a tampering fee callback', () => {
+    const veto = new DomainError('MARKET_CLOSED', 'callback veto');
+
+    expect(runAndCatch(tamperingCalculateModel(throwingHas, () => veto))).toBe(
+      veto,
+    );
+  });
+
+  it('preserves a genuine DomainError thrown by a tampering property read', () => {
+    const veto = new DomainError('CANCEL_ONLY', 'getter veto');
+
+    expect(runAndCatch(tamperingGetterModel(throwingHas, () => veto))).toBe(
+      veto,
+    );
+  });
+
+  it('preserves a DomainError subclass thrown by a tampering fee callback', () => {
+    class SubError extends DomainError {}
+    const veto = new SubError('CANCEL_ONLY', 'subclass callback veto');
+
+    expect(runAndCatch(tamperingCalculateModel(throwingHas, () => veto))).toBe(
+      veto,
+    );
+  });
+
+  it('preserves a DomainError subclass thrown by a tampering property read', () => {
+    class SubError extends DomainError {}
+    const veto = new SubError('CANCEL_ONLY', 'subclass getter veto');
+
+    expect(runAndCatch(tamperingGetterModel(throwingHas, () => veto))).toBe(
+      veto,
+    );
   });
 });
