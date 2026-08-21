@@ -1,0 +1,24 @@
+{
+  "name": "skipjack",
+  "private": true,
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "scripts": {
+    "preinstall": "node scripts/check-runtime.mjs",
+    "build": "turbo run build",
+    "check": "biome check .",
+    "check:write": "biome check --write .",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.9",
+    "@types/node": "24.13.3",
+    "fast-check": "4.9.0",
+    "turbo": "2.10.11",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
