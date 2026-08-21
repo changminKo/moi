@@ -18,6 +18,7 @@ export type {
   Quantity,
   Side,
 } from './domain-types.js';
+export { type AccountSnapshot, assertAccountInvariants } from './invariants.js';
 export {
   type OcoGroupSnapshot,
   type OcoGroupStatus,
@@ -28,3 +29,15 @@ export {
   type OrderSnapshot,
   transitionOrder,
 } from './order.js';
+export {
+  type PositionReservation,
+  type PositionSnapshot,
+  planOcoReservation,
+  planReservation,
+  type ReservationOrder,
+  type ReservationPlan,
+  releaseReservation,
+  reserveCash,
+  reservePosition,
+  type WalletSnapshot,
+} from './reservation.js';
