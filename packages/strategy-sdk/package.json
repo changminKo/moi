@@ -7,7 +7,10 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc --build",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --dir src",
     "typecheck": "tsc --build --pretty false"
+  },
+  "dependencies": {
+    "@skipjack/trading-core": "workspace:*"
   }
 }

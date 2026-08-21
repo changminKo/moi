@@ -29,7 +29,11 @@ importers:
 
   apps/paper-api: {}
 
-  packages/strategy-sdk: {}
+  packages/strategy-sdk:
+    dependencies:
+      '@skipjack/trading-core':
+        specifier: workspace:*
+        version: link:../trading-core
 
   packages/trading-core:
     dependencies:
