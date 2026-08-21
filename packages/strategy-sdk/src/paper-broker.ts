@@ -25,6 +25,7 @@ import {
   isMoneyAmount,
   isNonNegativeWholeQuantity,
   isWholeNumber,
+  projectOptionalField,
 } from './validation.js';
 
 const ORDERS_PATH = '/api/v1/orders';
@@ -452,12 +453,11 @@ export class PaperBroker implements Broker {
       side: command.side,
       type: command.type,
       quantity: command.quantity,
-      ...(command.limitPrice === undefined
-        ? {}
-        : { limitPrice: command.limitPrice }),
-      ...(command.triggerPrice === undefined
-        ? {}
-        : { triggerPrice: command.triggerPrice }),
+      // The same policy the validator applied, so the wire carries exactly the
+      // price fields `assertPlaceOrderCommand` inspected — never one more, and
+      // never one fewer.
+      ...projectOptionalField(command, 'limitPrice'),
+      ...projectOptionalField(command, 'triggerPrice'),
     };
 
     return decodeOrderSnapshot(

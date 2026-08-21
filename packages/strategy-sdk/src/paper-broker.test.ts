@@ -1,12 +1,17 @@
 import {
+  type DecimalString,
   DomainError,
+  type Market,
   type OrderSnapshot,
   type PositionSnapshot,
+  type Quantity,
+  type Side,
   type WalletSnapshot,
 } from '@skipjack/trading-core';
 import { describe, expect, it } from 'vitest';
 import type {
   ExchangeReceipt,
+  PlaceLimitOrderCommand,
   PlaceOrderCommand,
   PortfolioSnapshot,
 } from './broker.js';
@@ -196,6 +201,27 @@ const stubTransport = (
   request: async () => response,
 });
 
+/**
+ * The ordinary way a strategy computes a price: an interface implementation
+ * whose accessor lives on the prototype, so the value is reachable only through
+ * a property read.
+ */
+class LimitBuyFromMid implements PlaceLimitOrderCommand {
+  readonly type = 'LIMIT' as const;
+  readonly market: Market = 'US';
+  readonly side: Side = 'BUY';
+  readonly sessionId: string = CONTRACT_SESSION_ID;
+  readonly idempotencyKey: string = 'getter-key';
+  readonly symbol: string = 'AAPL';
+  readonly quantity: Quantity = '3';
+
+  constructor(private readonly mid: number) {}
+
+  get limitPrice(): DecimalString {
+    return this.mid.toFixed(2);
+  }
+}
+
 const marketBuy: PlaceOrderCommand = {
   sessionId: CONTRACT_SESSION_ID,
   idempotencyKey: 'paper-key-1',
@@ -277,6 +303,42 @@ describe('PaperBroker', () => {
     await new PaperBroker(transport).getPortfolio(CONTRACT_SESSION_ID);
 
     expect(requests[0]?.idempotencyKey).toBeUndefined();
+  });
+
+  // The validator's presence policy and this body builder's read must agree,
+  // or a command the SDK blessed carries a price the validator never inspected
+  // — or a legal accessor-backed command never reaches the wire at all.
+  it('puts an accessor-supplied limit price on the wire', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    // A class instance, not an object literal: a literal's `get` is an *own*
+    // accessor, so only a prototype-borne one probes the two readings apart.
+    await new PaperBroker(transport).placeOrder(new LimitBuyFromMid(190.25));
+
+    expect(requests[0]?.body).toStrictEqual({
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '3',
+      limitPrice: '190.25',
+    });
+  });
+
+  it('never lets an inherited forbidden price reach the transport', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const inherited = Object.assign(
+      Object.create({ limitPrice: '190.25', triggerPrice: '5.00' }),
+      marketBuy,
+    ) as PlaceOrderCommand;
+
+    await expect(
+      new PaperBroker(transport).placeOrder(inherited),
+    ).rejects.toThrow(expect.objectContaining({ code: 'INVALID_ORDER' }));
+    expect(requests).toHaveLength(0);
   });
 
   it('validates a command before touching the transport', async () => {

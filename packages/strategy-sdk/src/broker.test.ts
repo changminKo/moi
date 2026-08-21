@@ -1,17 +1,24 @@
 import {
   createFeeModel,
+  type DecimalString,
   DomainError,
+  decimal,
+  type Market,
   type OrderType,
   planOcoReservation,
   planReservation,
+  type Quantity,
   type ReservationOrder,
+  type Side,
 } from '@skipjack/trading-core';
 import { describe, expect, it } from 'vitest';
 import {
   assertPlaceOrderCommand,
   PLACE_ORDER_PRICE_RULES,
+  type PlaceLimitOrderCommand,
   type PlaceOrderCommand,
 } from './broker.js';
+import { moneyDecimal } from './validation.js';
 
 const attempt = (act: () => void): string | undefined => {
   try {
@@ -61,27 +68,48 @@ const reservationOrder = (
     ...prices,
   }) as ReservationOrder;
 
+/**
+ * Every price shape a reservation order can carry. All four are probed, not just
+ * the two single-price ones: a gate that starts accepting both prices at once
+ * (stop-limit) or stops accepting the one it needs is drift in either direction,
+ * and only the full column set makes both visible.
+ */
+const PRICE_SHAPES = {
+  none: {},
+  limitOnly: { limitPrice: '190.25' },
+  referenceOnly: { referencePrice: '188.00' },
+  both: { limitPrice: '190.25', referencePrice: '188.00' },
+} as const;
+
+type PriceShape = keyof typeof PRICE_SHAPES;
+
+const PRICE_SHAPE_NAMES = Object.keys(PRICE_SHAPES) as readonly PriceShape[];
+
+/** Which of the four price shapes trading-core's reservation gate accepts. */
+const reservationPriceShapes = (type: ReservableType): readonly PriceShape[] =>
+  PRICE_SHAPE_NAMES.filter(
+    (shape) =>
+      attempt(() =>
+        planReservation(reservationOrder(type, PRICE_SHAPES[shape])),
+      ) === undefined,
+  );
+
 /** What trading-core's reservation gate demands of `limitPrice` for a type. */
 const reservationLimitPriceRule = (
   type: ReservableType,
 ): 'required' | 'forbidden' => {
-  const withLimit = attempt(() =>
-    planReservation(reservationOrder(type, { limitPrice: '190.25' })),
-  );
-  const withReference = attempt(() =>
-    planReservation(reservationOrder(type, { referencePrice: '188.00' })),
-  );
+  const accepted = reservationPriceShapes(type);
 
-  if (withLimit === undefined && withReference !== undefined) {
+  if (accepted.length === 1 && accepted[0] === 'limitOnly') {
     return 'required';
   }
 
-  if (withLimit !== undefined && withReference === undefined) {
+  if (accepted.length === 1 && accepted[0] === 'referenceOnly') {
     return 'forbidden';
   }
 
   throw new Error(
-    `the reservation gate is ambiguous for ${type}: limit=${withLimit ?? 'accept'} reference=${withReference ?? 'accept'}`,
+    `the reservation gate is ambiguous for ${type}: it accepts [${accepted.join(', ')}]`,
   );
 };
 
@@ -141,37 +169,34 @@ describe('PlaceOrderCommand price rules pinned to trading-core', () => {
     );
   });
 
-  it('rejects the stop-limit shape the reservation gate rejects', () => {
-    expect(
-      attempt(() =>
-        planReservation(
-          reservationOrder('STOP', {
-            limitPrice: '190.25',
-            referencePrice: '188.00',
-          }),
-        ),
-      ),
-      'trading-core still rejects a STOP carrying a limit price',
-    ).toBe('INVALID_ORDER');
+  // The whole gate table, for every reservable type: exactly one of the two
+  // single-price shapes is accepted, and neither `none` nor `both` ever is. An
+  // engine that loosens (learns stop-limit for any type) or tightens (stops
+  // accepting the shape a type needs) moves this list and fails the suite,
+  // rather than leaving the SDK to over- or under-tighten in silence.
+  it.each(RESERVABLE_TYPES)(
+    'pins the whole gate price table for %s',
+    (type) => {
+      expect(reservationPriceShapes(type)).toStrictEqual([
+        PLACE_ORDER_PRICE_RULES[type].limitPrice === 'required'
+          ? 'limitOnly'
+          : 'referenceOnly',
+      ]);
+    },
+  );
 
-    expect(
-      attempt(() =>
-        assertPlaceOrderCommand(
-          command('STOP', { triggerPrice: '188.00', limitPrice: '190.25' }),
+  it.each(RESERVABLE_TYPES)(
+    'rejects a %s command carrying both prices',
+    (type) => {
+      expect(
+        attempt(() =>
+          assertPlaceOrderCommand(
+            command(type, { triggerPrice: '188.00', limitPrice: '190.25' }),
+          ),
         ),
-      ),
-    ).toBe('INVALID_ORDER');
-    expect(
-      attempt(() =>
-        assertPlaceOrderCommand(
-          command('TAKE_PROFIT', {
-            triggerPrice: '188.00',
-            limitPrice: '190.25',
-          }),
-        ),
-      ),
-    ).toBe('INVALID_ORDER');
-  });
+      ).toBe('INVALID_ORDER');
+    },
+  );
 
   it('keeps OCO required/required, matching the two-leg group it desugars into', () => {
     expect(PLACE_ORDER_PRICE_RULES.OCO).toStrictEqual({
@@ -290,6 +315,105 @@ describe('assertPlaceOrderCommand explicit undefined', () => {
   });
 });
 
+// A published command type is an interface, so a class instance, a builder
+// result, or an `Object.create` shape satisfies it just as a literal does. The
+// validator and the wire body builder must therefore resolve a price field the
+// same way; when they disagree, a command `tsc` blesses is refused here, or a
+// forbidden price the validator never inspected reaches the transport.
+class LimitBuyFromMid implements PlaceLimitOrderCommand {
+  readonly type = 'LIMIT' as const;
+  readonly market: Market = 'US';
+  readonly side: Side = 'BUY';
+  readonly sessionId: string = 'session-1';
+  readonly idempotencyKey: string = 'getter-key';
+  readonly symbol: string = 'AAPL';
+  readonly quantity: Quantity = '3';
+
+  constructor(private readonly mid: number) {}
+
+  get limitPrice(): DecimalString {
+    return this.mid.toFixed(2);
+  }
+}
+
+const inheriting = (
+  prototype: Record<string, unknown>,
+  own: Record<string, unknown>,
+): unknown => Object.assign(Object.create(prototype), own);
+
+describe('assertPlaceOrderCommand prototype-supplied prices', () => {
+  it('accepts a LIMIT command whose limitPrice comes from a getter', () => {
+    expect(
+      attempt(() => assertPlaceOrderCommand(new LimitBuyFromMid(190.25))),
+    ).toBeUndefined();
+  });
+
+  it('validates the getter value rather than trusting it', () => {
+    expect(attempt(() => assertPlaceOrderCommand(new LimitBuyFromMid(0)))).toBe(
+      'INVALID_PRICE',
+    );
+  });
+
+  it.each([
+    ['MARKET', 'limitPrice'],
+    ['MARKET', 'triggerPrice'],
+    ['LIMIT', 'triggerPrice'],
+    ['STOP', 'limitPrice'],
+    ['TAKE_PROFIT', 'limitPrice'],
+  ] as const)('rejects %s carrying an inherited %s', (type, field) => {
+    const own: Record<string, unknown> = {
+      ...base,
+      type,
+      ...(type === 'LIMIT' ? { limitPrice: '190.25' } : {}),
+      ...(type === 'STOP' || type === 'TAKE_PROFIT'
+        ? { triggerPrice: '188.00' }
+        : {}),
+    };
+
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand(inheriting({ [field]: '190.25' }, own)),
+      ),
+    ).toBe('INVALID_ORDER');
+  });
+
+  it.each([
+    ['LIMIT', 'limitPrice'],
+    ['STOP', 'triggerPrice'],
+    ['TAKE_PROFIT', 'triggerPrice'],
+  ] as const)('accepts %s whose required %s is inherited', (type, field) => {
+    const own: Record<string, unknown> = { ...base, type };
+
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand(inheriting({ [field]: '190.25' }, own)),
+      ),
+    ).toBeUndefined();
+  });
+
+  // The deliberate consequence of counting an own `undefined` as supplied: the
+  // value check fires, so a `LIMIT` whose limitPrice was written as `undefined`
+  // fails on the price rather than on the shape. `tsc` rejects writing it at
+  // all; the runtime refuses it either way.
+  it('rejects a required price written as an own undefined', () => {
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand(command('LIMIT', { limitPrice: undefined })),
+      ),
+    ).toBe('INVALID_PRICE');
+  });
+
+  it('still rejects a required price that is inherited as undefined', () => {
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand(
+          inheriting({ limitPrice: undefined }, { ...base, type: 'LIMIT' }),
+        ),
+      ),
+    ).toBe('INVALID_ORDER');
+  });
+});
+
 describe('assertPlaceOrderCommand quantity', () => {
   it.each([
     ['3', undefined],
@@ -345,6 +469,122 @@ describe('assertPlaceOrderCommand price bounds pinned to the money domain', () =
         assertPlaceOrderCommand(command('LIMIT', { limitPrice: price })),
       ),
     ).toBe('INVALID_PRICE');
+  });
+});
+
+// The mirror-image policy, and deliberately not the one above: a membership
+// lookup is an untrusted *key* against a closed, trusted record, so it stays
+// own-property-only. Reading `PLACE_ORDER_PRICE_RULES.__proto__` through the
+// chain would turn an inherited `Object.prototype` member into a valid enum.
+describe('assertPlaceOrderCommand membership lookups', () => {
+  it.each([
+    ['type', '__proto__'],
+    ['type', 'constructor'],
+    ['type', 'toString'],
+    ['market', '__proto__'],
+    ['market', 'constructor'],
+    ['side', '__proto__'],
+    ['side', 'constructor'],
+  ])('rejects %s of %s as an unknown member', (field, value) => {
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand({ ...base, type: 'MARKET', [field]: value }),
+      ),
+    ).toBe('INVALID_ORDER');
+  });
+});
+
+// The lexical narrowing is a decision, not an accident: trading-core's money
+// reader parses these, the SDK refuses them, and the pin fails if either side
+// moves.
+describe('the SDK requires the canonical plain form the money reader does not', () => {
+  it.each([
+    ['leading zero integer', '007'],
+    ['leading zero fraction', '00.5'],
+  ])('rejects a %s price trading-core would parse', (_label, price) => {
+    expect(moneyDomainAdmitsPrice(price), 'trading-core still parses it').toBe(
+      true,
+    );
+    expect(
+      attempt(() =>
+        assertPlaceOrderCommand(command('LIMIT', { limitPrice: price })),
+      ),
+    ).toBe('INVALID_PRICE');
+  });
+
+  it('accepts the canonical spelling of the same magnitudes', () => {
+    for (const price of ['7', '0.5']) {
+      expect(
+        attempt(() =>
+          assertPlaceOrderCommand(command('LIMIT', { limitPrice: price })),
+        ),
+        price,
+      ).toBeUndefined();
+    }
+  });
+});
+
+// trading-core validates money through a private `Decimal.clone` snapshotted at
+// module load, precisely so nothing can move its domain afterwards. The SDK's
+// predicate has to be configured the same way, or the boundary drifts from the
+// domain it fronts — in both directions, and silently.
+describe('the money boundary does not move with the global Decimal', () => {
+  // 81 decimal places: outside the money domain. Under `minE: -1` the global
+  // constructor parses it to zero, which passes every magnitude check.
+  const OUTSIDE_DOMAIN = `0.${'0'.repeat(80)}1`;
+  // 31 integer digits: inside the money domain. Under `maxE: 5` the global
+  // constructor parses it to Infinity.
+  const INSIDE_DOMAIN = `1${'0'.repeat(30)}`;
+
+  interface ConfigurableDecimal {
+    set(config: { readonly minE?: number; readonly maxE?: number }): unknown;
+    readonly minE: number;
+    readonly maxE: number;
+  }
+
+  const globalDecimal = decimal(0)
+    .constructor as unknown as ConfigurableDecimal;
+
+  const underGlobalConfig = (
+    config: { readonly minE?: number; readonly maxE?: number },
+    act: () => void,
+  ): void => {
+    const { minE, maxE } = globalDecimal;
+
+    try {
+      globalDecimal.set(config);
+      act();
+    } finally {
+      globalDecimal.set({ minE, maxE });
+    }
+  };
+
+  const sdkAcceptsPrice = (price: string): boolean =>
+    attempt(() =>
+      assertPlaceOrderCommand(command('LIMIT', { limitPrice: price })),
+    ) === undefined;
+
+  it('still refuses an out-of-domain price when minE is narrowed', () => {
+    underGlobalConfig({ minE: -1 }, () => {
+      expect(moneyDomainAdmitsPrice(OUTSIDE_DOMAIN)).toBe(false);
+      expect(sdkAcceptsPrice(OUTSIDE_DOMAIN)).toBe(false);
+    });
+  });
+
+  it('still admits an in-domain price when maxE is narrowed', () => {
+    underGlobalConfig({ maxE: 5 }, () => {
+      expect(moneyDomainAdmitsPrice(INSIDE_DOMAIN)).toBe(true);
+      expect(sdkAcceptsPrice(INSIDE_DOMAIN)).toBe(true);
+    });
+  });
+
+  // The exponent bounds are part of that configuration: at decimal.js defaults
+  // this renders as `1e-8`, which is not a plain decimal at all.
+  it("renders money in plain form, as trading-core's money clone does", () => {
+    expect(moneyDecimal('0.00000001').toString()).toBe('0.00000001');
+    expect(moneyDecimal(`1${'0'.repeat(25)}`).toString()).toBe(
+      `1${'0'.repeat(25)}`,
+    );
   });
 });
 
@@ -435,3 +675,7 @@ accepts({ ...limitBase, limitPrice: '190.25' });
 accepts({ ...stopBase, triggerPrice: '180.00' });
 accepts({ ...takeProfitBase, triggerPrice: '180.00' });
 accepts({ ...ocoBase, ...prices });
+
+// A class satisfying the interface is a legal command at the type level, which
+// is why the runtime must accept it too.
+accepts(new LimitBuyFromMid(190.25));

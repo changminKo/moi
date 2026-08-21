@@ -17,6 +17,7 @@ import {
   assertIdentifier,
   isPositiveMoneyAmount,
   isPositiveWholeQuantity,
+  readOptionalField,
 } from './validation.js';
 
 // Keyed by the domain union rather than listed, so adding a `Market`, a `Side`,
@@ -213,11 +214,13 @@ function assertPriceField(
   rule: PriceRule,
   type: OrderType,
 ): void {
-  // `exactOptionalPropertyTypes` makes an explicit `undefined` a compile error,
-  // so presence of the key — not its value — is what the runtime mirror checks.
-  // Otherwise `{ ...marketOrder, limitPrice: undefined }` would be rejected by
-  // `tsc` and accepted here.
-  if (!Object.hasOwn(candidate, field)) {
+  // `readOptionalField` is the boundary's single presence policy, shared with
+  // the request-body builder that puts these fields on the wire. Reading a
+  // price any other way here would let the two disagree, and a disagreement in
+  // either direction re-opens the hole the price rules exist to close.
+  const { supplied, value } = readOptionalField(candidate, field);
+
+  if (!supplied) {
     if (rule === 'required') {
       throw new DomainError(
         'INVALID_ORDER',
@@ -235,7 +238,7 @@ function assertPriceField(
     );
   }
 
-  assertPositivePrice(candidate[field], field);
+  assertPositivePrice(value, field);
 }
 
 /**

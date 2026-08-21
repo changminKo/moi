@@ -60,8 +60,12 @@ accounts over one instance.
 
 ## Errors
 
-Every failure is a trading-core `DomainError`; no raw `TypeError` or
-`DecimalError` escapes a public method. A code the domain already knows is
+Every failure the SDK itself raises is a trading-core `DomainError`: no raw
+`TypeError` or `DecimalError` escapes a public method, whether the input came
+from a JavaScript caller or from the wire. The one thing that passes through
+unwrapped is an error thrown by the caller's own code — an accessor or a `Proxy`
+trap on a command object surfaces its own throw from the first property read,
+because that read *is* caller code. A code the domain already knows is
 preserved exactly and its retryability comes from trading-core's own table, not
 from the wire. Anything else is classified by status:
 
@@ -79,6 +83,31 @@ A transient status stays retryable because every write forwards its idempotency
 key unchanged, so a retry replays rather than duplicates. Conversely a `409`
 must never read as `INVALID_ORDER`, whose natural recovery — reformulate and
 resend under a new key — is exactly what a key already in flight forbids.
+
+## Value formats on the boundary
+
+Both directions — a command in, a payload out — are held to the *canonical*
+plain form, which is narrower than what trading-core's own readers parse:
+
+- **Money and prices** are non-negative plain decimals with no sign, no
+  exponent, and no leading zero: `190.25`, `0.50`, `0`. trading-core's money
+  reader also accepts `007` and `-5`; the SDK does not, because every value it
+  emits or forwards is canonical `Decimal.toString()` output, which never has
+  either. The magnitude bounds are trading-core's exact money domain, parsed
+  through a private `Decimal` clone configured identically to trading-core's, so
+  no `Decimal.set` elsewhere in the realm can move this boundary.
+- **Quantities** are plain positive whole numbers: `3`, not `1e3` or `0x10`,
+  both of which `decimal.js` would read as `3000` and `16`. The wire carries the
+  string verbatim, so the plain form is settled before the request is built.
+- **Instants** (`ExchangeReceipt.executedAt`) are ISO-8601 in UTC with a
+  trailing `Z` and at most nanosecond precision. A numeric offset form
+  (`+09:00`) is rejected; a calendar-impossible date (`2026-02-30T00:00:00Z`) is
+  accepted, because `Date.parse` rolls it over. `executedAt` feeds no
+  arithmetic, so the exposure is a misleading timestamp rather than a bad
+  computation.
+- **A `retryAfter` hint** is kept only when it is a finite, non-negative number
+  on an error that trading-core's own table calls retryable; it has no upper
+  bound, because the ceiling belongs to whatever retry policy the caller runs.
 
 ## The contract suite
 
