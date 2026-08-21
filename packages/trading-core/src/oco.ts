@@ -1,4 +1,5 @@
 import { DomainError } from './domain-errors.js';
+import type { OrderStatus } from './domain-types.js';
 import { type OrderSnapshot, transitionOrder } from './order.js';
 
 export type OcoGroupStatus = 'ACTIVE' | 'RESOLVED';
@@ -10,6 +11,13 @@ export interface OcoGroupSnapshot {
   readonly winnerLegId?: string;
   readonly version: bigint;
 }
+
+const winningStatuses: ReadonlySet<OrderStatus> = new Set([
+  'TRIGGERED',
+  'OPEN',
+  'PARTIALLY_FILLED',
+  'FILLED',
+]);
 
 export function resolveOco(
   group: OcoGroupSnapshot,
@@ -46,6 +54,7 @@ export function resolveOco(
 
   const winnerIsFirst = winnerLegId === firstLeg.id;
   const winner = winnerIsFirst ? firstLeg : secondLeg;
+  const sibling = winnerIsFirst ? secondLeg : firstLeg;
   if (
     winner.status === 'CANCELLED' ||
     winner.status === 'EXPIRED' ||
@@ -57,10 +66,24 @@ export function resolveOco(
     );
   }
 
-  const cancelledSibling = transitionOrder(
-    winnerIsFirst ? secondLeg : firstLeg,
-    { type: 'CANCELLED' },
-  );
+  if (!winningStatuses.has(winner.status)) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `Order ${winnerLegId} has not progressed enough to win OCO group ${group.id}`,
+    );
+  }
+
+  if (
+    sibling.status !== 'PENDING_TRIGGER' ||
+    sibling.filledQuantity !== undefined
+  ) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `OCO group ${group.id} has an invalid losing sibling`,
+    );
+  }
+
+  const cancelledSibling = transitionOrder(sibling, { type: 'CANCELLED' });
 
   return {
     ...group,

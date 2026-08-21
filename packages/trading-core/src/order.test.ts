@@ -1,6 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-
+import type { OrderStatus } from './domain-types.js';
 import {
   type OrderEvent,
   type OrderSnapshot,
@@ -35,7 +35,75 @@ const events: readonly OrderEvent[] = [
   { type: 'IOC_REMAINDER', filledQuantity: '1' },
 ];
 
+const expectedTargetByStatus: Readonly<
+  Record<
+    OrderStatus,
+    Readonly<Partial<Record<OrderEvent['type'], OrderStatus>>>
+  >
+> = {
+  RECEIVED: {
+    REJECTED: 'REJECTED',
+    OPENED: 'OPEN',
+    PENDING_TRIGGER: 'PENDING_TRIGGER',
+  },
+  PENDING_TRIGGER: {
+    TRIGGERED: 'TRIGGERED',
+    CANCELLED: 'CANCELLED',
+    EXPIRED: 'EXPIRED',
+  },
+  TRIGGERED: {
+    OPENED: 'OPEN',
+    FILLED: 'FILLED',
+    CANCELLED: 'CANCELLED',
+  },
+  OPEN: {
+    PARTIALLY_FILLED: 'PARTIALLY_FILLED',
+    FILLED: 'FILLED',
+    CANCELLED: 'CANCELLED',
+    EXPIRED: 'EXPIRED',
+    IOC_REMAINDER: 'CANCELLED',
+  },
+  PARTIALLY_FILLED: {
+    PARTIALLY_FILLED: 'PARTIALLY_FILLED',
+    FILLED: 'FILLED',
+    CANCELLED: 'CANCELLED',
+    EXPIRED: 'EXPIRED',
+    IOC_REMAINDER: 'CANCELLED',
+  },
+  FILLED: {},
+  CANCELLED: {},
+  EXPIRED: {},
+  REJECTED: {},
+};
+
 describe('transitionOrder', () => {
+  it('implements the independently specified status and event matrix', () => {
+    for (const [status, expectedTargets] of Object.entries(
+      expectedTargetByStatus,
+    ) as [OrderStatus, (typeof expectedTargetByStatus)[OrderStatus]][]) {
+      for (const event of events) {
+        const expectedTarget = expectedTargets[event.type];
+        const transition = () =>
+          transitionOrder(orderFixture({ status, version: 4n }), event);
+
+        if (expectedTarget === undefined) {
+          expect(transition).toThrowError(
+            expect.objectContaining({
+              code: 'ORDER_STATE_CONFLICT',
+              retryable: false,
+            }),
+          );
+          continue;
+        }
+
+        expect(transition()).toMatchObject({
+          status: expectedTarget,
+          version: 5n,
+        });
+      }
+    }
+  });
+
   it.each([
     ['RECEIVED', { type: 'REJECTED' }, 'REJECTED'],
     ['RECEIVED', { type: 'OPENED' }, 'OPEN'],
