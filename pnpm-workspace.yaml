@@ -1,3 +1,10 @@
 packages:
   - apps/*
   - packages/*
+# @testcontainers/postgresql pulls ssh2 (with its optional cpu-features addon)
+# and protobufjs. None of their install scripts are needed to reach a local
+# Docker daemon, and pnpm fails the install while the decision is unrecorded.
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

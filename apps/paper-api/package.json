@@ -4,8 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --build",
-    "test": "vitest run --passWithNoTests",
+    "build": "tsc --build && node --eval \"fs.cpSync('src/db/migrations', 'dist/db/migrations', { recursive: true })\"",
+    "test": "vitest run --passWithNoTests --dir src",
     "typecheck": "tsc --build --pretty false"
+  },
+  "dependencies": {
+    "kysely": "0.29.5",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/pg": "8.23.1",
+    "vitest": "4.1.11"
   }
 }
