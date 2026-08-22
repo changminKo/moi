@@ -405,6 +405,60 @@ describe('PaperBroker guards every public method at the runtime boundary', () =>
   });
 });
 
+// The transport is caller code, and a caller may break its own declared
+// `Promise<PaperBrokerResponse>`. Every answer that is not a response is a
+// broken contract on this seam, so it fails as a `DomainError` like every other
+// malformed value the paper API hands back — not as a raw `TypeError` from the
+// destructuring, which is what the README's `Errors` section promises.
+describe('PaperBroker guards the transport answer itself', () => {
+  const answering = (response: unknown): PaperBrokerTransport => ({
+    request: async () => response as PaperBrokerResponse,
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a number', 5],
+    ['a string', 'nope'],
+    ['an array', []],
+  ])('rejects %s from the transport on every method', async (_label, value) => {
+    const broker = new PaperBroker(answering(value));
+
+    for (const act of [
+      () => broker.placeOrder(marketBuy),
+      () =>
+        broker.cancelOrder({
+          sessionId: SESSION_ID,
+          idempotencyKey: 'k',
+          orderId: 'order-1',
+        }),
+      () => broker.exchange(exchangeCommand),
+      () => broker.getPortfolio(SESSION_ID),
+    ]) {
+      await expect(codeOf(act)).resolves.toBe('INVARIANT_VIOLATION');
+    }
+  });
+
+  // `status < 200 || status >= 300` is `false` for `NaN` in both halves, so a
+  // status that is a type-legal `number` but not a status would take the success
+  // path and have its body decoded as a snapshot.
+  it.each([
+    ['a NaN', Number.NaN],
+    ['an infinite', Number.POSITIVE_INFINITY],
+    ['a fractional', 200.5],
+    ['an absent', undefined],
+    ['a string', '200'],
+  ])('rejects %s status', async (_label, status) => {
+    const broker = new PaperBroker(
+      answering({ status, body: { id: 'o', status: 'OPEN', version: '1' } }),
+    );
+
+    await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
+      'INVARIANT_VIOLATION',
+    );
+  });
+});
+
 describe('PaperBroker classifies transport statuses', () => {
   const CASES: readonly (readonly [number, string, boolean])[] = [
     [400, 'INVALID_ORDER', false],
@@ -495,6 +549,7 @@ describe('PaperBroker decodes the error envelope it validated', () => {
   const driftingErrorBody = (
     field: string,
     values: readonly unknown[],
+    overrides: Readonly<Record<string, unknown>> = {},
   ): {
     readonly body: Record<string, unknown>;
     readonly reads: () => number;
@@ -504,6 +559,7 @@ describe('PaperBroker decodes the error envelope it validated', () => {
       code: 'INVALID_ORDER',
       message: 'the order was refused',
       requestId: 'req-decode-1',
+      ...overrides,
     };
 
     Object.defineProperty(body, field, {
@@ -567,6 +623,54 @@ describe('PaperBroker decodes the error envelope it validated', () => {
       message: 'the order was refused (requestId req-decode-1)',
     });
     expect(reads()).toBe(1);
+  });
+
+  // `retryAfter` is the one envelope field whose value leaves this boundary as a
+  // number rather than as prose, and it is the one a strategy *acts* on: it goes
+  // straight into a backoff. The `Number.isFinite && >= 0` guard runs on the read
+  // the decoder binds, so the emitted `retryAfterSeconds` has to be that read —
+  // otherwise a value that passed no check at all schedules the retry.
+  it('takes the retryAfter hint from the read it type-checked', async () => {
+    const { body, reads } = driftingErrorBody('retryAfter', [5, -99], {
+      code: 'RATE_LIMITED',
+      message: 'slow down',
+    });
+
+    const thrown = await errorFrom({ status: 429, body });
+
+    expect(thrown).toMatchObject({
+      code: 'RATE_LIMITED',
+      retryable: true,
+      retryAfterSeconds: 5,
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it('raises a DomainError when a retryAfter accessor throws on a second read', async () => {
+    let reads = 0;
+    const body: Record<string, unknown> = {
+      code: 'RATE_LIMITED',
+      message: 'slow down',
+    };
+
+    Object.defineProperty(body, 'retryAfter', {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+
+        if (reads > 1) {
+          throw new RangeError('boom-retryAfter');
+        }
+
+        return 5;
+      },
+    });
+
+    const thrown = await errorFrom({ status: 429, body });
+
+    expect(thrown).toBeInstanceOf(DomainError);
+    expect(thrown).toMatchObject({ retryAfterSeconds: 5 });
+    expect(reads).toBe(1);
   });
 
   it.each(['code', 'message', 'requestId'])(

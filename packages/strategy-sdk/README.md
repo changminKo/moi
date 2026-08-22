@@ -67,9 +67,14 @@ unwrapped is an error thrown by your own code — an accessor or a `Proxy` trap,
 whether on a command object or on the response object your transport hands back,
 surfaces its own throw from the *first* property read, because that read *is*
 your code. There is never a second read on either side to throw from: every
-caller field and every response field is read exactly once. A code the domain already knows is
-preserved exactly and its retryability comes from trading-core's own table, not
-from the wire. Anything else is classified by status:
+caller field and every response field is read exactly once. A transport that
+resolves to something that is not a `PaperBrokerResponse` at all — `null`,
+`undefined`, a number, or a response whose `status` is not a whole number — is
+breaking its own declared return type, and that fails as an
+`INVARIANT_VIOLATION` rather than as a raw `TypeError`. A code the domain
+already knows is preserved exactly and its retryability comes from
+trading-core's own table, not from the wire. Anything else is classified by
+status:
 
 | Status | Code | Retryable |
 | --- | --- | --- |
@@ -218,3 +223,25 @@ The factory must build a harness over real state transitions; a forwarding mock
 proves nothing about replay. The suite drives `vitest`, which is why it lives
 behind `./testing` and not on the main entry point — the main entry's runtime
 graph is `@skipjack/trading-core` and nothing else.
+
+What the suite requires of an implementation, beyond replay and the state
+transitions:
+
+- **Every shape of `PlaceOrderCommand`.** It places a `MARKET`, a `LIMIT`, a
+  `STOP`, a `TAKE_PROFIT` and an `OCO`, and asserts that the `MARKET` order
+  settles terminal while the other four rest `OPEN`. A venue without OCO fails
+  the suite: `PlaceOcoOrderCommand` is part of the published union, so an
+  implementation of this `Broker` accepts it. The shape list is keyed off
+  `PLACE_ORDER_PRICE_RULES`, so an `OrderType` added in trading-core fails the
+  suite until it is driven too.
+- **One read per caller field, per shape.** For each method that takes a command
+  and each shape of that command, the suite hands you an object whose every
+  field is an accessor that answers differently from the second read onwards,
+  and asserts each field was read exactly **once** — so validating from the
+  caller's object and then building the request from it again fails, including
+  behind a `type` guard that only one shape reaches. Read each field once, and
+  act on that snapshot: `readPlaceOrderCommand`, `readCancelOrderCommand` and
+  `readExchangeCommand` return exactly that. Note the counted operation is a
+  property *read*: a presence probe (`Object.hasOwn`, `in`) is not counted, so
+  the property binds what reaches your request body rather than every way you
+  might inspect the argument.

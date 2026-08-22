@@ -12,6 +12,7 @@ import {
   DomainError,
   type OrderSnapshot,
   type OrderStatus,
+  type OrderType,
   transitionOrder,
   type WalletSnapshot,
 } from '@skipjack/trading-core';
@@ -21,8 +22,13 @@ import {
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
+  PLACE_ORDER_PRICE_RULES,
+  type PlaceLimitOrderCommand,
+  type PlaceMarketOrderCommand,
   type PlaceOcoOrderCommand,
   type PlaceOrderCommand,
+  type PlaceStopOrderCommand,
+  type PlaceTakeProfitOrderCommand,
   type PortfolioSnapshot,
   readCancelOrderCommand,
   readExchangeCommand,
@@ -70,7 +76,14 @@ const walletFor = (
   return wallet;
 };
 
-const marketBuy = (idempotencyKey: string): PlaceOrderCommand => ({
+/**
+ * One fixture per member of the published `PlaceOrderCommand` union, each typed
+ * as *its own* member interface rather than as the union, so a field added to
+ * `PlaceOrderCommandBase` is a compile error in all five until every one of them
+ * supplies it — which is what ties the exhaustiveness below to the command
+ * shapes rather than to a list someone remembered to extend.
+ */
+const marketBuy = (idempotencyKey: string): PlaceMarketOrderCommand => ({
   sessionId: CONTRACT_SESSION_ID,
   idempotencyKey,
   market: 'US',
@@ -80,7 +93,7 @@ const marketBuy = (idempotencyKey: string): PlaceOrderCommand => ({
   quantity: '3',
 });
 
-const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
+const limitBuy = (idempotencyKey: string): PlaceLimitOrderCommand => ({
   sessionId: CONTRACT_SESSION_ID,
   idempotencyKey,
   market: 'US',
@@ -91,13 +104,36 @@ const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
   limitPrice: '190.25',
 });
 
+const stopBuy = (idempotencyKey: string): PlaceStopOrderCommand => ({
+  sessionId: CONTRACT_SESSION_ID,
+  idempotencyKey,
+  market: 'US',
+  symbol: 'AAPL',
+  side: 'BUY',
+  type: 'STOP',
+  quantity: '1',
+  triggerPrice: '188.00',
+});
+
+const takeProfitSell = (
+  idempotencyKey: string,
+): PlaceTakeProfitOrderCommand => ({
+  sessionId: CONTRACT_SESSION_ID,
+  idempotencyKey,
+  market: 'US',
+  symbol: 'AAPL',
+  side: 'SELL',
+  type: 'TAKE_PROFIT',
+  quantity: '1',
+  triggerPrice: '210.00',
+});
+
 /**
- * An `OCO` command, the one place shape that supplies *every* caller field the
- * place boundary reads: both prices as well as the seven required fields. It is
- * typed as the published command interface, so a field added to that interface
- * is a compile error here until this fixture supplies one — which is what ties
- * the exhaustiveness below to the command shapes rather than to a list someone
- * remembered to extend.
+ * `OCO` is the one place shape that *supplies* every caller field the place
+ * boundary reads: both prices as well as the seven required fields. The other
+ * four leave one or both prices absent, which the boundary still reads — so all
+ * five are driven over the same nine fields, and on those four the optional
+ * prices drift from absent to supplied.
  */
 const ocoBuy = (idempotencyKey: string): PlaceOcoOrderCommand => ({
   sessionId: CONTRACT_SESSION_ID,
@@ -128,9 +164,13 @@ const exchangeQuote = (
  * listed: the published reader for the shape is driven with a recording `Proxy`
  * over a valid command, and the fields it reads are the fields a caller can
  * supply. A field added to a command shape and read at the boundary is therefore
- * covered by the properties below with no fixture to update, and a field the
- * boundary stops reading is caught by the coverage assertion that compares this
- * set against the shape's own keys.
+ * bound by the read-count properties below with no fixture to update.
+ *
+ * The coverage assertion is the other half, and it is a tripwire rather than a
+ * free extension: it compares this discovered set against the shape's own keys,
+ * so a newly read field *fails* that assertion until the fixture supplies it. A
+ * new required field cannot be missed either way, because the fixtures are typed
+ * as the published command interfaces and `tsc` refuses them first.
  */
 const discoverCommandFields = (
   read: (command: unknown) => unknown,
@@ -170,8 +210,18 @@ interface DriftingCommand {
  * The accessors sit on the prototype because an own `get` is flattened by a
  * spread, which would hide the very extra read this is looking for. A field the
  * base does not carry drifts from *absent* to supplied, which is the sharp case
- * for an optional price: a `MARKET` order that validated carrying no trigger
- * price must not reach the wire carrying one.
+ * for an optional price and is exercised by four of the five place shapes: a
+ * `MARKET` order that validated carrying no price at all must not reach the wire
+ * carrying one, and a `STOP` must not gain a `limitPrice` the rules refused.
+ *
+ * What is counted is a property *read*. A presence probe — `Object.hasOwn`, or
+ * `in` — reaches a descriptor rather than the accessor, so it is not counted and
+ * an implementation that probes twice is not failed. That is deliberate: the
+ * property binds the values that reach an effect, and probing presence is a
+ * legitimate thing for a boundary to do (this package's own `readOptionalField`
+ * does it). The unbound residue is an implementation whose *second* presence
+ * probe answers differently from its first, which needs a `Proxy` trap rather
+ * than an accessor.
  */
 const driftEveryField = (
   fields: readonly string[],
@@ -212,10 +262,16 @@ const driftEveryField = (
  */
 type CommandMethod = Exclude<keyof Broker, 'getPortfolio'>;
 
-interface CommandBoundary {
-  /** The shape's fields, discovered from its published reader. */
+interface CommandShape {
+  /**
+   * How the property names the command this shape drives. A method whose
+   * command type is not a union has one shape and names it plainly, so its
+   * property keeps the name it already had.
+   */
+  readonly label: string;
+  /** This shape's fields, discovered from the method's published reader. */
   readonly fields: () => readonly string[];
-  /** The first read of every field, and the keys the shape declares. */
+  /** The first read of every field. */
   readonly base: (harness: BrokerContractHarness) => Record<string, unknown>;
   /**
    * Drives the method and asserts the effect the *first* read earns, so the
@@ -228,75 +284,154 @@ interface CommandBoundary {
   ) => Promise<void>;
 }
 
+interface CommandBoundary {
+  /**
+   * Every shape a caller can send to this method, each driven separately. A
+   * single shape binds a field only where that shape reaches it: a second read
+   * behind `if (command.type === 'STOP')` is invisible to a suite that only ever
+   * drives an `OCO`, even though the read counts on `OCO` are perfect.
+   */
+  readonly shapes: readonly CommandShape[];
+  /** The keys the widest shape of this command declares. */
+  readonly declaredFields: () => readonly string[];
+}
+
+/**
+ * The place shapes, with the status each one's *first* read earns: a `MARKET`
+ * order fills on arrival, so it is terminal and gone from `activeOrders`, while
+ * every other type rests `OPEN`. Every second read is invalid whichever shape it
+ * lands on — a drifted `type` is not an order type at all, a drifted `sessionId`
+ * names another account, and a drifted price is forbidden on the types that
+ * carry none — so an implementation that re-reads is refused rather than merely
+ * wrong.
+ */
+const PLACE_SHAPES: readonly {
+  readonly type: OrderType;
+  readonly command: (idempotencyKey: string) => PlaceOrderCommand;
+  readonly settledStatus: OrderStatus;
+}[] = [
+  { type: 'MARKET', command: marketBuy, settledStatus: 'FILLED' },
+  { type: 'LIMIT', command: limitBuy, settledStatus: 'OPEN' },
+  { type: 'STOP', command: stopBuy, settledStatus: 'OPEN' },
+  { type: 'TAKE_PROFIT', command: takeProfitSell, settledStatus: 'OPEN' },
+  { type: 'OCO', command: ocoBuy, settledStatus: 'OPEN' },
+];
+
+const placeShapeBoundary = (
+  shape: (typeof PLACE_SHAPES)[number],
+): CommandShape => ({
+  label: `${shape.type} command`,
+  fields: () =>
+    discoverCommandFields(
+      readPlaceOrderCommand,
+      shape.command(`discover-place-${shape.type}`),
+    ),
+  base: (harness: BrokerContractHarness) => ({
+    ...shape.command(`fields-place-${shape.type}`),
+    sessionId: harness.sessionId,
+  }),
+  act: async (
+    broker: Broker,
+    command: unknown,
+    harness: BrokerContractHarness,
+  ) => {
+    const before = await broker.getPortfolio(harness.sessionId);
+    const placed = await broker.placeOrder(command as PlaceOrderCommand);
+    const after = await broker.getPortfolio(harness.sessionId);
+
+    expect(placed.status).toBe(shape.settledStatus);
+
+    // A resting order is live exactly once; a filled one is terminal and gone.
+    // Either way the placement is a durable effect, which the sequence records —
+    // so no shape can satisfy this by quietly doing nothing.
+    expect(
+      after.activeOrders.filter((order) => order.id === placed.id),
+    ).toHaveLength(TERMINAL_STATUSES.has(shape.settledStatus) ? 0 : 1);
+    expect(after.accountSequence).not.toBe(before.accountSequence);
+  },
+});
+
 const COMMAND_BOUNDARIES: Readonly<Record<CommandMethod, CommandBoundary>> = {
   placeOrder: {
-    fields: () =>
-      discoverCommandFields(readPlaceOrderCommand, ocoBuy('discover-place')),
-    base: (harness) => ({
-      ...ocoBuy('fields-place-1'),
-      sessionId: harness.sessionId,
-    }),
-    act: async (broker, command, harness) => {
-      const placed = await broker.placeOrder(command as PlaceOrderCommand);
-      const after = await broker.getPortfolio(harness.sessionId);
-
-      // An OCO order is not a MARKET order, so it stays OPEN, and it is there
-      // exactly once. Every second read is invalid — a drifted `type` is not an
-      // order type at all, a drifted `sessionId` names another account — so an
-      // implementation that re-reads is refused rather than merely wrong.
-      expect(placed.status).toBe('OPEN');
-      expect(
-        after.activeOrders.filter((order) => order.id === placed.id),
-      ).toHaveLength(1);
-    },
+    shapes: PLACE_SHAPES.map(placeShapeBoundary),
+    declaredFields: () => Object.keys(ocoBuy('declared-place')),
   },
   cancelOrder: {
-    fields: () =>
-      discoverCommandFields(
-        readCancelOrderCommand,
+    shapes: [
+      {
+        label: 'command',
+        fields: () =>
+          discoverCommandFields(
+            readCancelOrderCommand,
+            cancelOpenOrder(
+              CONTRACT_SESSION_ID,
+              CONTRACT_OPEN_ORDER_ID,
+              'discover-cancel',
+            ),
+          ),
+        base: (harness) => ({
+          ...cancelOpenOrder(
+            harness.sessionId,
+            harness.openOrderId,
+            'fields-cancel-1',
+          ),
+        }),
+        act: async (broker, command, harness) => {
+          const cancelled = await broker.cancelOrder(
+            command as CancelOrderCommand,
+          );
+
+          // The order that was validated is the order that was cancelled. A
+          // second read of `orderId` addresses an order that does not exist —
+          // which is the path-traversal shape when the identifier reaches a URL
+          // path segment.
+          expect(cancelled.id).toBe(harness.openOrderId);
+          expect(cancelled.status).toBe('CANCELLED');
+        },
+      },
+    ],
+    declaredFields: () =>
+      Object.keys(
         cancelOpenOrder(
           CONTRACT_SESSION_ID,
           CONTRACT_OPEN_ORDER_ID,
-          'discover-cancel',
+          'declared-cancel',
         ),
       ),
-    base: (harness) => ({
-      ...cancelOpenOrder(
-        harness.sessionId,
-        harness.openOrderId,
-        'fields-cancel-1',
-      ),
-    }),
-    act: async (broker, command, harness) => {
-      const cancelled = await broker.cancelOrder(command as CancelOrderCommand);
-
-      // The order that was validated is the order that was cancelled. A second
-      // read of `orderId` addresses an order that does not exist — which is the
-      // path-traversal shape when the identifier reaches a URL path segment.
-      expect(cancelled.id).toBe(harness.openOrderId);
-      expect(cancelled.status).toBe('CANCELLED');
-    },
   },
   exchange: {
-    fields: () =>
-      discoverCommandFields(
-        readExchangeCommand,
-        exchangeQuote(CONTRACT_SESSION_ID, CONTRACT_QUOTE_ID, 'discover-fx'),
-      ),
-    base: (harness) => ({
-      ...exchangeQuote(
-        harness.sessionId,
-        harness.exchangeQuoteId,
-        'fields-fx-1',
-      ),
-    }),
-    act: async (broker, command, harness) => {
-      const receipt = await broker.exchange(command as ExchangeCommand);
+    shapes: [
+      {
+        label: 'command',
+        fields: () =>
+          discoverCommandFields(
+            readExchangeCommand,
+            exchangeQuote(
+              CONTRACT_SESSION_ID,
+              CONTRACT_QUOTE_ID,
+              'discover-fx',
+            ),
+          ),
+        base: (harness) => ({
+          ...exchangeQuote(
+            harness.sessionId,
+            harness.exchangeQuoteId,
+            'fields-fx-1',
+          ),
+        }),
+        act: async (broker, command, harness) => {
+          const receipt = await broker.exchange(command as ExchangeCommand);
 
-      // The quote that was validated is the quote that was consumed.
-      expect(receipt.quoteId).toBe(harness.exchangeQuoteId);
-      expect(receipt.sessionId).toBe(harness.sessionId);
-    },
+          // The quote that was validated is the quote that was consumed.
+          expect(receipt.quoteId).toBe(harness.exchangeQuoteId);
+          expect(receipt.sessionId).toBe(harness.sessionId);
+        },
+      },
+    ],
+    declaredFields: () =>
+      Object.keys(
+        exchangeQuote(CONTRACT_SESSION_ID, CONTRACT_QUOTE_ID, 'declared-fx'),
+      ),
   },
 };
 
@@ -325,11 +460,14 @@ const COMMAND_BOUNDARIES: Readonly<Record<CommandMethod, CommandBoundary>> = {
  * observable effect — `sessionId` is not on the wire of a `placeOrder`, so an
  * adapter that re-reads it diverges from the validated command without changing
  * any outcome. That is why the read-count properties below exist beside this
- * one: they bind every field of every command shape by counting the reads
- * themselves. One-extra-read mutants for all fifteen (method, field) pairs are
- * recorded in the wave-5 report, applied separately in each of the two drivers
- * this package ships; each fails in the driver that carries it, and every one of
- * the thirty fails a read-count property.
+ * one: they bind every field of *every* shape of every command by counting the
+ * reads themselves — fifty-one (method, shape, field) triples, driven separately
+ * in each of the two drivers this package ships. This fixture also cannot show a
+ * second read that only one shape reaches: `if (command.type === 'STOP')` in
+ * front of a re-read is invisible to a `LIMIT`. One-extra-read mutants for the
+ * pairs are recorded in the wave-5 report and the shape-guarded ones in the
+ * wave-6 report; each fails in the driver that carries it, and every one fails a
+ * read-count property.
  */
 const driftingLimitBuy = (idempotencyKey: string): PlaceOrderCommand => {
   const reads = new Map<string, number>();
@@ -451,52 +589,74 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
 
   // Exhaustiveness, mechanically. The property above proves the *harm* of a
   // second read on one command shape; these prove the *discipline* on every
-  // method that takes a command and every field a caller can supply, with the
-  // field set discovered from each published reader rather than listed.
+  // method that takes a command, every shape that command has, and every field
+  // a caller can supply — with the shape list keyed off the published union and
+  // the field set discovered from each published reader rather than listed.
+  // Per-shape rather than per-method because a read behind a `type` guard is
+  // reached by one shape only: an implementation whose counts are perfect on an
+  // `OCO` can still re-read a `STOP`'s trigger price.
   for (const [method, boundary] of Object.entries(COMMAND_BOUNDARIES)) {
-    it(`${method} reads every field of its command exactly once`, async () => {
-      const fields = boundary.fields();
-      const drifting = driftEveryField(fields, boundary.base(harness));
+    for (const shape of boundary.shapes) {
+      it(`${method} reads every field of its ${shape.label} exactly once`, async () => {
+        const fields = shape.fields();
+        const drifting = driftEveryField(fields, shape.base(harness));
 
-      await boundary.act(broker, drifting.command, harness);
+        await shape.act(broker, drifting.command, harness);
 
-      // Exactly once, not at most once: a field that is never read was never
-      // validated, and a field read twice was validated as one value and acted
-      // on as another. One read per field is the only count that is both.
-      expect(drifting.reads()).toStrictEqual(
-        Object.fromEntries(fields.map((field) => [field, 1])),
-      );
-    });
+        // Exactly once, not at most once: a field that is never read was never
+        // validated, and a field read twice was validated as one value and acted
+        // on as another. One read per field is the only count that is both.
+        expect(drifting.reads()).toStrictEqual(
+          Object.fromEntries(fields.map((field) => [field, 1])),
+        );
+      });
+    }
   }
 
   it('covers every caller-supplied field of every command shape', () => {
-    const discovered = Object.fromEntries(
-      Object.entries(COMMAND_BOUNDARIES).map(([method, boundary]) => [
-        method,
-        [...boundary.fields()].sort(),
-      ]),
+    // Two independent derivations of the same set: the left side is what the
+    // published reader actually reads when driven with that shape, the right
+    // side is what the command type declares. A field added to a shape but not
+    // read at the boundary, or read at the boundary but absent from the shape,
+    // fails here.
+    for (const boundary of Object.values(COMMAND_BOUNDARIES)) {
+      const declared = [...boundary.declaredFields()].sort();
+
+      for (const shape of boundary.shapes) {
+        expect([...shape.fields()].sort()).toStrictEqual(declared);
+      }
+    }
+
+    // The place shapes are keyed off the runtime mirror of the published union
+    // rather than listed, so an `OrderType` added in trading-core fails here
+    // until a shape is driven for it — the same tie-in that makes a new `Broker`
+    // method a compile error and a new command field a compile error.
+    expect(PLACE_SHAPES.map((shape) => shape.type).sort()).toStrictEqual(
+      Object.keys(PLACE_ORDER_PRICE_RULES).sort(),
     );
 
-    // Two independent derivations of the same set: the left side is what each
-    // published reader actually reads, the right side is what each command
-    // shape declares. A field added to a shape but not read at the boundary,
-    // or read at the boundary but absent from the shape, fails here.
-    expect(discovered).toStrictEqual({
-      placeOrder: Object.keys(ocoBuy('k')).sort(),
-      cancelOrder: Object.keys(
-        cancelOpenOrder(harness.sessionId, harness.openOrderId, 'k'),
-      ).sort(),
-      exchange: Object.keys(
-        exchangeQuote(harness.sessionId, harness.exchangeQuoteId, 'k'),
-      ).sort(),
-    });
+    for (const shape of PLACE_SHAPES) {
+      expect(shape.command('shape-check').type).toBe(shape.type);
+    }
 
-    // And the count of (method, field) pairs the loop above covers.
-    const pairs = Object.values(COMMAND_BOUNDARIES).reduce(
-      (total, boundary) => total + boundary.fields().length,
+    // And the count of (method, shape, field) triples the loop above covers,
+    // both sides derived: what every shape's reader read, against shapes-the-
+    // type-has x fields-the-shape-declares. Neither side can collapse to zero
+    // without the assertions above failing first, so a new shape or a new field
+    // is covered by construction rather than by remembering to bump a literal.
+    const triples = Object.values(COMMAND_BOUNDARIES).reduce(
+      (total, boundary) =>
+        total +
+        boundary.shapes.reduce((sum, shape) => sum + shape.fields().length, 0),
       0,
     );
-    expect(pairs).toBe(9 + 3 + 3);
+    expect(triples).toBe(
+      Object.values(COMMAND_BOUNDARIES).reduce(
+        (total, boundary) =>
+          total + boundary.shapes.length * boundary.declaredFields().length,
+        0,
+      ),
+    );
   });
 
   it('rejects a reused idempotency key that carries a different payload', async () => {

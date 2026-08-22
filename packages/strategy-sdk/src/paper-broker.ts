@@ -530,10 +530,37 @@ export class PaperBroker implements Broker {
   }
 
   async #send(request: PaperBrokerRequest): Promise<unknown> {
-    // The transport is caller code as well, so its response is snapshotted the
-    // way a command is: `status` and `body` are read once each, and the decoders
-    // downstream work from that one read.
-    const { status, body } = await this.#transport.request(request);
+    // The transport is caller code as well, so its answer crosses a runtime
+    // boundary like a command does: it is narrowed before it is destructured,
+    // then `status` and `body` are read once each and the decoders downstream
+    // work from that one read. A transport that resolves to something that is
+    // not a response is breaking its own declared `Promise<PaperBrokerResponse>`
+    // — a broken contract on this seam, not a bad order — so it fails as a
+    // `DomainError` rather than as a raw `TypeError` from the destructuring.
+    const response: unknown = await this.#transport.request(request);
+
+    if (
+      typeof response !== 'object' ||
+      response === null ||
+      Array.isArray(response)
+    ) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'the paper API transport returned a malformed response',
+      );
+    }
+
+    const { status, body } = response as PaperBrokerResponse;
+
+    // A whole number, not merely a `number`: `status < 200 || status >= 300` is
+    // `false` in both halves for `NaN`, so a status that never was one would
+    // otherwise take the success path and have its body decoded as a snapshot.
+    if (!Number.isInteger(status)) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'the paper API returned a malformed response status',
+      );
+    }
 
     if (status < 200 || status >= 300) {
       throw decodeError(status, body);
