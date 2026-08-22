@@ -153,7 +153,11 @@ export async function lockWallet(
     sessionId: key.sessionId,
     currency: key.currency,
   });
-  connection.acquireLock({ table: 'wallets', key: walletLockKey(wanted) });
+  connection.acquireLock({
+    table: 'wallets',
+    key: walletLockKey(wanted),
+    strength: 'UPDATE',
+  });
   const result = await sql<WalletRow>`
     select id, session_id, currency, total, available, reserved, version
     from wallets
@@ -173,7 +177,11 @@ export async function lockPosition(
     marketCode: key.marketCode,
     symbol: key.symbol,
   });
-  connection.acquireLock({ table: 'positions', key: positionLockKey(wanted) });
+  connection.acquireLock({
+    table: 'positions',
+    key: positionLockKey(wanted),
+    strength: 'UPDATE',
+  });
   const result = await sql<PositionRow>`
     select
       id, session_id, market_code, symbol, total_quantity,
@@ -203,6 +211,7 @@ export async function reserveCashOnWallet(
   const wallet = input.wallet;
   const request = snapshotInput({
     walletId: wallet.id,
+    sessionId: wallet.sessionId,
     currency: wallet.currency,
     total: wallet.total,
     available: wallet.available,
@@ -221,6 +230,15 @@ export async function reserveCashOnWallet(
     },
     request.amount,
   );
+
+  // The `update` takes a `for no key update` lock on the same row `lockWallet`
+  // takes `for update`, so it is declared under the same natural key: the
+  // guard has to see one row, not two.
+  connection.acquireLock({
+    table: 'wallets',
+    key: walletLockKey(request),
+    strength: 'NO_KEY_UPDATE',
+  });
 
   const result = await sql<{ version: string }>`
     update wallets
@@ -241,6 +259,8 @@ export async function reservePositionQuantity(
   const position = input.position;
   const request = snapshotInput({
     positionId: position.id,
+    sessionId: position.sessionId,
+    marketCode: position.marketCode,
     symbol: position.symbol,
     total: position.total,
     available: position.available,
@@ -260,6 +280,12 @@ export async function reservePositionQuantity(
     request.quantity,
   );
 
+  connection.acquireLock({
+    table: 'positions',
+    key: positionLockKey(request),
+    strength: 'NO_KEY_UPDATE',
+  });
+
   const result = await sql<{ version: string }>`
     update positions
     set available_quantity = ${reserved.available},
@@ -272,6 +298,14 @@ export async function reservePositionQuantity(
   return reserved;
 }
 
+/**
+ * Records one reservation row.
+ *
+ * `reservations` references `anonymous_sessions` and `orders`, so the insert's
+ * foreign-key checks take a `for key share` lock on both parents. They are
+ * declared in rank order; the `markets` parent is a reference row and stays
+ * outside the order (see LEDGER_REFERENCE_TABLES).
+ */
 export async function recordReservation(
   connection: LedgerConnection,
   input: ReservationInput,
@@ -285,6 +319,16 @@ export async function recordReservation(
     currency: input.currency ?? null,
     marketCode: input.marketCode ?? null,
     symbol: input.symbol ?? null,
+  });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: reservation.sessionId,
+    strength: 'KEY_SHARE',
+  });
+  connection.acquireLock({
+    table: 'orders',
+    key: reservation.orderId,
+    strength: 'KEY_SHARE',
   });
 
   await sql`

@@ -37,23 +37,56 @@ export function snapshotInput<T extends object>(fields: T): Readonly<T> {
 }
 
 /**
- * Turns "the versioned update matched no row" into the shared domain error.
+ * Turns "the versioned update matched no row" into the shared domain error, and
+ * returns the row it did match.
  *
  * Every versioned update is written as `... where id = $1 and version = $2
  * returning version`, so an empty result means the row was concurrently
  * modified, deleted, or never existed. All three are the same answer to the
- * caller: the state it planned against is gone.
+ * caller: the state it planned against is gone. Returning the row means a
+ * caller never needs a fallback for a case this function has already ruled out.
  */
-export function assertVersionedUpdate(
-  rows: readonly unknown[],
+export function assertVersionedUpdate<T>(
+  rows: readonly T[],
   subject: string,
-): void {
-  if (rows.length === 0) {
+): T {
+  const row = rows[0];
+  if (row === undefined) {
     throw new DomainError(
       'ORDER_STATE_CONFLICT',
       `${subject} was not updated at its expected version`,
     );
   }
+  return row;
+}
+
+/**
+ * Renders a caller-supplied value as the JSON text a `jsonb` column stores.
+ *
+ * `unknown` at a boundary includes values JSON cannot represent: `undefined` and
+ * a function both stringify to `undefined` rather than to text, and a circular
+ * structure or a bigint throws. None of those is a database failure, so none of
+ * them should reach the driver — a caller that supplies one gets the same domain
+ * error it would get for any other unusable input, and the value is read exactly
+ * once on the way there.
+ */
+export function toJsonText(value: unknown, subject: string): string {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(value);
+  } catch (cause) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `${subject} cannot be represented as JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+  if (text === undefined) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `${subject} cannot be represented as JSON`,
+    );
+  }
+  return text;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { sql } from 'kysely';
-import { snapshotInput } from '../database.js';
+import { snapshotInput, toJsonText } from '../database.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 export interface AuditEventInput {
@@ -19,9 +19,12 @@ export interface AuditRepository {
 /**
  * Appends one audit row on the caller's transaction.
  *
- * `audit_events` is append-only and carries no version, so there is nothing to
- * lock and nothing to order: it only ever gains rows, and it gains them inside
- * the same transaction as the business mutation they describe.
+ * `audit_events` is append-only, carries no version, and — deliberately —
+ * carries no foreign key either, because audit history outlives the session it
+ * describes. So this is the one write in the ledger that takes no row lock at
+ * all: nothing to lock, nothing to order, no rank in `LEDGER_LOCK_ORDER`. It
+ * only ever gains rows, and it gains them inside the same transaction as the
+ * business mutation they describe.
  */
 export async function appendAuditEvent(
   connection: LedgerConnection,
@@ -30,7 +33,7 @@ export async function appendAuditEvent(
   const event = snapshotInput({
     id: input.id,
     eventType: input.eventType,
-    payload: JSON.stringify(input.payload),
+    payload: toJsonText(input.payload, 'the audit payload'),
     occurredAt: input.occurredAt,
     sessionReference: input.sessionReference ?? null,
     orderId: input.orderId ?? null,

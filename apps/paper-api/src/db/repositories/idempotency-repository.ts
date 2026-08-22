@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { DomainError } from '@skipjack/trading-core';
 import { sql } from 'kysely';
-import { assertVersionedUpdate, snapshotInput } from '../database.js';
+import {
+  assertVersionedUpdate,
+  snapshotInput,
+  toJsonText,
+} from '../database.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 export interface IdempotencyKey {
@@ -84,10 +88,12 @@ async function readRequest(
  * means the holder is an uncommitted concurrent request, which is reported as
  * IN_PROGRESS — the one answer that is true whichever way that request ends.
  *
- * This is deliberately not a locked table in the global lock order:
- * `idempotency_requests` is only ever reached after the session row is locked,
- * so the unique index can serialise duplicate keys without adding a second
- * ordering to reason about.
+ * The insert takes no lock on its own invisible new row, but its foreign key
+ * pins the session row `for key share`, so that lock is declared. The conflict
+ * path can still wait on a concurrent inserter of the same key — that is a wait
+ * on a transaction id rather than on a row, and it cannot join a cycle, because
+ * two requests carrying one key carry one session and are therefore already
+ * serialised by the rank-0 session row.
  */
 export async function beginIdempotentRequest(
   connection: LedgerConnection,
@@ -97,6 +103,11 @@ export async function beginIdempotentRequest(
     sessionId: input.sessionId,
     key: input.key,
     requestHash: input.requestHash,
+  });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: request.sessionId,
+    strength: 'KEY_SHARE',
   });
 
   const claim = await sql<{ id: string }>`
@@ -137,7 +148,15 @@ export async function completeIdempotentRequest(
     sessionId: input.sessionId,
     key: input.key,
     statusCode: input.statusCode,
-    body: JSON.stringify(input.body),
+    body: toJsonText(input.body, 'the recorded response body'),
+  });
+  // The `update` takes a `for no key update` lock on the request row, the last
+  // rank of the lock order: a mutation reaches it only once everything else it
+  // touches is already held.
+  connection.acquireLock({
+    table: 'idempotency_requests',
+    key: `${completion.sessionId}:${completion.key}`,
+    strength: 'NO_KEY_UPDATE',
   });
 
   // `status = 'IN_PROGRESS'` is this table's expected version: it has no

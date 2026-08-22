@@ -142,6 +142,16 @@ function toLockedOcoGroup(row: OcoGroupRow): LockedOcoGroup {
   };
 }
 
+/**
+ * Inserts one order row.
+ *
+ * `orders` references `anonymous_sessions` and, when the order belongs to an
+ * OCO pair, `oco_groups`; both foreign-key checks take a `for key share` lock on
+ * the parent row. Declaring them is what makes an insert-after-order-lock
+ * sequence a refusal here instead of a deadlock in production. The `markets`
+ * parent is a reference row and stays outside the order (see
+ * LEDGER_REFERENCE_TABLES).
+ */
 export async function insertOrder(
   connection: LedgerConnection,
   input: InsertOrderInput,
@@ -159,6 +169,18 @@ export async function insertOrder(
     stopPrice: input.stopPrice ?? null,
     ocoGroupId: input.ocoGroupId ?? null,
   });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: order.sessionId,
+    strength: 'KEY_SHARE',
+  });
+  if (order.ocoGroupId !== null) {
+    connection.acquireLock({
+      table: 'oco_groups',
+      key: order.ocoGroupId,
+      strength: 'KEY_SHARE',
+    });
+  }
 
   await sql`
     insert into orders (
@@ -176,7 +198,7 @@ export async function lockOrder(
   connection: LedgerConnection,
   orderId: string,
 ): Promise<LockedOrder | undefined> {
-  connection.acquireLock({ table: 'orders', key: orderId });
+  connection.acquireLock({ table: 'orders', key: orderId, strength: 'UPDATE' });
   const result = await sql<OrderRow>`
     select id, session_id, status, filled_quantity, terminal_reason, version
     from orders
@@ -191,7 +213,11 @@ export async function lockOcoGroup(
   connection: LedgerConnection,
   ocoGroupId: string,
 ): Promise<LockedOcoGroup | undefined> {
-  connection.acquireLock({ table: 'oco_groups', key: ocoGroupId });
+  connection.acquireLock({
+    table: 'oco_groups',
+    key: ocoGroupId,
+    strength: 'UPDATE',
+  });
   const result = await sql<OcoGroupRow>`
     select id, session_id, status, version
     from oco_groups
@@ -222,6 +248,13 @@ export async function updateOrder(
     terminalReason: input.terminalReason ?? null,
     isOcoWinner: input.isOcoWinner ?? null,
   });
+  // None of these columns is a key column, so PostgreSQL takes `for no key
+  // update` on the row — a real lock, declared like any other.
+  connection.acquireLock({
+    table: 'orders',
+    key: update.id,
+    strength: 'NO_KEY_UPDATE',
+  });
 
   const result = await sql<{ version: string }>`
     update orders
@@ -234,8 +267,9 @@ export async function updateOrder(
     where id = ${update.id} and version = ${update.expectedVersion}
     returning version
   `.execute(connection.executor);
-  assertVersionedUpdate(result.rows, `order ${update.id}`);
-  return BigInt(result.rows[0]?.version ?? '0');
+  return BigInt(
+    assertVersionedUpdate(result.rows, `order ${update.id}`).version,
+  );
 }
 
 export async function resolveOcoGroup(
@@ -247,6 +281,11 @@ export async function resolveOcoGroup(
     expectedVersion: input.expectedVersion,
     resolvedAt: input.resolvedAt,
   });
+  connection.acquireLock({
+    table: 'oco_groups',
+    key: resolve.id,
+    strength: 'NO_KEY_UPDATE',
+  });
 
   const result = await sql<{ version: string }>`
     update oco_groups
@@ -257,8 +296,9 @@ export async function resolveOcoGroup(
       and status = 'ACTIVE'
     returning version
   `.execute(connection.executor);
-  assertVersionedUpdate(result.rows, `OCO group ${resolve.id}`);
-  return BigInt(result.rows[0]?.version ?? '0');
+  return BigInt(
+    assertVersionedUpdate(result.rows, `OCO group ${resolve.id}`).version,
+  );
 }
 
 export function createOrderRepository(

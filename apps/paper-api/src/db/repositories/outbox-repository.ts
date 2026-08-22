@@ -1,5 +1,5 @@
 import { sql } from 'kysely';
-import { snapshotInput } from '../database.js';
+import { snapshotInput, toJsonText } from '../database.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 export interface OutboxEventInput {
@@ -23,6 +23,10 @@ export interface OutboxRepository {
  * transaction, or it is not committed at all. `(session_id, stream_sequence)`
  * and `event_id` are unique in the schema, so a duplicate publish is refused by
  * PostgreSQL rather than by a check the application could forget.
+ *
+ * The table is append-only and nothing ever locks a row in it, but the insert's
+ * foreign key still takes a `for key share` lock on the session row, so that
+ * lock is declared.
  */
 export async function appendOutboxEvent(
   connection: LedgerConnection,
@@ -34,7 +38,12 @@ export async function appendOutboxEvent(
     sessionId: input.sessionId,
     streamSequence: input.streamSequence,
     eventType: input.eventType,
-    payload: JSON.stringify(input.payload),
+    payload: toJsonText(input.payload, 'the outbox payload'),
+  });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: event.sessionId,
+    strength: 'KEY_SHARE',
   });
 
   await sql`

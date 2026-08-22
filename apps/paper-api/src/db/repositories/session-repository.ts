@@ -72,7 +72,11 @@ export async function lockSession(
   connection: LedgerConnection,
   sessionId: string,
 ): Promise<SessionRecord | undefined> {
-  connection.acquireLock({ table: 'anonymous_sessions', key: sessionId });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: sessionId,
+    strength: 'UPDATE',
+  });
   const result = await sql<SessionRow>`
     select id, status, expires_at, version
     from anonymous_sessions
@@ -83,6 +87,14 @@ export async function lockSession(
   return row === undefined ? undefined : toSessionRecord(row);
 }
 
+/**
+ * Records that the session was seen.
+ *
+ * The `update` takes a `for no key update` lock on the session row whether or
+ * not the caller locked it first, so it declares that lock: an undeclared
+ * implicit lock is exactly as capable of inverting the global order as an
+ * explicit one.
+ */
 export async function touchSession(
   connection: LedgerConnection,
   input: TouchSessionInput,
@@ -92,6 +104,11 @@ export async function touchSession(
     expectedVersion: input.expectedVersion,
     lastSeenAt: input.lastSeenAt,
   });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: touch.sessionId,
+    strength: 'NO_KEY_UPDATE',
+  });
 
   const result = await sql<{ version: string }>`
     update anonymous_sessions
@@ -99,8 +116,9 @@ export async function touchSession(
     where id = ${touch.sessionId} and version = ${touch.expectedVersion}
     returning version
   `.execute(connection.executor);
-  assertVersionedUpdate(result.rows, `session ${touch.sessionId}`);
-  return BigInt(result.rows[0]?.version ?? '0');
+  return BigInt(
+    assertVersionedUpdate(result.rows, `session ${touch.sessionId}`).version,
+  );
 }
 
 export function createSessionRepository(

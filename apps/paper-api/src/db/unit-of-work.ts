@@ -13,7 +13,13 @@ import {
   type Database,
   type LedgerTransaction,
   snapshotInput,
+  toJsonText,
 } from './database.js';
+import {
+  createLockOrderGuard,
+  type LockOrderGuard,
+  type LockTarget,
+} from './lock-order.js';
 import {
   type AccountRepository,
   createAccountRepository,
@@ -40,60 +46,14 @@ import {
 } from './repositories/session-repository.js';
 
 /**
- * The single global lock order of the ledger.
- *
- * Deadlock freedom here is structural, not statistical: a set of transactions
- * that always requests row locks in one total order can never form a wait
- * cycle. The total order is (rank of table in this array, then row key
- * ascending as a string), and `LedgerConnection.acquireLock` refuses any
- * acquisition that would go backwards in it — so an inconsistent order is a
- * test failure in this repository rather than a deadlock in production.
- *
- * The ranks are ordered from the most coarse-grained row to the most
- * fine-grained: a mutation starts by pinning the session that owns the ledger,
- * then its balances, then the grouping row, then individual orders. Every
- * mutation therefore enters the order at the top and moves down it.
- *
- * Append-only tables (`audit_events`, `outbox_events`, `reservations`,
- * `account_sequences`) and `idempotency_requests` are absent on purpose: they
- * are never locked with `for update`. Duplicate idempotency keys are serialised
- * by a unique index, and that index is only ever reached after the session row
- * is already held, so it adds no second ordering to reason about.
- */
-export const LEDGER_LOCK_ORDER = Object.freeze([
-  'anonymous_sessions',
-  'wallets',
-  'positions',
-  'oco_groups',
-  'orders',
-] as const);
-
-export type LockTable = (typeof LEDGER_LOCK_ORDER)[number];
-
-export interface LockTarget {
-  readonly table: LockTable;
-  /**
-   * The row's natural key rendered as a string. It has to be the natural key
-   * rather than the surrogate id, because a lock must be ordered before the row
-   * has been read.
-   */
-  readonly key: string;
-}
-
-/**
  * The persistence-layer handle for one open transaction: the Kysely executor
  * plus the lock-order guard. Repositories receive it; application services
  * never do. `TradingTransaction` is what an application service receives, and
  * it reaches this object only through closures — no reflection over a
  * `TradingTransaction` can find the Kysely instance.
  */
-export interface LedgerConnection {
+export interface LedgerConnection extends LockOrderGuard {
   readonly executor: LedgerTransaction;
-  /**
-   * Declares the row lock that the next statement will take. Throws
-   * INVARIANT_VIOLATION when it would violate `LEDGER_LOCK_ORDER`.
-   */
-  acquireLock(target: LockTarget): void;
 }
 
 /** Everything an application service may do inside one transaction. */
@@ -160,21 +120,6 @@ export class UnknownCommitOutcomeError extends Error {
   }
 }
 
-function lockRank(table: string): number {
-  return (LEDGER_LOCK_ORDER as readonly string[]).indexOf(table);
-}
-
-function compareLockTargets(left: LockTarget, right: LockTarget): number {
-  const byTable = lockRank(left.table) - lockRank(right.table);
-  if (byTable !== 0) {
-    return byTable;
-  }
-  if (left.key === right.key) {
-    return 0;
-  }
-  return left.key < right.key ? -1 : 1;
-}
-
 /**
  * Reads the SQLSTATE of a thrown value exactly once.
  *
@@ -209,38 +154,7 @@ function createLedgerConnection(
   executor: LedgerTransaction,
   onLock: ((target: LockTarget) => void) | undefined,
 ): LedgerConnection {
-  const held = new Set<string>();
-  let last: LockTarget | undefined;
-
-  return {
-    executor,
-    acquireLock(target: LockTarget): void {
-      const rank = lockRank(target.table);
-      if (rank < 0) {
-        throw new DomainError(
-          'INVARIANT_VIOLATION',
-          `${target.table} has no rank in the ledger lock order`,
-        );
-      }
-
-      // Re-locking a row this transaction already holds acquires nothing, so it
-      // cannot extend a wait cycle and needs no ordering.
-      const identity = `${rank}:${target.key}`;
-      if (held.has(identity)) {
-        return;
-      }
-      if (last !== undefined && compareLockTargets(target, last) < 0) {
-        throw new DomainError(
-          'INVARIANT_VIOLATION',
-          `lock order violation: ${target.table} (${target.key}) must not be locked after ${last.table} (${last.key})`,
-        );
-      }
-
-      held.add(identity);
-      last = target;
-      onLock?.(target);
-    },
-  };
+  return { executor, ...createLockOrderGuard(onLock) };
 }
 
 function createTradingTransaction(
@@ -324,10 +238,14 @@ export class UnitOfWork {
           throw commitSent ? new UnknownCommitOutcomeError(error) : error;
         }
         if (attempt > this.#maxRetries) {
-          throw new DomainError(
+          const exhausted = new DomainError(
             'SERVICE_UNAVAILABLE',
             `the transaction still failed with SQLSTATE ${sqlState} after ${attempt} attempts`,
           );
+          // The caller gets a domain error, but a post-mortem needs the driver's
+          // own `detail`, `hint` and backend pid, which only the cause carries.
+          exhausted.cause = error;
+          throw exhausted;
         }
         await this.#backoff(attempt, sqlState);
       }
@@ -411,8 +329,11 @@ export interface TradingMutationResult {
  * The whole point of this function is that there is exactly one transaction:
  * the reservation, the order row, the audit event, the outbox event, and the
  * idempotency record either all exist afterwards or none of them do. Locks are
- * taken strictly down `LEDGER_LOCK_ORDER`, and every caller-supplied value is
- * snapshotted once before any of it is used.
+ * taken strictly down `LEDGER_LOCK_ORDER` — session, wallet, position, OCO
+ * group, sibling orders by ascending id, then the order insert and the
+ * idempotency record, each of which only re-pins rows this transaction already
+ * holds — and every caller-supplied value is snapshotted once before any of it
+ * is used.
  */
 export async function commitTradingMutation(
   unitOfWork: UnitOfWork,
@@ -453,7 +374,7 @@ export async function commitTradingMutation(
     outboxEventType: outbox.eventType,
     outboxPayload: outbox.payload,
     responseStatusCode: response.statusCode,
-    responseBody: JSON.stringify(response.body),
+    responseBody: toJsonText(response.body, 'the response body'),
     cashCurrency: cash?.currency,
     cashAmount: cash?.amount,
     positionMarketCode: position?.marketCode,
