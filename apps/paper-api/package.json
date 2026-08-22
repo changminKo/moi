@@ -9,6 +9,7 @@
     "typecheck": "tsc --build --pretty false"
   },
   "dependencies": {
+    "@skipjack/trading-core": "workspace:*",
     "kysely": "0.29.5",
     "pg": "8.23.0"
   },

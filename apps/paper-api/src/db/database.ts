@@ -1,4 +1,5 @@
-import { Kysely, PostgresDialect } from 'kysely';
+import { DomainError } from '@skipjack/trading-core';
+import { Kysely, PostgresDialect, type Transaction } from 'kysely';
 import { Pool } from 'pg';
 
 /**
@@ -12,6 +13,48 @@ export interface LedgerDatabase {
 }
 
 export type Database = Kysely<LedgerDatabase>;
+
+/**
+ * The Kysely handle bound to one open transaction. This is a persistence-layer
+ * type: repositories receive it, and no application service ever does. The unit
+ * of work is what keeps it that way.
+ */
+export type LedgerTransaction = Transaction<LedgerDatabase>;
+
+/**
+ * Copies a caller-supplied input into a frozen, null-prototype object.
+ *
+ * Repository inputs cross an untrusted boundary: a caller may hand over an
+ * object whose fields are accessors, a Proxy, or a plain object inheriting
+ * values from a polluted `Object.prototype`. Reading each field exactly once
+ * into a data property means the value a repository validated is the value it
+ * writes, and the null prototype means an absent field cannot be inherited
+ * from anywhere. Call it once, at the top of the function, and read only the
+ * result afterwards.
+ */
+export function snapshotInput<T extends object>(fields: T): Readonly<T> {
+  return Object.freeze(Object.assign(Object.create(null) as T, fields));
+}
+
+/**
+ * Turns "the versioned update matched no row" into the shared domain error.
+ *
+ * Every versioned update is written as `... where id = $1 and version = $2
+ * returning version`, so an empty result means the row was concurrently
+ * modified, deleted, or never existed. All three are the same answer to the
+ * caller: the state it planned against is gone.
+ */
+export function assertVersionedUpdate(
+  rows: readonly unknown[],
+  subject: string,
+): void {
+  if (rows.length === 0) {
+    throw new DomainError(
+      'ORDER_STATE_CONFLICT',
+      `${subject} was not updated at its expected version`,
+    );
+  }
+}
 
 /**
  * Receives an error that belongs to no caller: a pooled client failed while it
@@ -44,7 +87,36 @@ export function createDatabase(
   // no listener Node rethrows it as an uncaught exception and the process
   // exits, instead of letting the pool discard the dead client and reconnect on
   // the next query.
-  pool.on('error', onPoolError);
+  // `pg` reports the same failure through two paths, and each covers a window
+  // the other does not:
+  //
+  //   * The pool reports a client that died while it was checked in. That is
+  //     the only path `pg-pool` provides, and it is not enough: `pg-pool`
+  //     removes its own client listener on acquire and restores it on release,
+  //     so a client that dies mid-query has no listener at all. The in-flight
+  //     query does receive the failure, but the socket's close event arrives
+  //     afterwards, by which time the pool has discarded the client — and `pg`
+  //     then emits 'error' on a client nobody listens to, which Node turns into
+  //     an uncaught exception and a dead process.
+  //   * A listener attached on connect is never removed by the pool, so it
+  //     closes exactly that window.
+  //
+  // Both paths carry the same Error instance, so identity is what
+  // distinguishes "the other path already reported this" from a second, real
+  // failure: the reporter sees every failure exactly once.
+  const reported = new WeakSet<Error>();
+  const reportOnce = (error: Error): void => {
+    if (reported.has(error)) {
+      return;
+    }
+    reported.add(error);
+    onPoolError(error);
+  };
+
+  pool.on('error', reportOnce);
+  pool.on('connect', (client) => {
+    client.on('error', reportOnce);
+  });
 
   return new Kysely<LedgerDatabase>({
     dialect: new PostgresDialect({ pool }),
