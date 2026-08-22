@@ -290,8 +290,27 @@ create table whitelist_entries (
 
 -- A published version is an immutable operational record: only the
 -- DRAFT -> PUBLISHED transition may still touch the row.
+--
+-- Every guard below pins `search_path = public, pg_temp` and schema-qualifies
+-- the tables it reads. That is load-bearing, not cosmetic: when pg_temp is not
+-- named in the path PostgreSQL searches the session's temporary schema for
+-- relation names *first*, ahead of pg_catalog and ahead of every named schema,
+-- and TEMPORARY on a database is granted to PUBLIC. An unpinned guard that
+-- names `whitelist_versions` therefore reads whatever the writer just put in
+-- pg_temp, so `create temp table whitelist_versions (...)` disarms it in one
+-- statement — from a NOSUPERUSER role that cannot drop the trigger. Naming
+-- pg_temp last demotes it to the end of the path; pg_catalog stays implicitly
+-- first because it is not named. Note that `search_path = pg_catalog, public`
+-- would NOT close this: leaving pg_temp unnamed still puts it first.
+--
+-- All of these are SECURITY INVOKER (the default) on purpose. They guard rows
+-- the caller is already writing and read no more than the caller may read, so
+-- definer rights would buy nothing and would instead expose the owner's rights
+-- — including the dynamic SQL in reject_truncate_of_published_versions() — to
+-- every role holding EXECUTE. Definer rights are also not what closes the hole
+-- above; the pinned path is.
 create function reject_published_version_change() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = public, pg_temp as $$
 begin
   if old.status = 'PUBLISHED' then
     raise exception 'published % rows are immutable', tg_table_name;
@@ -319,10 +338,10 @@ create trigger fee_model_versions_published_is_immutable
 --
 -- fee_model_versions needs no counterpart: it owns no child table, so nothing
 -- can be reparented out of a published fee model. Its only inbound reference is
--- orders.fee_model_version_id, and which fee model an order used is a property
--- of the order, not part of the version's definition.
+-- fills.fee_model_version_id, and which fee model a fill was priced with is a
+-- property of the fill, not part of the version's definition.
 create function reject_published_whitelist_entry_change() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = public, pg_temp as $$
 declare
   old_version uuid;
   new_version uuid;
@@ -336,7 +355,7 @@ begin
   end if;
 
   select count(*) into published_parents
-  from whitelist_versions
+  from public.whitelist_versions
   where status = 'PUBLISHED'
     and (id = old_version or id = new_version);
 
@@ -360,13 +379,15 @@ create trigger whitelist_entries_published_is_immutable
 -- triggers close that path; TRUNCATE stays available while nothing is
 -- published, which is what a draft-only environment needs.
 create function reject_truncate_of_published_versions() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = public, pg_temp as $$
 declare
   has_published boolean;
 begin
+  -- tg_relid::regclass names the table the trigger actually fired on, so the
+  -- probe cannot be retargeted even by a name that resolves elsewhere.
   execute format(
-    'select exists (select 1 from %I where status = %L)',
-    tg_table_name,
+    'select exists (select 1 from %s where status = %L)',
+    tg_relid::regclass,
     'PUBLISHED'
   ) into has_published;
   if has_published then
@@ -377,12 +398,12 @@ end;
 $$;
 
 create function reject_truncate_of_published_whitelist_entries()
-  returns trigger language plpgsql as $$
+  returns trigger language plpgsql set search_path = public, pg_temp as $$
 begin
   if exists (
     select 1
-    from whitelist_entries as entry
-    join whitelist_versions as version
+    from public.whitelist_entries as entry
+    join public.whitelist_versions as version
       on version.id = entry.whitelist_version_id
     where version.status = 'PUBLISHED'
   ) then

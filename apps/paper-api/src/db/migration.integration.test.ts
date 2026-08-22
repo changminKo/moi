@@ -1166,9 +1166,16 @@ describe('published version immutability', () => {
     'refuses to truncate whitelist versions while one is published',
     async () => {
       const versionId = await insertWhitelistVersion(217, true);
-      await expectPostgresError(
+      // The cascade reaches whitelist_entries, whose own TRUNCATE guard would
+      // raise for published entries left by earlier tests and satisfy a
+      // message-agnostic assertion even with this trigger removed. Naming the
+      // table in the assertion keeps the test tied to this trigger.
+      const error = await expectPostgresError(
         sql`truncate whitelist_versions cascade`.execute(db),
         RAISE_EXCEPTION,
+      );
+      expect(error.message).toBe(
+        'published whitelist_versions rows are immutable',
       );
       const survivor = await sql<{ count: string }>`
         select count(*) as count from whitelist_versions where id = ${versionId}
@@ -1722,6 +1729,301 @@ describe('ensureAuditPartitions', () => {
           { id: outOfRange, partition: 'audit_events_default' },
           { id: inMonth, partition: monthPartitionName(now) },
         ]);
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+// PostgreSQL searches the session's temporary schema for relation names before
+// pg_catalog and before every schema listed in search_path, and TEMPORARY on a
+// database is granted to PUBLIC. A guard that names its tables unqualified from
+// an unpinned function therefore evaluates against whatever the writer put in
+// pg_temp, which is a two-statement bypass available to any role that can run
+// DML — including one that cannot drop the trigger it is defeating.
+describe('pg_temp shadowing', () => {
+  it(
+    'blocks an entry change on a published version whose parent table is shadowed',
+    async () => {
+      const versionId = await insertWhitelistVersion(230, false);
+      const entryId = await insertWhitelistEntry(versionId, 'SHDW');
+      await publishWhitelistVersion(versionId);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table whitelist_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await expectPostgresError(
+          sql`
+            update public.whitelist_entries set symbol = 'TAMPERED'
+            where id = ${entryId}
+          `.execute(trx),
+          RAISE_EXCEPTION,
+        );
+      });
+
+      const stored = await sql<{ symbol: string }>`
+        select symbol from whitelist_entries where id = ${entryId}
+      `.execute(db);
+      expect(stored.rows[0]?.symbol).toBe('SHDW');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks deleting an entry of a published version whose parent table is shadowed',
+    async () => {
+      const versionId = await insertWhitelistVersion(231, false);
+      const entryId = await insertWhitelistEntry(versionId, 'SHDX');
+      await publishWhitelistVersion(versionId);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table whitelist_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await expectPostgresError(
+          sql`delete from public.whitelist_entries where id = ${entryId}`.execute(
+            trx,
+          ),
+          RAISE_EXCEPTION,
+        );
+      });
+
+      expect(await entryCount(versionId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks truncating whitelist versions while its own table is shadowed',
+    async () => {
+      const versionId = await insertWhitelistVersion(232, true);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table whitelist_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        const error = await expectPostgresError(
+          sql`truncate public.whitelist_versions cascade`.execute(trx),
+          RAISE_EXCEPTION,
+        );
+        expect(error.message).toBe(
+          'published whitelist_versions rows are immutable',
+        );
+      });
+
+      const survivor = await sql<{ count: string }>`
+        select count(*) as count from whitelist_versions where id = ${versionId}
+      `.execute(db);
+      expect(survivor.rows[0]?.count).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks truncating fee model versions while its own table is shadowed',
+    async () => {
+      const versionId = await insertFeeModelVersion(320, true);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table fee_model_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        const error = await expectPostgresError(
+          sql`truncate public.fee_model_versions cascade`.execute(trx),
+          RAISE_EXCEPTION,
+        );
+        expect(error.message).toBe(
+          'published fee_model_versions rows are immutable',
+        );
+      });
+
+      const survivor = await sql<{ count: string }>`
+        select count(*) as count from fee_model_versions where id = ${versionId}
+      `.execute(db);
+      expect(survivor.rows[0]?.count).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks truncating whitelist entries while both queried tables are shadowed',
+    async () => {
+      const versionId = await insertWhitelistVersion(233, false);
+      await insertWhitelistEntry(versionId, 'SHDY');
+      await publishWhitelistVersion(versionId);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table whitelist_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await sql`
+          create temp table whitelist_entries (
+            id uuid, whitelist_version_id uuid
+          ) on commit drop
+        `.execute(trx);
+        await expectPostgresError(
+          sql`truncate public.whitelist_entries`.execute(trx),
+          RAISE_EXCEPTION,
+        );
+      });
+
+      expect(await entryCount(versionId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'blocks updating and deleting a published version while its table is shadowed',
+    async () => {
+      const whitelistId = await insertWhitelistVersion(234, true);
+      const feeModelId = await insertFeeModelVersion(321, true);
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table whitelist_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await sql`
+          create temp table fee_model_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await expectPostgresError(
+          sql`
+            update public.whitelist_versions set status = 'DRAFT'
+            where id = ${whitelistId}
+          `.execute(trx),
+          RAISE_EXCEPTION,
+        );
+      });
+
+      await db.transaction().execute(async (trx) => {
+        await sql`
+          create temp table fee_model_versions (id uuid, status text)
+          on commit drop
+        `.execute(trx);
+        await expectPostgresError(
+          sql`
+            delete from public.fee_model_versions where id = ${feeModelId}
+          `.execute(trx),
+          RAISE_EXCEPTION,
+        );
+      });
+
+      const stored = await sql<{ status: string }>`
+        select status from whitelist_versions where id = ${whitelistId}
+      `.execute(db);
+      expect(stored.rows[0]?.status).toBe('PUBLISHED');
+      const feeModel = await sql<{ count: string }>`
+        select count(*) as count from fee_model_versions
+        where id = ${feeModelId}
+      `.execute(db);
+      expect(feeModel.rows[0]?.count).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps the partition fast path correct while pg_catalog is shadowed',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        const now = new Date('2032-05-10T00:00:00Z');
+        expect(await ensureAuditPartitions(fresh.db, now)).toEqual([
+          'audit_events_2032_05',
+          'audit_events_2032_06',
+        ]);
+
+        await fresh.db.transaction().execute(async (trx) => {
+          await sql`
+            create temp table pg_inherits (
+              inhrelid oid, inhparent oid, inhseqno int,
+              inhdetachpending boolean
+            ) on commit drop
+          `.execute(trx);
+          await sql`
+            create temp table pg_class (
+              oid oid, relname name, relnamespace oid, relkind "char"
+            ) on commit drop
+          `.execute(trx);
+          const repeated = await sql<{ name: string }>`
+            select ensure_audit_partition('2032-05-01'::date) as name
+          `.execute(trx);
+          expect(repeated.rows[0]?.name).toBe('audit_events_2032_05');
+        });
+
+        expect(await partitionNames(fresh.db)).toEqual([
+          'audit_events_2032_05',
+          'audit_events_2032_06',
+          'audit_events_default',
+        ]);
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'creates the real partition while a temp table shadows its name',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        const eventId = randomUUID();
+        await insertAuditEvent(fresh.db, eventId, '2032-09-15T00:00:00Z');
+
+        await fresh.db.transaction().execute(async (trx) => {
+          await sql`
+            create temp table audit_events_2032_09 (
+              like public.audit_events including defaults
+            ) on commit drop
+          `.execute(trx);
+          const created = await sql<{ name: string }>`
+            select ensure_audit_partition('2032-09-01'::date) as name
+          `.execute(trx);
+          expect(created.rows[0]?.name).toBe('audit_events_2032_09');
+        });
+
+        expect(await partitionNames(fresh.db)).toEqual([
+          'audit_events_2032_09',
+          'audit_events_default',
+        ]);
+        expect(await auditPartitionOf(fresh.db, eventId)).toBe(
+          'audit_events_2032_09',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses a partition that carries the right name and the wrong bounds',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        // The shape an upgrade from the pre-fix, TimeZone-dependent bounds
+        // would leave behind: right name, bounds nine hours off, and a gap
+        // routed to the default partition that nothing would ever report.
+        await sql`
+          create table audit_events_2038_04 partition of audit_events
+          for values from ('2038-03-31 15:00:00+00') to ('2038-04-30 15:00:00+00')
+        `.execute(fresh.db);
+
+        await expect(
+          ensureAuditPartitions(fresh.db, new Date('2038-04-15T00:00:00Z')),
+        ).rejects.toThrow(/audit_events_2038_04/);
       } finally {
         await fresh.destroy();
       }
