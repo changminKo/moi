@@ -21,6 +21,7 @@ import {
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
+  type PlaceOcoOrderCommand,
   type PlaceOrderCommand,
   type PortfolioSnapshot,
   readCancelOrderCommand,
@@ -91,6 +92,215 @@ const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
 });
 
 /**
+ * An `OCO` command, the one place shape that supplies *every* caller field the
+ * place boundary reads: both prices as well as the seven required fields. It is
+ * typed as the published command interface, so a field added to that interface
+ * is a compile error here until this fixture supplies one — which is what ties
+ * the exhaustiveness below to the command shapes rather than to a list someone
+ * remembered to extend.
+ */
+const ocoBuy = (idempotencyKey: string): PlaceOcoOrderCommand => ({
+  sessionId: CONTRACT_SESSION_ID,
+  idempotencyKey,
+  market: 'US',
+  symbol: 'AAPL',
+  side: 'BUY',
+  type: 'OCO',
+  quantity: '2',
+  limitPrice: '190.25',
+  triggerPrice: '180.00',
+});
+
+const cancelOpenOrder = (
+  sessionId: string,
+  orderId: string,
+  idempotencyKey: string,
+): CancelOrderCommand => ({ sessionId, idempotencyKey, orderId });
+
+const exchangeQuote = (
+  sessionId: string,
+  quoteId: string,
+  idempotencyKey: string,
+): ExchangeCommand => ({ sessionId, idempotencyKey, quoteId });
+
+/**
+ * Every caller-supplied field of a command shape, *discovered* rather than
+ * listed: the published reader for the shape is driven with a recording `Proxy`
+ * over a valid command, and the fields it reads are the fields a caller can
+ * supply. A field added to a command shape and read at the boundary is therefore
+ * covered by the properties below with no fixture to update, and a field the
+ * boundary stops reading is caught by the coverage assertion that compares this
+ * set against the shape's own keys.
+ */
+const discoverCommandFields = (
+  read: (command: unknown) => unknown,
+  base: object,
+): readonly string[] => {
+  const fields: string[] = [];
+  const probe = new Proxy({ ...base } as Record<string, unknown>, {
+    get: (target, key, receiver) => {
+      if (typeof key === 'string' && !fields.includes(key)) {
+        fields.push(key);
+      }
+
+      return Reflect.get(target, key, receiver);
+    },
+  });
+
+  read(probe);
+
+  return fields;
+};
+
+interface DriftingCommand {
+  readonly command: unknown;
+  /** How many times each field has been read so far. */
+  readonly reads: () => Readonly<Record<string, number>>;
+}
+
+/**
+ * A command whose every field is a prototype accessor answering with the base
+ * value once and with something else from the second read onwards. The drifted
+ * value is derived from the first one rather than chosen per field, because what
+ * these properties assert is the *number* of reads: any second read is already a
+ * divergence between the command the rules were applied to and the command an
+ * effect was built from, whether or not that particular field's drift happens to
+ * be observable through the four `Broker` methods.
+ *
+ * The accessors sit on the prototype because an own `get` is flattened by a
+ * spread, which would hide the very extra read this is looking for. A field the
+ * base does not carry drifts from *absent* to supplied, which is the sharp case
+ * for an optional price: a `MARKET` order that validated carrying no trigger
+ * price must not reach the wire carrying one.
+ */
+const driftEveryField = (
+  fields: readonly string[],
+  base: Readonly<Record<string, unknown>>,
+): DriftingCommand => {
+  const counts = new Map<string, number>();
+  const prototype: Record<string, unknown> = {};
+
+  for (const field of fields) {
+    const first = base[field];
+    const drifted = `${String(first)}-drifted`;
+
+    Object.defineProperty(prototype, field, {
+      enumerable: true,
+      get: () => {
+        const seen = counts.get(field) ?? 0;
+        counts.set(field, seen + 1);
+
+        return seen === 0 ? first : drifted;
+      },
+    });
+  }
+
+  return {
+    command: Object.create(prototype),
+    reads: () =>
+      Object.fromEntries(
+        fields.map((field) => [field, counts.get(field) ?? 0]),
+      ),
+  };
+};
+
+/**
+ * One entry per `Broker` method that takes a command object. `getPortfolio`
+ * takes a `string`, so it has no field a caller can make drift and no entry
+ * here; every other method does, and the `Record` is keyed by the method union
+ * so adding a method to `Broker` fails this build until it is covered.
+ */
+type CommandMethod = Exclude<keyof Broker, 'getPortfolio'>;
+
+interface CommandBoundary {
+  /** The shape's fields, discovered from its published reader. */
+  readonly fields: () => readonly string[];
+  /** The first read of every field, and the keys the shape declares. */
+  readonly base: (harness: BrokerContractHarness) => Record<string, unknown>;
+  /**
+   * Drives the method and asserts the effect the *first* read earns, so the
+   * read counts below are counts from a call that also behaved correctly.
+   */
+  readonly act: (
+    broker: Broker,
+    command: unknown,
+    harness: BrokerContractHarness,
+  ) => Promise<void>;
+}
+
+const COMMAND_BOUNDARIES: Readonly<Record<CommandMethod, CommandBoundary>> = {
+  placeOrder: {
+    fields: () =>
+      discoverCommandFields(readPlaceOrderCommand, ocoBuy('discover-place')),
+    base: (harness) => ({
+      ...ocoBuy('fields-place-1'),
+      sessionId: harness.sessionId,
+    }),
+    act: async (broker, command, harness) => {
+      const placed = await broker.placeOrder(command as PlaceOrderCommand);
+      const after = await broker.getPortfolio(harness.sessionId);
+
+      // An OCO order is not a MARKET order, so it stays OPEN, and it is there
+      // exactly once. Every second read is invalid — a drifted `type` is not an
+      // order type at all, a drifted `sessionId` names another account — so an
+      // implementation that re-reads is refused rather than merely wrong.
+      expect(placed.status).toBe('OPEN');
+      expect(
+        after.activeOrders.filter((order) => order.id === placed.id),
+      ).toHaveLength(1);
+    },
+  },
+  cancelOrder: {
+    fields: () =>
+      discoverCommandFields(
+        readCancelOrderCommand,
+        cancelOpenOrder(
+          CONTRACT_SESSION_ID,
+          CONTRACT_OPEN_ORDER_ID,
+          'discover-cancel',
+        ),
+      ),
+    base: (harness) => ({
+      ...cancelOpenOrder(
+        harness.sessionId,
+        harness.openOrderId,
+        'fields-cancel-1',
+      ),
+    }),
+    act: async (broker, command, harness) => {
+      const cancelled = await broker.cancelOrder(command as CancelOrderCommand);
+
+      // The order that was validated is the order that was cancelled. A second
+      // read of `orderId` addresses an order that does not exist — which is the
+      // path-traversal shape when the identifier reaches a URL path segment.
+      expect(cancelled.id).toBe(harness.openOrderId);
+      expect(cancelled.status).toBe('CANCELLED');
+    },
+  },
+  exchange: {
+    fields: () =>
+      discoverCommandFields(
+        readExchangeCommand,
+        exchangeQuote(CONTRACT_SESSION_ID, CONTRACT_QUOTE_ID, 'discover-fx'),
+      ),
+    base: (harness) => ({
+      ...exchangeQuote(
+        harness.sessionId,
+        harness.exchangeQuoteId,
+        'fields-fx-1',
+      ),
+    }),
+    act: async (broker, command, harness) => {
+      const receipt = await broker.exchange(command as ExchangeCommand);
+
+      // The quote that was validated is the quote that was consumed.
+      expect(receipt.quoteId).toBe(harness.exchangeQuoteId);
+      expect(receipt.sessionId).toBe(harness.sessionId);
+    },
+  },
+};
+
+/**
  * A `LIMIT` command whose fields are prototype accessors that answer differently
  * from the *second* read onwards. A published command type is an `interface`, so
  * this satisfies it; every implementation must therefore read each field once at
@@ -109,9 +319,17 @@ const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
  * `idempotencyKey` decides which key the effect is stored under, and the
  * remaining five decide what the effect *is* — so replaying `limitBuy` under the
  * same key either returns the same snapshot or proves the stored effect was
- * built from a value the rules never saw. One-extra-read mutants for all eight
- * fields are recorded in the wave-4 report; every one of them fails this
- * property, in both of the drivers this package ships.
+ * built from a value the rules never saw.
+ *
+ * What this fixture cannot show is a second read whose drift never reaches an
+ * observable effect — `sessionId` is not on the wire of a `placeOrder`, so an
+ * adapter that re-reads it diverges from the validated command without changing
+ * any outcome. That is why the read-count properties below exist beside this
+ * one: they bind every field of every command shape by counting the reads
+ * themselves. One-extra-read mutants for all fifteen (method, field) pairs are
+ * recorded in the wave-5 report, applied separately in each of the two drivers
+ * this package ships; each fails in the driver that carries it, and every one of
+ * the thirty fails a read-count property.
  */
 const driftingLimitBuy = (idempotencyKey: string): PlaceOrderCommand => {
   const reads = new Map<string, number>();
@@ -229,6 +447,56 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
     expect(replayed).toStrictEqual(placed);
     expect(afterReplay.accountSequence).toBe(after.accountSequence);
     expect(afterReplay.activeOrders).toStrictEqual(after.activeOrders);
+  });
+
+  // Exhaustiveness, mechanically. The property above proves the *harm* of a
+  // second read on one command shape; these prove the *discipline* on every
+  // method that takes a command and every field a caller can supply, with the
+  // field set discovered from each published reader rather than listed.
+  for (const [method, boundary] of Object.entries(COMMAND_BOUNDARIES)) {
+    it(`${method} reads every field of its command exactly once`, async () => {
+      const fields = boundary.fields();
+      const drifting = driftEveryField(fields, boundary.base(harness));
+
+      await boundary.act(broker, drifting.command, harness);
+
+      // Exactly once, not at most once: a field that is never read was never
+      // validated, and a field read twice was validated as one value and acted
+      // on as another. One read per field is the only count that is both.
+      expect(drifting.reads()).toStrictEqual(
+        Object.fromEntries(fields.map((field) => [field, 1])),
+      );
+    });
+  }
+
+  it('covers every caller-supplied field of every command shape', () => {
+    const discovered = Object.fromEntries(
+      Object.entries(COMMAND_BOUNDARIES).map(([method, boundary]) => [
+        method,
+        [...boundary.fields()].sort(),
+      ]),
+    );
+
+    // Two independent derivations of the same set: the left side is what each
+    // published reader actually reads, the right side is what each command
+    // shape declares. A field added to a shape but not read at the boundary,
+    // or read at the boundary but absent from the shape, fails here.
+    expect(discovered).toStrictEqual({
+      placeOrder: Object.keys(ocoBuy('k')).sort(),
+      cancelOrder: Object.keys(
+        cancelOpenOrder(harness.sessionId, harness.openOrderId, 'k'),
+      ).sort(),
+      exchange: Object.keys(
+        exchangeQuote(harness.sessionId, harness.exchangeQuoteId, 'k'),
+      ).sort(),
+    });
+
+    // And the count of (method, field) pairs the loop above covers.
+    const pairs = Object.values(COMMAND_BOUNDARIES).reduce(
+      (total, boundary) => total + boundary.fields().length,
+      0,
+    );
+    expect(pairs).toBe(9 + 3 + 3);
   });
 
   it('rejects a reused idempotency key that carries a different payload', async () => {

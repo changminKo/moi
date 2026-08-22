@@ -63,9 +63,11 @@ accounts over one instance.
 Every failure the SDK itself raises is a trading-core `DomainError`: no raw
 `TypeError` or `DecimalError` escapes a public method, whether the input came
 from a JavaScript caller or from the wire. The one thing that passes through
-unwrapped is an error thrown by the caller's own code — an accessor or a `Proxy`
-trap on a command object surfaces its own throw from the first property read,
-because that read *is* caller code. A code the domain already knows is
+unwrapped is an error thrown by your own code — an accessor or a `Proxy` trap,
+whether on a command object or on the response object your transport hands back,
+surfaces its own throw from the *first* property read, because that read *is*
+your code. There is never a second read on either side to throw from: every
+caller field and every response field is read exactly once. A code the domain already knows is
 preserved exactly and its retryability comes from trading-core's own table, not
 from the wire. Anything else is classified by status:
 
@@ -162,18 +164,27 @@ is indistinguishable from a caller's own accessor, so it supplies a `LIMIT`
 order's price, and it makes an ordinary `MARKET` order fail closed with
 `INVALID_ORDER` at this boundary rather than at the engine.
 
+Be precise about what that means, because it is not fail-closed in both
+directions. A polluted prototype makes a *forbidden* price refuse a `MARKET`
+order, which is closed. It also *supplies* a required one: a `LIMIT` command
+carrying no own price is refused as `INVALID_ORDER` on an unpolluted realm and is
+accepted with the polluted price on the wire once `Object.prototype.limitPrice`
+exists. That direction is open, and both are pinned by test.
+
 Own-property-only presence would instead refuse the class and builder shapes the
 types bless. Excluding `Object.prototype` by walking the prototype chain for a
-field's resolved descriptor is the alternative that *would* work — a `Proxy`
-whose price lives behind a `get` trap has no resolved descriptor anywhere, so
-the rule would not fire on it — and it is declined on cost, not on
-impossibility. The walk asks every supplied optional field for a descriptor,
-which is an extra call into your code on the happy path: a `Proxy` whose
-`getOwnPropertyDescriptor` trap throws or answers inconsistently is as blessed a
-shape as one whose `get` trap does, and today a supplied value is never asked
-for a descriptor at all. Against that, the behaviour being kept fails *closed*,
-and the injection the walk would remove needs same-realm prototype pollution,
-which already means the attacker runs code in your realm.
+field's resolved descriptor is the real alternative, and it is declined on
+incompleteness rather than on impossibility: a `Proxy` whose price lives behind a
+`get` trap has no resolved descriptor anywhere in its chain, so the rule would
+not fire on it and that price would stand, and a `Proxy` whose
+`getOwnPropertyDescriptor` trap throws or answers inconsistently is exactly as
+blessed a shape as one whose `get` trap does. The walk also asks every *supplied*
+optional field for a descriptor, where today a supplied value is never asked for
+one at all — but that cost is conditional, not inherent: guarding the walk with
+`Object.hasOwn(Object.prototype, field)` would make it free on every unpolluted
+call, so cost is not what settles this. What settles it is that the gadget the
+walk would remove needs same-realm prototype pollution, which already means the
+attacker runs code in your realm.
 
 ## The contract suite
 

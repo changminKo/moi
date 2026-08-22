@@ -402,33 +402,45 @@ function fallbackCode(status: number): DomainErrorCode {
  * classified by status, and retryability always comes from trading-core's own
  * table rather than the wire.
  */
-function decodeError(response: PaperBrokerResponse): DomainError {
+function decodeError(status: number, payload: unknown): DomainError {
   const body =
-    typeof response.body === 'object' && response.body !== null
-      ? (response.body as Record<string, unknown>)
+    typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>)
       : {};
-  const serverCode = typeof body.code === 'string' ? body.code : undefined;
+  // One read per field, bound before it is inspected, for the same reason the
+  // command side snapshots its argument: an envelope is an object too, so its
+  // fields may be accessors, and the value that reaches the `DomainError` has to
+  // be the value that was type-checked. `code` is the sharp one — a strategy
+  // compares it against `'RATE_LIMITED'` before deciding to retry, and
+  // `Object.hasOwn` coerces its key, so an object whose `toString` names a
+  // retryable code would pass the check on read one and land in the error on
+  // read two.
+  const suppliedCode = body.code;
+  const suppliedMessage = body.message;
+  const suppliedRequestId = body.requestId;
+  const retryAfter = body.retryAfter;
+  const serverCode =
+    typeof suppliedCode === 'string' ? suppliedCode : undefined;
   const code =
     serverCode !== undefined && isDomainErrorCode(serverCode)
       ? serverCode
-      : fallbackCode(response.status);
+      : fallbackCode(status);
   const parts = [
-    typeof body.message === 'string' && body.message.length > 0
-      ? body.message
-      : `the paper API responded with status ${response.status}`,
+    typeof suppliedMessage === 'string' && suppliedMessage.length > 0
+      ? suppliedMessage
+      : `the paper API responded with status ${status}`,
   ];
 
   if (serverCode !== undefined && serverCode !== code) {
     parts.push(`[${serverCode}]`);
   }
 
-  if (typeof body.requestId === 'string' && body.requestId.length > 0) {
-    parts.push(`(requestId ${body.requestId})`);
+  if (typeof suppliedRequestId === 'string' && suppliedRequestId.length > 0) {
+    parts.push(`(requestId ${suppliedRequestId})`);
   }
 
   const message = parts.join(' ');
   const error = new DomainError(code, message);
-  const retryAfter = body.retryAfter;
 
   if (
     typeof retryAfter === 'number' &&
@@ -518,12 +530,15 @@ export class PaperBroker implements Broker {
   }
 
   async #send(request: PaperBrokerRequest): Promise<unknown> {
-    const response = await this.#transport.request(request);
+    // The transport is caller code as well, so its response is snapshotted the
+    // way a command is: `status` and `body` are read once each, and the decoders
+    // downstream work from that one read.
+    const { status, body } = await this.#transport.request(request);
 
-    if (response.status < 200 || response.status >= 300) {
-      throw decodeError(response);
+    if (status < 200 || status >= 300) {
+      throw decodeError(status, body);
     }
 
-    return response.body;
+    return body;
   }
 }

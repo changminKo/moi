@@ -514,13 +514,15 @@ describe('PaperBroker', () => {
   // Not a RED cycle: this pins behaviour that already holds, so the cost of a
   // prototype-inclusive presence read is a decision rather than an accident. A
   // polluted `Object.prototype.limitPrice` is indistinguishable from a caller's
-  // own accessor, so it supplies a LIMIT order's price — and makes an ordinary
-  // MARKET order fail closed at the boundary instead of at the engine. The
-  // alternatives are worse: own-property-only refuses the class and builder
-  // shapes the published interfaces bless, and walking descriptors to exclude
-  // `Object.prototype` — which would work, a `get`-trap Proxy having no resolved
-  // descriptor to find — costs a descriptor read on every supplied optional
-  // field, which the pin below measures.
+  // own accessor, so it cuts both ways, and this test asserts both: a `MARKET`
+  // order fails closed at the boundary instead of at the engine, and a `LIMIT`
+  // order that would be refused for having no price is instead accepted with the
+  // polluted one on the wire. The alternatives are not better: own-property-only
+  // refuses the class and builder shapes the published interfaces bless, and
+  // walking descriptors to exclude `Object.prototype` removes the injection only
+  // for shapes that have a resolved descriptor — a `get`-trap Proxy has none —
+  // while costing a descriptor read on every supplied optional field, which the
+  // pin below measures.
   it('reads a polluted Object.prototype as a supplied price, both ways', async () => {
     const { transport, requests } = createFakeTransport(
       createPaperAccountFake(),
@@ -531,6 +533,13 @@ describe('PaperBroker', () => {
       idempotencyKey: 'polluted-1',
       type: 'LIMIT',
     } as unknown as PlaceOrderCommand;
+    // The same command, unpolluted: refused, nothing sent. Pinning this beside
+    // the polluted run is what makes the direction explicit — pollution does not
+    // only add a refusal, it turns this refusal into an accepted order carrying
+    // a price the caller never supplied.
+    const baselineRejection = await broker
+      .placeOrder({ ...limitWithoutOwnPrice, idempotencyKey: 'unpolluted-1' })
+      .catch((error: unknown) => error);
     let marketRejection: unknown;
 
     try {
@@ -552,6 +561,7 @@ describe('PaperBroker', () => {
       quantity: '3',
       limitPrice: '999.99',
     });
+    expect(baselineRejection).toMatchObject({ code: 'INVALID_ORDER' });
     expect(marketRejection).toMatchObject({ code: 'INVALID_ORDER' });
     expect(requests).toHaveLength(1);
   });

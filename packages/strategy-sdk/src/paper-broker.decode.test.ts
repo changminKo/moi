@@ -483,3 +483,159 @@ describe('PaperBroker classifies transport statuses', () => {
     expect(thrown).toMatchObject({ retryAfterSeconds: 0.5 });
   });
 });
+
+// The error envelope was the last place on this boundary that read a field more
+// than once, and it is the sharp one: `code` is what a strategy compares against
+// `'RATE_LIMITED'` before deciding to retry, and `message` is what an operator
+// reads. A second read of either is the `terminalReason` defect above with a
+// worse payload — `Object.hasOwn` coerces its key, so an *object* whose
+// `toString` names a retryable code passes the code check on read one and lands
+// in the `DomainError` on read two.
+describe('PaperBroker decodes the error envelope it validated', () => {
+  const driftingErrorBody = (
+    field: string,
+    values: readonly unknown[],
+  ): {
+    readonly body: Record<string, unknown>;
+    readonly reads: () => number;
+  } => {
+    let reads = 0;
+    const body: Record<string, unknown> = {
+      code: 'INVALID_ORDER',
+      message: 'the order was refused',
+      requestId: 'req-decode-1',
+    };
+
+    Object.defineProperty(body, field, {
+      enumerable: true,
+      get: () => {
+        const index = reads;
+        reads += 1;
+
+        return values[Math.min(index, values.length - 1)];
+      },
+    });
+
+    return { body, reads: () => reads };
+  };
+
+  const errorFrom = async (response: PaperBrokerResponse): Promise<unknown> => {
+    const broker = new PaperBroker(stub(response));
+
+    return rejection(() => broker.placeOrder(marketBuy));
+  };
+
+  it('takes the error code from the read it type-checked', async () => {
+    const { body, reads } = driftingErrorBody('code', [
+      'INVALID_ORDER',
+      // Not a string, and not a code — but a key `Object.hasOwn` coerces to one.
+      { toString: () => 'RATE_LIMITED' },
+    ]);
+
+    const thrown = await errorFrom({ status: 400, body });
+
+    expect(thrown).toBeInstanceOf(DomainError);
+    expect(typeof (thrown as DomainError).code).toBe('string');
+    expect(thrown).toMatchObject({ code: 'INVALID_ORDER', retryable: false });
+    expect(reads()).toBe(1);
+  });
+
+  it('takes the message from the read it type-checked', async () => {
+    const { body, reads } = driftingErrorBody('message', [
+      'the order was refused',
+      { toString: () => 'your order was accepted' },
+    ]);
+
+    const thrown = await errorFrom({ status: 400, body });
+
+    expect(thrown).toMatchObject({
+      code: 'INVALID_ORDER',
+      message: 'the order was refused (requestId req-decode-1)',
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it('takes the requestId from the read it type-checked', async () => {
+    const { body, reads } = driftingErrorBody('requestId', [
+      'req-decode-1',
+      { toString: () => 'req-forged' },
+    ]);
+
+    const thrown = await errorFrom({ status: 400, body });
+
+    expect(thrown).toMatchObject({
+      message: 'the order was refused (requestId req-decode-1)',
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it.each(['code', 'message', 'requestId'])(
+    'raises a DomainError when a %s accessor throws on a second read',
+    async (field) => {
+      // The one read this decoder is allowed answers normally; anything after it
+      // throws, so a raw error escaping a public method is proof of a second
+      // read. The README's `Errors` section says none can.
+      let reads = 0;
+      const body: Record<string, unknown> = {
+        code: 'INVALID_ORDER',
+        message: 'the order was refused',
+        requestId: 'req-decode-1',
+      };
+      const first = body[field];
+
+      Object.defineProperty(body, field, {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+
+          if (reads > 1) {
+            throw new RangeError(`boom-${field}`);
+          }
+
+          return first;
+        },
+      });
+
+      const thrown = await errorFrom({ status: 400, body });
+
+      expect(thrown).toBeInstanceOf(DomainError);
+      expect(reads).toBe(1);
+    },
+  );
+
+  it('reads the response status and body exactly once', async () => {
+    let statusReads = 0;
+    let bodyReads = 0;
+    const response = {} as PaperBrokerResponse;
+
+    Object.defineProperty(response, 'status', {
+      enumerable: true,
+      get: () => {
+        statusReads += 1;
+
+        return statusReads === 1 ? 503 : 200;
+      },
+    });
+    Object.defineProperty(response, 'body', {
+      enumerable: true,
+      get: () => {
+        bodyReads += 1;
+
+        return bodyReads === 1
+          ? { message: 'draining' }
+          : { message: 'something else' };
+      },
+    });
+
+    const thrown = await errorFrom(response);
+
+    expect(thrown).toMatchObject({
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'draining',
+    });
+    expect({ statusReads, bodyReads }).toStrictEqual({
+      statusReads: 1,
+      bodyReads: 1,
+    });
+  });
+});

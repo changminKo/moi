@@ -191,24 +191,29 @@ export interface OptionalFieldRead {
  * silently treating it as absent.
  *
  * The cost of a prototype-inclusive read is that a polluted `Object.prototype`
- * is indistinguishable from a caller's own accessor, so a polluted
- * `Object.prototype.limitPrice` supplies one — and makes a `MARKET` order fail
- * closed as `INVALID_ORDER`. That is a deliberate trade, pinned by test.
+ * is indistinguishable from a caller's own accessor, and it cuts both ways: a
+ * polluted `Object.prototype.limitPrice` makes a `MARKET` order fail closed as
+ * `INVALID_ORDER`, and it makes a `LIMIT` command that carries no own price —
+ * refused on an unpolluted realm — succeed with the polluted price on the wire.
+ * That second direction is open, not closed. Both are a deliberate trade and
+ * both are pinned by test.
  *
  * Own-property-only presence would have this boundary reject the class and
  * builder shapes its own published interfaces bless. Excluding `Object.prototype`
  * by walking the prototype chain for a field's resolved descriptor is the real
- * alternative, and it is declined on cost rather than on impossibility: a `Proxy`
- * whose price lives behind a `get` trap has no resolved descriptor anywhere in
- * its chain, so such a rule would not fire on it and the price would stand. What
- * it does cost is a descriptor read on every *supplied* optional field — an
- * extra call into caller code on the happy path, and a `Proxy` whose
- * `getOwnPropertyDescriptor` trap throws or answers inconsistently is exactly as
- * blessed a shape as one whose `get` trap does. This policy asks for a
- * descriptor only after a value read came back `undefined`, which
- * `paper-broker.test.ts` pins directly; and the gadget the walk would remove
- * needs same-realm prototype pollution, which already implies the attacker runs
- * code in this realm.
+ * alternative, and it is declined on incompleteness rather than on
+ * impossibility: a `Proxy` whose price lives behind a `get` trap has no resolved
+ * descriptor anywhere in its chain, so such a rule would not fire on it and the
+ * price would stand, and a `Proxy` whose `getOwnPropertyDescriptor` trap throws
+ * or answers inconsistently is exactly as blessed a shape as one whose `get`
+ * trap does. The walk also asks every *supplied* optional field for a
+ * descriptor, where this policy asks only after a value read came back
+ * `undefined` — which `paper-broker.test.ts` pins directly — but that cost is
+ * conditional rather than inherent: an `Object.hasOwn(Object.prototype, field)`
+ * guard would make the walk free on every unpolluted call, so the decline does
+ * not rest on it. It rests on the gadget the walk would remove needing
+ * same-realm prototype pollution, which already implies the attacker runs code
+ * in this realm.
  */
 export function readOptionalField(
   source: object,
