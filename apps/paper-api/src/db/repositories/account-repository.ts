@@ -11,6 +11,7 @@ import {
 } from '@skipjack/trading-core';
 import { sql } from 'kysely';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
+import { compositeLockKey } from '../lock-order.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 /** A wallet row held under `for update`, carrying its persistence identity. */
@@ -98,11 +99,11 @@ const MARKETS = new Set<string>(['KR', 'US']);
  * is taken.
  */
 function walletLockKey(key: WalletKey): string {
-  return `${key.sessionId}:${key.currency}`;
+  return compositeLockKey(key.sessionId, key.currency);
 }
 
 function positionLockKey(key: PositionKey): string {
-  return `${key.sessionId}:${key.marketCode}:${key.symbol}`;
+  return compositeLockKey(key.sessionId, key.marketCode, key.symbol);
 }
 
 function toLockedWallet(row: WalletRow): LockedWallet {

@@ -10,6 +10,7 @@ import {
 } from '@skipjack/trading-core';
 import { sql } from 'kysely';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
+import { ocoWinnerClaimKey } from '../lock-order.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 export interface InsertOrderInput {
@@ -33,6 +34,18 @@ export interface UpdateOrderInput {
   readonly filledQuantity?: Quantity;
   readonly terminalReason?: string;
   readonly isOcoWinner?: boolean;
+  /**
+   * The OCO group the order belongs to, which a grouped order must name.
+   *
+   * It is not decoration: every `update` of a grouped order rewrites the row's
+   * entry in the partial unique index `orders_one_oco_winner_per_group`, so it
+   * can wait on another transaction's uncommitted winner. That wait has to be
+   * declared, and it can only be declared by a caller that says which group.
+   * The statement enforces it — an order whose `oco_group_id` differs from this
+   * value matches no row and is refused as a state conflict — so a grouped
+   * order cannot be updated without its claim being ordered.
+   */
+  readonly ocoGroupId?: string;
 }
 
 export interface ResolveOcoGroupInput {
@@ -235,6 +248,12 @@ export async function lockOcoGroup(
  * when the caller omits them; `coalesce` expresses that unambiguously because
  * no caller ever needs to write them back to null — a terminal reason is set
  * once and an OCO winner is never un-won.
+ *
+ * The row lock is declared first and the winner-slot claim second, in the order
+ * PostgreSQL takes them: an `update` locks the row, then writes its index
+ * entries. So a transaction that has claimed the slot may no longer take an
+ * order row lock, which is exactly the sequence that used to deadlock — every
+ * order row a transaction writes has to be locked before the first winner claim.
  */
 export async function updateOrder(
   connection: LedgerConnection,
@@ -247,7 +266,14 @@ export async function updateOrder(
     filledQuantity: input.filledQuantity ?? null,
     terminalReason: input.terminalReason ?? null,
     isOcoWinner: input.isOcoWinner ?? null,
+    ocoGroupId: input.ocoGroupId ?? null,
   });
+  if (update.isOcoWinner === true && update.ocoGroupId === null) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `order ${update.id} cannot be made the OCO winner without naming its group`,
+    );
+  }
   // None of these columns is a key column, so PostgreSQL takes `for no key
   // update` on the row — a real lock, declared like any other.
   connection.acquireLock({
@@ -255,6 +281,13 @@ export async function updateOrder(
     key: update.id,
     strength: 'NO_KEY_UPDATE',
   });
+  if (update.ocoGroupId !== null) {
+    connection.claimUniqueKey({
+      table: 'orders',
+      key: ocoWinnerClaimKey(update.ocoGroupId),
+      index: 'orders_one_oco_winner_per_group',
+    });
+  }
 
   const result = await sql<{ version: string }>`
     update orders
@@ -264,7 +297,9 @@ export async function updateOrder(
         is_oco_winner = coalesce(${update.isOcoWinner}, is_oco_winner),
         updated_at = now(),
         version = version + 1
-    where id = ${update.id} and version = ${update.expectedVersion}
+    where id = ${update.id}
+      and version = ${update.expectedVersion}
+      and oco_group_id is not distinct from ${update.ocoGroupId}
     returning version
   `.execute(connection.executor);
   return BigInt(

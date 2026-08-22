@@ -19,6 +19,7 @@ import {
   createLockOrderGuard,
   type LockOrderGuard,
   type LockTarget,
+  type UniqueKeyClaim,
 } from './lock-order.js';
 import {
   type AccountRepository,
@@ -95,8 +96,10 @@ export interface UnitOfWorkOptions {
    * consistency and accepts 40001 as its cost.
    */
   readonly isolationLevel?: IsolationLevel;
-  /** Observes each lock as it is taken. Diagnostics and tests only. */
+  /** Observes each row lock as it is taken. Diagnostics and tests only. */
   readonly onLock?: (target: LockTarget) => void;
+  /** Observes each unique-key claim. Diagnostics and tests only. */
+  readonly onClaim?: (claim: UniqueKeyClaim) => void;
 }
 
 const DEFAULT_MAX_RETRIES = 3;
@@ -153,8 +156,9 @@ function retryableSqlState(error: unknown): string | undefined {
 function createLedgerConnection(
   executor: LedgerTransaction,
   onLock: ((target: LockTarget) => void) | undefined,
+  onClaim: ((claim: UniqueKeyClaim) => void) | undefined,
 ): LedgerConnection {
-  return { executor, ...createLockOrderGuard(onLock) };
+  return { executor, ...createLockOrderGuard(onLock, onClaim) };
 }
 
 function createTradingTransaction(
@@ -185,6 +189,7 @@ export class UnitOfWork {
   readonly #maxRetries: number;
   readonly #isolationLevel: IsolationLevel | undefined;
   readonly #onLock: ((target: LockTarget) => void) | undefined;
+  readonly #onClaim: ((claim: UniqueKeyClaim) => void) | undefined;
 
   constructor(db: Database, options: UnitOfWorkOptions) {
     const settings = snapshotInput({
@@ -192,6 +197,7 @@ export class UnitOfWork {
       maxRetries: options.maxRetries ?? DEFAULT_MAX_RETRIES,
       isolationLevel: options.isolationLevel,
       onLock: options.onLock,
+      onClaim: options.onClaim,
     });
     if (!Number.isInteger(settings.maxRetries) || settings.maxRetries < 0) {
       throw new RangeError('maxRetries must be a non-negative integer');
@@ -202,6 +208,7 @@ export class UnitOfWork {
     this.#maxRetries = settings.maxRetries;
     this.#isolationLevel = settings.isolationLevel;
     this.#onLock = settings.onLock;
+    this.#onClaim = settings.onClaim;
   }
 
   /**
@@ -227,7 +234,9 @@ export class UnitOfWork {
             : this.#db.transaction().setIsolationLevel(this.#isolationLevel);
         return await builder.execute(async (trx) => {
           const result = await work(
-            createTradingTransaction(createLedgerConnection(trx, this.#onLock)),
+            createTradingTransaction(
+              createLedgerConnection(trx, this.#onLock, this.#onClaim),
+            ),
           );
           commitSent = true;
           return result;
@@ -329,11 +338,16 @@ export interface TradingMutationResult {
  * The whole point of this function is that there is exactly one transaction:
  * the reservation, the order row, the audit event, the outbox event, and the
  * idempotency record either all exist afterwards or none of them do. Locks are
- * taken strictly down `LEDGER_LOCK_ORDER` — session, wallet, position, OCO
- * group, sibling orders by ascending id, then the order insert and the
- * idempotency record, each of which only re-pins rows this transaction already
- * holds — and every caller-supplied value is snapshotted once before any of it
- * is used.
+ * taken strictly down `LEDGER_LOCK_ORDER` — session, the idempotency claim and
+ * the record it retires, wallet, position, OCO group, sibling orders by
+ * ascending id, then the order insert (which only re-pins rows this transaction
+ * already holds) and the outbox claim — and every caller-supplied value is
+ * snapshotted once before any of it is used.
+ *
+ * The result is recorded against the idempotency key immediately after the key
+ * is claimed rather than at the end, because the claim and the record are the
+ * same row and therefore the same position in the lock order. Nothing observes
+ * the difference: every write of this function commits together or not at all.
  */
 export async function commitTradingMutation(
   unitOfWork: UnitOfWork,
@@ -412,6 +426,13 @@ export async function commitTradingMutation(
         `idempotency key ${request.idempotencyKey} is already in progress`,
       );
     }
+
+    await tx.idempotency.complete({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+    });
 
     if (
       request.cashCurrency !== undefined &&
@@ -510,13 +531,6 @@ export async function commitTradingMutation(
       streamSequence: request.outboxStreamSequence,
       eventType: request.outboxEventType,
       payload: request.outboxPayload,
-    });
-
-    await tx.idempotency.complete({
-      sessionId: request.sessionId,
-      key: request.idempotencyKey,
-      statusCode: request.responseStatusCode,
-      body: responseBody,
     });
 
     return {

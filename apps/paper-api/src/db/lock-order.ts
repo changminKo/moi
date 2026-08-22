@@ -3,18 +3,48 @@ import { DomainError } from '@skipjack/trading-core';
 /**
  * The single global lock order of the ledger.
  *
- * Deadlock freedom here is structural, not statistical: a set of transactions
- * that always requests row locks in one total order can never form a wait
- * cycle. The total order is (rank of table in this array, then row key
- * ascending as a string), and `createLockOrderGuard` refuses any acquisition
- * that would go backwards in it — so an inconsistent order is a test failure in
- * this repository rather than a deadlock in production.
+ * The order is (rank of table in this array, then row key ascending as a
+ * string), and `createLockOrderGuard` refuses any acquisition that would go
+ * backwards in it — so an inconsistent order is a test failure in this
+ * repository rather than a deadlock in production.
+ *
+ * What that buys is stated precisely, because a total order on its own does
+ * not buy deadlock freedom. PostgreSQL makes a transaction wait in exactly two
+ * ways, and both have to be ordered:
+ *
+ *   1. **A row lock.** A set of transactions that always acquires row locks in
+ *      one total order, and never *strengthens* a lock it already holds, can
+ *      never form a wait cycle: a transaction only ever waits for a resource
+ *      ranked above everything it holds, so a cycle would need a resource
+ *      strictly above itself. A strengthening breaks that argument — two
+ *      transactions each holding `for key share` on one row and each then
+ *      asking for `for update` on it wait for one another while both are
+ *      perfectly in order — so `acquireLock` refuses it. A transaction has to
+ *      take the strongest lock it will need on its first touch of a row.
+ *   2. **A transaction id, through a unique index.** An `insert` (or an
+ *      `update` that writes an indexed column) that collides with another
+ *      transaction's uncommitted index entry waits for that whole transaction,
+ *      not for a row. That wait is invisible to a row-lock order, so every
+ *      unique index a repository statement can collide on is either declared
+ *      through `claimUniqueKey` — which places the claim in this same order, at
+ *      the rank of the table that owns it — or classified in
+ *      `LEDGER_UNIQUE_INDEXES` with the reason it needs no claim. The suite
+ *      reads the unique indexes out of PostgreSQL's own catalog and fails if any
+ *      index is unclassified, so a new index cannot be added without an answer.
+ *
+ * The residue is named rather than hidden: the six indexes keyed on a uuid this
+ * application generates fresh for every row are classified `FRESH_IDENTITY`,
+ * and a collision on one of them means a caller reused an identity. That is a caller defect rather than contention, it cannot be
+ * ordered (the two transactions are writing what they believe is the same row),
+ * and the deadlock it can produce is absorbed by the retry — which the suite
+ * pins, with exactly one effect.
  *
  * The ranks are ordered from the most coarse-grained row to the most
  * fine-grained: a mutation starts by pinning the session that owns the ledger,
- * then its balances, then the grouping row, then individual orders, and last the
- * idempotency record that retires the request. Every mutation therefore enters
- * the order at the top and moves down it.
+ * claims the idempotency key that identifies the request, then its balances,
+ * then the grouping row, then individual orders, and last the outbox event it
+ * publishes. Every mutation therefore enters the order at the top and moves
+ * down it.
  *
  * Every lock counts, not only an explicit `select … for update`. Three kinds of
  * row lock reach this order:
@@ -31,23 +61,25 @@ import { DomainError } from '@skipjack/trading-core';
  * and the OCO group row, `insert into outbox_events` and the idempotency writes
  * pin the session row, and `insert into reservations` pins the session and the
  * order. A transaction that took an order lock first and only then inserted was
- * acquiring a rank-0 lock after a rank-4 lock without saying so.
+ * acquiring a rank-0 lock after a rank-5 lock without saying so.
  *
  * `audit_events` is absent because it references nothing: it is append-only and
- * carries no foreign key, so it locks nothing. `reservations`, `outbox_events`
- * and `account_sequences` are absent because nothing ever locks a row in them —
- * they are only ever inserted into, and an insert locks its parents, not its own
- * invisible new row. A future `update` against one of them cannot be declared,
- * because `acquireLock` refuses a table with no rank, so the omission fails
- * loudly rather than silently.
+ * carries no foreign key, so it locks nothing. `reservations` and
+ * `account_sequences` are absent because nothing ever locks a row in them and
+ * neither carries a unique index this application can contend on — they are only
+ * ever inserted into, and an insert locks its parents, not its own invisible new
+ * row. A future `update` against one of them cannot be declared, because
+ * `acquireLock` refuses a table with no rank, so the omission fails loudly
+ * rather than silently.
  */
 export const LEDGER_LOCK_ORDER = Object.freeze([
   'anonymous_sessions',
+  'idempotency_requests',
   'wallets',
   'positions',
   'oco_groups',
   'orders',
-  'idempotency_requests',
+  'outbox_events',
 ] as const);
 
 export type LockTable = (typeof LEDGER_LOCK_ORDER)[number];
@@ -68,14 +100,155 @@ export type LockTable = (typeof LEDGER_LOCK_ORDER)[number];
 export const LEDGER_REFERENCE_TABLES = Object.freeze(['markets'] as const);
 
 /**
+ * Why each unique index of the ledger cannot put this application in a wait
+ * cycle.
+ *
+ *   * `ORDERED_CLAIM` — two concurrent requests can legitimately compute this
+ *     key, so the statement that writes it declares the claim through
+ *     `claimUniqueKey` and the claim takes its place in `LEDGER_LOCK_ORDER`.
+ *   * `FRESH_IDENTITY` — the key is a uuid this application generates for the
+ *     row it is inserting. Two concurrent requests never compute the same one;
+ *     a collision means a caller reused an identity, which is a defect in the
+ *     caller. The resulting deadlock is retried like any other 40P01.
+ *   * `UNWRITTEN` — no repository statement inserts into the table, and no
+ *     repository `update` writes any column of the index, so no index entry is
+ *     ever added and no conflict is reachable.
+ *
+ * The suite reads `pg_index` and asserts that this map covers exactly the unique
+ * indexes the schema defines on the tables the repositories touch.
+ */
+export type UniqueIndexArbiter =
+  | 'ORDERED_CLAIM'
+  | 'FRESH_IDENTITY'
+  | 'UNWRITTEN';
+
+export interface UniqueIndexClassification {
+  readonly table: string;
+  readonly arbiter: UniqueIndexArbiter;
+}
+
+export const LEDGER_UNIQUE_INDEXES: Readonly<
+  Record<string, UniqueIndexClassification>
+> = Object.freeze({
+  idempotency_requests_session_id_idempotency_key_key: {
+    table: 'idempotency_requests',
+    arbiter: 'ORDERED_CLAIM',
+  },
+  orders_one_oco_winner_per_group: {
+    table: 'orders',
+    arbiter: 'ORDERED_CLAIM',
+  },
+  outbox_events_session_id_stream_sequence_key: {
+    table: 'outbox_events',
+    arbiter: 'ORDERED_CLAIM',
+  },
+  audit_events_pkey: { table: 'audit_events', arbiter: 'FRESH_IDENTITY' },
+  idempotency_requests_pkey: {
+    table: 'idempotency_requests',
+    arbiter: 'FRESH_IDENTITY',
+  },
+  orders_pkey: { table: 'orders', arbiter: 'FRESH_IDENTITY' },
+  outbox_events_event_id_key: {
+    table: 'outbox_events',
+    arbiter: 'FRESH_IDENTITY',
+  },
+  outbox_events_pkey: { table: 'outbox_events', arbiter: 'FRESH_IDENTITY' },
+  reservations_pkey: { table: 'reservations', arbiter: 'FRESH_IDENTITY' },
+  account_sequences_pkey: {
+    table: 'account_sequences',
+    arbiter: 'UNWRITTEN',
+  },
+  account_sequences_session_id_account_sequence_key: {
+    table: 'account_sequences',
+    arbiter: 'UNWRITTEN',
+  },
+  anonymous_sessions_pkey: {
+    table: 'anonymous_sessions',
+    arbiter: 'UNWRITTEN',
+  },
+  anonymous_sessions_token_hash_key: {
+    table: 'anonymous_sessions',
+    arbiter: 'UNWRITTEN',
+  },
+  oco_groups_pkey: { table: 'oco_groups', arbiter: 'UNWRITTEN' },
+  positions_pkey: { table: 'positions', arbiter: 'UNWRITTEN' },
+  positions_session_id_market_code_symbol_key: {
+    table: 'positions',
+    arbiter: 'UNWRITTEN',
+  },
+  wallets_pkey: { table: 'wallets', arbiter: 'UNWRITTEN' },
+  wallets_session_id_currency_key: {
+    table: 'wallets',
+    arbiter: 'UNWRITTEN',
+  },
+});
+
+/** The unique indexes a statement declares through `claimUniqueKey`. */
+export type ClaimedUniqueIndex =
+  | 'idempotency_requests_session_id_idempotency_key_key'
+  | 'orders_one_oco_winner_per_group'
+  | 'outbox_events_session_id_stream_sequence_key';
+
+/**
+ * The claim key of the one-winner-per-OCO-group index.
+ *
+ * The claim shares rank 5 with the `orders` rows themselves, and it has to sort
+ * *after* every one of them: PostgreSQL takes the row lock first and inserts the
+ * index entry second, so a transaction that has claimed the winner slot must not
+ * then wait for an order row. Order ids are uuids, so their keys only ever
+ * contain `0-9`, `a-f` and `-`; `'o'` sorts above all of those. The suite pins
+ * that rather than trusting it.
+ */
+export function ocoWinnerClaimKey(ocoGroupId: string): string {
+  return `oco-winner:${ocoGroupId}`;
+}
+
+const KEY_PART_ESCAPE = /[\\:]/g;
+
+/**
+ * Renders a multi-column natural key as one lock key.
+ *
+ * The parts are joined with `:` after escaping `:` and `\` inside them, so two
+ * different rows can never render to one key: without the escape,
+ * `('a:b', 'c')` and `('a', 'b:c')` would collide and the guard would treat two
+ * rows as one, skipping an ordering check.
+ */
+export function compositeLockKey(...parts: readonly string[]): string {
+  return parts
+    .map((part) => part.replace(KEY_PART_ESCAPE, (char) => `\\${char}`))
+    .join(':');
+}
+
+const SEQUENCE_KEY_WIDTH = 20;
+
+/**
+ * Renders a sequence number as a lock key that sorts numerically.
+ *
+ * Lock keys are compared as strings, so `'10'` would sort below `'2'` and two
+ * appends in ascending sequence order would look like an inversion. A bigint
+ * needs at most 19 digits, so zero-padding to 20 makes the string order the
+ * numeric order. A negative sequence has no such rendering and is refused
+ * rather than silently mis-ordered.
+ */
+export function sequenceLockKey(value: bigint): string {
+  if (value < 0n) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `a lock key cannot be built from the negative sequence ${value}`,
+    );
+  }
+  return value.toString().padStart(SEQUENCE_KEY_WIDTH, '0');
+}
+
+/**
  * How strongly a row is held, in PostgreSQL's own row-lock order.
  *
  * Strength matters to the ordering discipline because a *strengthening* of a
  * lock already held is a fresh acquisition that can block: a transaction
  * holding `for key share` on a session row (from a foreign-key check) and then
  * asking for `for update` on it waits for every other holder of the shared
- * lock. Treating that as "already held" is what would let a foreign-key pin
- * hide an inverted acquisition.
+ * lock. Two transactions running that identical sequence deadlock while both
+ * obey the order, so the strengthening is refused outright rather than ordered.
  */
 export type LockStrength = 'KEY_SHARE' | 'NO_KEY_UPDATE' | 'UPDATE';
 
@@ -97,74 +270,142 @@ export interface LockTarget {
   readonly strength: LockStrength;
 }
 
+/**
+ * A unique-index entry the next statement will insert, and therefore a wait on
+ * whichever transaction holds a conflicting uncommitted entry.
+ */
+export interface UniqueKeyClaim {
+  readonly table: LockTable;
+  /** The index's own key, rendered the way `LockTarget.key` is. */
+  readonly key: string;
+  readonly index: ClaimedUniqueIndex;
+}
+
 /** The lock-order discipline of one open transaction. */
 export interface LockOrderGuard {
   /**
    * Declares the row lock the next statement will take. Throws
-   * INVARIANT_VIOLATION when it would violate `LEDGER_LOCK_ORDER`.
+   * INVARIANT_VIOLATION when it would violate `LEDGER_LOCK_ORDER`, and when it
+   * would strengthen a lock this transaction already holds.
    */
   acquireLock(target: LockTarget): void;
+  /**
+   * Declares the unique-index entry the next statement will insert. Throws
+   * INVARIANT_VIOLATION when the claim would go backwards in
+   * `LEDGER_LOCK_ORDER`, and when the index is not one this order claims.
+   */
+  claimUniqueKey(claim: UniqueKeyClaim): void;
 }
 
 function lockRank(table: string): number {
   return (LEDGER_LOCK_ORDER as readonly string[]).indexOf(table);
 }
 
-function compareLockTargets(left: LockTarget, right: LockTarget): number {
-  const byTable = lockRank(left.table) - lockRank(right.table);
-  if (byTable !== 0) {
-    return byTable;
-  }
-  if (left.key === right.key) {
-    return 0;
-  }
-  return left.key < right.key ? -1 : 1;
+interface OrderCursor {
+  readonly rank: number;
+  readonly key: string;
+  readonly description: string;
 }
 
 /**
  * Creates the guard for one transaction.
  *
- * `onLock` observes each acquisition that really happens — a re-declaration of
+ * `onLock` observes each row lock that really happens — a re-declaration of
  * something already held at the same or greater strength acquires nothing and is
- * not reported.
+ * not reported. `onClaim` observes each unique-key claim. They are separate
+ * channels because they measure different things: a row lock is observable from
+ * another backend, and a claim on a row that does not exist yet is not.
  */
 export function createLockOrderGuard(
   onLock?: (target: LockTarget) => void,
+  onClaim?: (claim: UniqueKeyClaim) => void,
 ): LockOrderGuard {
   const held = new Map<string, LockStrength>();
-  let last: LockTarget | undefined;
+  const claimed = new Set<string>();
+  let last: OrderCursor | undefined;
+
+  const rankOf = (table: string): number => {
+    const rank = lockRank(table);
+    if (rank < 0) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        `${table} has no rank in the ledger lock order`,
+      );
+    }
+    return rank;
+  };
+
+  const refuseIfBackwards = (cursor: OrderCursor): void => {
+    if (
+      last !== undefined &&
+      (cursor.rank < last.rank ||
+        (cursor.rank === last.rank && cursor.key < last.key))
+    ) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        `lock order violation: ${cursor.description} must not be locked after ${last.description}`,
+      );
+    }
+    last = cursor;
+  };
 
   return {
     acquireLock(target: LockTarget): void {
-      const rank = lockRank(target.table);
-      if (rank < 0) {
-        throw new DomainError(
-          'INVARIANT_VIOLATION',
-          `${target.table} has no rank in the ledger lock order`,
-        );
-      }
-
-      // Re-locking a row this transaction already holds at least this strongly
-      // acquires nothing, so it cannot extend a wait cycle and needs no
-      // ordering. A strengthening does acquire something, so it does.
+      const rank = rankOf(target.table);
+      // `held` and `claimed` are separate namespaces, so a row identity and a
+      // claim identity that render alike never collide.
       const identity = `${rank}:${target.key}`;
       const alreadyHeld = held.get(identity);
-      if (
-        alreadyHeld !== undefined &&
-        STRENGTH_RANK[alreadyHeld] >= STRENGTH_RANK[target.strength]
-      ) {
-        return;
-      }
-      if (last !== undefined && compareLockTargets(target, last) < 0) {
+      if (alreadyHeld !== undefined) {
+        // Re-locking a row this transaction already holds at least this
+        // strongly acquires nothing, so it cannot extend a wait cycle and needs
+        // no ordering.
+        if (STRENGTH_RANK[alreadyHeld] >= STRENGTH_RANK[target.strength]) {
+          return;
+        }
+        // A strengthening does acquire something, and no ordering can make it
+        // safe: two transactions running this identical sequence wait for one
+        // another. The strongest lock has to come first.
         throw new DomainError(
           'INVARIANT_VIOLATION',
-          `lock order violation: ${target.table} (${target.key}) must not be locked after ${last.table} (${last.key})`,
+          `lock order violation: ${target.table} (${target.key}) is already held ${alreadyHeld} and may not be strengthened to ${target.strength} — a transaction has to take the strongest lock it needs on its first touch of a row`,
         );
       }
 
+      refuseIfBackwards({
+        rank,
+        key: target.key,
+        description: `${target.table} (${target.key})`,
+      });
       held.set(identity, target.strength);
-      last = target;
       onLock?.(target);
+    },
+
+    claimUniqueKey(claim: UniqueKeyClaim): void {
+      const rank = rankOf(claim.table);
+      const classification = LEDGER_UNIQUE_INDEXES[claim.index];
+      if (
+        classification === undefined ||
+        classification.arbiter !== 'ORDERED_CLAIM' ||
+        classification.table !== claim.table
+      ) {
+        throw new DomainError(
+          'INVARIANT_VIOLATION',
+          `${claim.index} is not a claimed unique index of ${claim.table}`,
+        );
+      }
+
+      const identity = `${rank}:${claim.key}`;
+      if (claimed.has(identity)) {
+        return;
+      }
+      refuseIfBackwards({
+        rank,
+        key: claim.key,
+        description: `the ${claim.index} entry (${claim.key})`,
+      });
+      claimed.add(identity);
+      onClaim?.(claim);
     },
   };
 }

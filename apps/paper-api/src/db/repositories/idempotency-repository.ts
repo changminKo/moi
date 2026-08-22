@@ -6,6 +6,7 @@ import {
   snapshotInput,
   toJsonText,
 } from '../database.js';
+import { compositeLockKey } from '../lock-order.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 export interface IdempotencyKey {
@@ -90,10 +91,15 @@ async function readRequest(
  *
  * The insert takes no lock on its own invisible new row, but its foreign key
  * pins the session row `for key share`, so that lock is declared. The conflict
- * path can still wait on a concurrent inserter of the same key — that is a wait
- * on a transaction id rather than on a row, and it cannot join a cycle, because
- * two requests carrying one key carry one session and are therefore already
- * serialised by the rank-0 session row.
+ * path can also wait on a concurrent inserter of the same key, and that is a
+ * wait on a transaction id rather than on a row: nothing about the session row
+ * prevents it, because two concurrent requests carrying one key both pin the
+ * session `for key share` and two shared holders do not serialise with one
+ * another. So the index entry is declared as a claim, at the rank of
+ * `idempotency_requests` itself, and the ordering discipline covers the wait.
+ * That is what makes this the second lock a mutation takes rather than the
+ * last: a transaction that claimed the key and then waits for a wallet is in
+ * order, and one that holds a wallet and then claims a key is refused.
  */
 export async function beginIdempotentRequest(
   connection: LedgerConnection,
@@ -108,6 +114,11 @@ export async function beginIdempotentRequest(
     table: 'anonymous_sessions',
     key: request.sessionId,
     strength: 'KEY_SHARE',
+  });
+  connection.claimUniqueKey({
+    table: 'idempotency_requests',
+    key: compositeLockKey(request.sessionId, request.key),
+    index: 'idempotency_requests_session_id_idempotency_key_key',
   });
 
   const claim = await sql<{ id: string }>`
@@ -150,12 +161,13 @@ export async function completeIdempotentRequest(
     statusCode: input.statusCode,
     body: toJsonText(input.body, 'the recorded response body'),
   });
-  // The `update` takes a `for no key update` lock on the request row, the last
-  // rank of the lock order: a mutation reaches it only once everything else it
-  // touches is already held.
+  // The `update` takes a `for no key update` lock on the request row, at the
+  // same position in the order as the claim `begin` took: they are the same
+  // resource, which is why a mutation records its result immediately after
+  // claiming the key rather than at the end.
   connection.acquireLock({
     table: 'idempotency_requests',
-    key: `${completion.sessionId}:${completion.key}`,
+    key: compositeLockKey(completion.sessionId, completion.key),
     strength: 'NO_KEY_UPDATE',
   });
 

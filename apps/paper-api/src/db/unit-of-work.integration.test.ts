@@ -10,15 +10,20 @@ import {
 } from '@testcontainers/postgresql';
 import { Kysely, sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { createDatabase, type Database } from './database.js';
+import { createDatabase, type Database, snapshotInput } from './database.js';
 import * as lockOrderModule from './lock-order.js';
 import {
+  compositeLockKey,
   createLockOrderGuard,
   LEDGER_LOCK_ORDER,
   LEDGER_REFERENCE_TABLES,
+  LEDGER_UNIQUE_INDEXES,
   type LockStrength,
   type LockTable,
   type LockTarget,
+  ocoWinnerClaimKey,
+  sequenceLockKey,
+  type UniqueKeyClaim,
 } from './lock-order.js';
 import { ensureAuditPartitions, migrateToLatest } from './migrate.js';
 import type {
@@ -37,6 +42,7 @@ import {
 
 const CONTAINER_TIMEOUT_MS = 300_000;
 const TEST_TIMEOUT_MS = 60_000;
+const GATE_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 25;
 const POLL_ATTEMPTS = 400;
 
@@ -70,13 +76,20 @@ function recordBackoff(): {
 
 function recordLocks(): {
   readonly locks: readonly LockTarget[];
+  readonly claims: readonly UniqueKeyClaim[];
   readonly onLock: (target: LockTarget) => void;
+  readonly onClaim: (claim: UniqueKeyClaim) => void;
 } {
   const locks: LockTarget[] = [];
+  const claims: UniqueKeyClaim[] = [];
   return {
     locks,
+    claims,
     onLock: (target: LockTarget) => {
       locks.push(target);
+    },
+    onClaim: (claim: UniqueKeyClaim) => {
+      claims.push(claim);
     },
   };
 }
@@ -86,13 +99,29 @@ interface Gate {
   open(): void;
 }
 
+/**
+ * A one-shot gate that fails rather than hangs.
+ *
+ * A gate that never opens used to present as a hung run with no red test, which
+ * is the worst possible failure mode for a suite of gated concurrency tests: it
+ * hides a real defect behind a timeout nobody attributes. The rejection is
+ * pre-handled so a gate that is never awaited cannot raise an unhandled
+ * rejection either.
+ */
 function gate(): Gate {
   let open = (): void => {
     throw new Error('gate was not initialised');
   };
-  const opened = new Promise<void>((resolve) => {
-    open = resolve;
+  const opened = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('a test gate never opened'));
+    }, GATE_TIMEOUT_MS);
+    open = () => {
+      clearTimeout(timer);
+      resolve();
+    };
   });
+  opened.catch(() => undefined);
   return { opened, open: () => open() };
 }
 
@@ -436,9 +465,6 @@ describe('UnitOfWork.run transaction boundary', () => {
 
     await expect(
       unitOfWork.run(async (tx) => {
-        await orderFixture(tx, sessionId);
-        await auditFixture(tx, sessionId);
-        await outboxFixture(tx, sessionId);
         await tx.idempotency.begin({
           sessionId,
           key: 'key-1',
@@ -450,6 +476,9 @@ describe('UnitOfWork.run transaction boundary', () => {
           statusCode: 201,
           body: { accepted: true },
         });
+        await orderFixture(tx, sessionId);
+        await auditFixture(tx, sessionId);
+        await outboxFixture(tx, sessionId);
         throw new Error('forced rollback');
       }),
     ).rejects.toThrow('forced rollback');
@@ -610,11 +639,12 @@ describe('row locking', () => {
   it('documents one global lock order and rejects any inversion of it', async () => {
     expect(LEDGER_LOCK_ORDER).toEqual([
       'anonymous_sessions',
+      'idempotency_requests',
       'wallets',
       'positions',
       'oco_groups',
       'orders',
-      'idempotency_requests',
+      'outbox_events',
     ]);
 
     const sessionId = await insertSession();
@@ -653,6 +683,7 @@ describe('row locking', () => {
     const unitOfWork = new UnitOfWork(db, {
       backoff: recordBackoff().backoff,
       onLock: locks.onLock,
+      onClaim: locks.onClaim,
     });
 
     await commitTradingMutation(
@@ -667,28 +698,43 @@ describe('row locking', () => {
 
     expect(locks.locks.map((target) => target.table)).toEqual([
       'anonymous_sessions',
+      'idempotency_requests',
       'wallets',
       'positions',
       'oco_groups',
       'orders',
       'orders',
-      'idempotency_requests',
     ]);
     // Sibling order rows are locked by ascending id even though the caller
     // supplied them in the opposite order.
-    expect(locks.locks.slice(4, 6).map((target) => target.key)).toEqual(
+    expect(locks.locks.slice(5, 7).map((target) => target.key)).toEqual(
       siblingOrderIds,
     );
     // Every lock of the mutation is an exclusive `for update` acquisition
     // except the idempotency record, which only its own UPDATE pins.
     expect(locks.locks.map((target) => target.strength)).toEqual([
       'UPDATE',
-      'UPDATE',
-      'UPDATE',
-      'UPDATE',
-      'UPDATE',
-      'UPDATE',
       'NO_KEY_UPDATE',
+      'UPDATE',
+      'UPDATE',
+      'UPDATE',
+      'UPDATE',
+      'UPDATE',
+    ]);
+    // The two unique-index entries the mutation writes are claimed in the same
+    // order, and the claim of the idempotency key comes before the rank-2
+    // wallet rather than after it.
+    expect(locks.claims).toEqual([
+      {
+        table: 'idempotency_requests',
+        key: `${sessionId}:key-1`,
+        index: 'idempotency_requests_session_id_idempotency_key_key',
+      },
+      {
+        table: 'outbox_events',
+        key: `${sessionId}:00000000000000000001`,
+        index: 'outbox_events_session_id_stream_sequence_key',
+      },
     ]);
   });
 });
@@ -1163,7 +1209,11 @@ describe('persistence encapsulation', () => {
     expect(Object.keys(lockOrderModule).sort()).toEqual([
       'LEDGER_LOCK_ORDER',
       'LEDGER_REFERENCE_TABLES',
+      'LEDGER_UNIQUE_INDEXES',
+      'compositeLockKey',
       'createLockOrderGuard',
+      'ocoWinnerClaimKey',
+      'sequenceLockKey',
     ]);
   });
 });
@@ -1180,6 +1230,26 @@ describe('persistence encapsulation', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FIXED_NOW = new Date('2026-08-22T00:00:00.000Z');
+
+/**
+ * Every table a repository statement inserts into, updates, or locks.
+ *
+ * The unique-index accounting is scoped to these: a unique index on a table no
+ * statement writes cannot be conflicted on, and the audit partitions inherit
+ * their parent's classification rather than carrying their own.
+ */
+const LEDGER_TOUCHED_TABLES = Object.freeze([
+  'anonymous_sessions',
+  'idempotency_requests',
+  'wallets',
+  'positions',
+  'oco_groups',
+  'orders',
+  'outbox_events',
+  'reservations',
+  'audit_events',
+  'account_sequences',
+] as const);
 
 async function insertIdempotencyRow(
   sessionId: string,
@@ -1215,6 +1285,25 @@ async function insertOutboxRow(sessionId: string): Promise<string> {
     ) values (
       ${id}, ${randomUUID()}, ${sessionId}, 1, 'FIXTURE', '{}'::jsonb
     )
+  `.execute(db);
+  return id;
+}
+
+async function insertAccountSequenceRow(sessionId: string): Promise<string> {
+  const id = randomUUID();
+  await sql`
+    insert into account_sequences (
+      id, session_id, account_sequence, mutation_kind
+    ) values (${id}, ${sessionId}, 1, 'FIXTURE')
+  `.execute(db);
+  return id;
+}
+
+async function insertFillRow(orderId: string): Promise<string> {
+  const id = randomUUID();
+  await sql`
+    insert into fills (id, order_id, quantity, price, fee, slippage)
+    values (${id}, ${orderId}, '1', '100', '0', '0')
   `.execute(db);
   return id;
 }
@@ -1296,10 +1385,15 @@ function unlockedPosition(
 interface LedgerFixture {
   readonly sessionId: string;
   readonly walletId: string;
+  readonly usdWalletId: string;
   readonly positionId: string;
   readonly ocoGroupId: string;
   readonly lowerOrderId: string;
   readonly higherOrderId: string;
+  /** An order that belongs to `ocoGroupId`, so its winner slot is claimable. */
+  readonly groupedOrderId: string;
+  readonly accountSequenceId: string;
+  readonly fillId: string;
   readonly reservationId: string;
   readonly outboxId: string;
   readonly auditId: string;
@@ -1310,6 +1404,7 @@ interface LedgerFixture {
 async function ledgerFixture(): Promise<LedgerFixture> {
   const sessionId = await insertSession();
   const walletId = await insertWallet(sessionId, 'KRW', '1000');
+  const usdWalletId = await insertWallet(sessionId, 'USD', '1000');
   const positionId = await insertPosition(sessionId, 'AAPL', '10');
   const ocoGroupId = await insertOcoGroup(sessionId);
   const first = await insertOrderRow(sessionId);
@@ -1321,10 +1416,14 @@ async function ledgerFixture(): Promise<LedgerFixture> {
   return {
     sessionId,
     walletId,
+    usdWalletId,
     positionId,
     ocoGroupId,
     lowerOrderId,
     higherOrderId,
+    groupedOrderId: await insertGroupedOrderRow(sessionId, ocoGroupId),
+    accountSequenceId: await insertAccountSequenceRow(sessionId),
+    fillId: await insertFillRow(lowerOrderId),
     reservationId: await insertReservationRow(sessionId, lowerOrderId),
     outboxId: await insertOutboxRow(sessionId),
     auditId: await insertAuditRow(),
@@ -1348,62 +1447,98 @@ interface ObservableRow {
   readonly reference: boolean;
 }
 
-function observableRows(fixture: LedgerFixture): readonly ObservableRow[] {
-  const ranked = (
-    table: LockTable,
-    key: string,
-    value: string,
-  ): ObservableRow => ({
+/**
+ * One measurable row, labelled the way the guard's declaration labels it.
+ *
+ * `reference` is derived from `LEDGER_REFERENCE_TABLES` rather than written by
+ * hand, so removing a table from that constant changes what the measurement
+ * excludes instead of only failing an assertion about the constant.
+ */
+function observableRow(
+  table: string,
+  key: string,
+  column: 'id' | 'code',
+  value: string,
+): ObservableRow {
+  return {
     label: `${table}:${key}`,
     table,
-    column: 'id',
+    column,
     value,
-    reference: false,
-  });
+    reference: (LEDGER_REFERENCE_TABLES as readonly string[]).includes(table),
+  };
+}
 
+/**
+ * Every row the accounting measures.
+ *
+ * A lock on a row that is not in this list is measured as nothing, so the list
+ * has to cover every table any repository statement can reach — including the
+ * ones the lock order deliberately omits, which is where an undeclared lock
+ * would otherwise hide. `covers every table the ledger names` asserts that.
+ */
+function observableRows(fixture: LedgerFixture): readonly ObservableRow[] {
   return [
-    ranked('anonymous_sessions', fixture.sessionId, fixture.sessionId),
-    ranked('wallets', `${fixture.sessionId}:KRW`, fixture.walletId),
-    ranked('positions', `${fixture.sessionId}:US:AAPL`, fixture.positionId),
-    ranked('oco_groups', fixture.ocoGroupId, fixture.ocoGroupId),
-    ranked('orders', fixture.lowerOrderId, fixture.lowerOrderId),
-    ranked('orders', fixture.higherOrderId, fixture.higherOrderId),
-    ranked(
+    observableRow(
+      'anonymous_sessions',
+      fixture.sessionId,
+      'id',
+      fixture.sessionId,
+    ),
+    observableRow(
       'idempotency_requests',
-      `${fixture.sessionId}:${fixture.idempotencyKey}`,
+      compositeLockKey(fixture.sessionId, fixture.idempotencyKey),
+      'id',
       fixture.idempotencyId,
     ),
-    // Unranked tables the repositories write. Nothing may ever lock a row in
-    // one of them: a lock here could not be declared, because acquireLock
-    // refuses a table with no rank.
-    {
-      label: `reservations:${fixture.reservationId}`,
-      table: 'reservations',
-      column: 'id',
-      value: fixture.reservationId,
-      reference: false,
-    },
-    {
-      label: `outbox_events:${fixture.outboxId}`,
-      table: 'outbox_events',
-      column: 'id',
-      value: fixture.outboxId,
-      reference: false,
-    },
-    {
-      label: `audit_events:${fixture.auditId}`,
-      table: 'audit_events',
-      column: 'id',
-      value: fixture.auditId,
-      reference: false,
-    },
-    {
-      label: 'markets:US',
-      table: 'markets',
-      column: 'code',
-      value: 'US',
-      reference: true,
-    },
+    observableRow(
+      'wallets',
+      compositeLockKey(fixture.sessionId, 'KRW'),
+      'id',
+      fixture.walletId,
+    ),
+    observableRow(
+      'wallets',
+      compositeLockKey(fixture.sessionId, 'USD'),
+      'id',
+      fixture.usdWalletId,
+    ),
+    observableRow(
+      'positions',
+      compositeLockKey(fixture.sessionId, 'US', 'AAPL'),
+      'id',
+      fixture.positionId,
+    ),
+    observableRow('oco_groups', fixture.ocoGroupId, 'id', fixture.ocoGroupId),
+    observableRow('orders', fixture.lowerOrderId, 'id', fixture.lowerOrderId),
+    observableRow('orders', fixture.higherOrderId, 'id', fixture.higherOrderId),
+    observableRow(
+      'orders',
+      fixture.groupedOrderId,
+      'id',
+      fixture.groupedOrderId,
+    ),
+    // Tables the lock order omits. Nothing may ever lock a row in one of them:
+    // a lock here could not be declared, because acquireLock refuses a table
+    // with no rank — and for `outbox_events`, which is ranked only so that its
+    // unique-key claim has a place, nothing locks a row either.
+    observableRow('outbox_events', fixture.outboxId, 'id', fixture.outboxId),
+    observableRow(
+      'reservations',
+      fixture.reservationId,
+      'id',
+      fixture.reservationId,
+    ),
+    observableRow('audit_events', fixture.auditId, 'id', fixture.auditId),
+    observableRow(
+      'account_sequences',
+      fixture.accountSequenceId,
+      'id',
+      fixture.accountSequenceId,
+    ),
+    observableRow('fills', fixture.fillId, 'id', fixture.fillId),
+    observableRow('markets', 'US', 'code', 'US'),
+    observableRow('markets', 'KR', 'code', 'KR'),
   ];
 }
 
@@ -1462,123 +1597,233 @@ type LockProbe = (
  * every method of every repository, so a new method cannot be added — and
  * cannot take an undeclared lock — without a probe that measures it.
  */
-const LOCK_PROBES: Readonly<Record<string, LockProbe>> = {
-  'sessions.find': (tx, fixture) => tx.sessions.find(fixture.sessionId),
-  'sessions.lock': (tx, fixture) => tx.sessions.lock(fixture.sessionId),
-  'sessions.touch': (tx, fixture) =>
-    tx.sessions.touch({
-      sessionId: fixture.sessionId,
-      expectedVersion: 0n,
-      lastSeenAt: FIXED_NOW,
-    }),
-  'accounts.lockWallet': (tx, fixture) =>
-    tx.accounts.lockWallet({ sessionId: fixture.sessionId, currency: 'KRW' }),
-  'accounts.lockPosition': (tx, fixture) =>
-    tx.accounts.lockPosition({
-      sessionId: fixture.sessionId,
-      marketCode: 'US',
-      symbol: 'AAPL',
-    }),
-  'accounts.reserveCash': async (tx, fixture) => {
-    const wallet = await tx.accounts.lockWallet({
-      sessionId: fixture.sessionId,
-      currency: 'KRW',
-    });
-    if (wallet === undefined) {
-      throw new Error('the wallet disappeared');
-    }
-    return await tx.accounts.reserveCash({ wallet, amount: '10' });
-  },
-  'accounts.reservePosition': async (tx, fixture) => {
-    const position = await tx.accounts.lockPosition({
-      sessionId: fixture.sessionId,
-      marketCode: 'US',
-      symbol: 'AAPL',
-    });
-    if (position === undefined) {
-      throw new Error('the position disappeared');
-    }
-    return await tx.accounts.reservePosition({ position, quantity: '1' });
-  },
-  'accounts.recordReservation': (tx, fixture) =>
-    tx.accounts.recordReservation({
-      id: randomUUID(),
-      sessionId: fixture.sessionId,
-      orderId: fixture.lowerOrderId,
-      kind: 'POSITION',
-      amount: '1',
-      marketCode: 'US',
-      symbol: 'AAPL',
-    }),
-  'orders.insert': (tx, fixture) =>
-    tx.orders.insert({
-      id: randomUUID(),
-      sessionId: fixture.sessionId,
-      marketCode: 'US',
-      symbol: 'AAPL',
-      orderType: 'LIMIT',
-      side: 'BUY',
-      limitPrice: '100',
-      quantity: '1',
-      status: 'OPEN',
-      ocoGroupId: fixture.ocoGroupId,
-    }),
-  'orders.lock': (tx, fixture) => tx.orders.lock(fixture.lowerOrderId),
-  'orders.lockOcoGroup': (tx, fixture) =>
-    tx.orders.lockOcoGroup(fixture.ocoGroupId),
-  'orders.update': (tx, fixture) =>
-    tx.orders.update({
-      id: fixture.lowerOrderId,
-      expectedVersion: 0n,
-      status: 'CANCELLED',
-    }),
-  'orders.resolveOcoGroup': (tx, fixture) =>
-    tx.orders.resolveOcoGroup({
-      id: fixture.ocoGroupId,
-      expectedVersion: 0n,
-      resolvedAt: FIXED_NOW,
-    }),
-  'audit.append': (tx, fixture) =>
-    tx.audit.append({
-      id: randomUUID(),
-      eventType: 'ORDER_PLACED',
-      payload: { probe: 'audit' },
-      occurredAt: FIXED_NOW,
-      orderId: fixture.lowerOrderId,
-    }),
-  'outbox.append': (tx, fixture) =>
-    tx.outbox.append({
-      id: randomUUID(),
-      eventId: randomUUID(),
-      sessionId: fixture.sessionId,
-      streamSequence: 2n,
-      eventType: 'ORDER_PLACED',
-      payload: { probe: 'outbox' },
-    }),
-  'idempotency.begin': (tx, fixture) =>
-    tx.idempotency.begin({
-      sessionId: fixture.sessionId,
-      key: 'fresh-key',
-      requestHash: 'hash-fresh',
-    }),
-  'idempotency.find': (tx, fixture) =>
-    tx.idempotency.find({
-      sessionId: fixture.sessionId,
-      key: fixture.idempotencyKey,
-    }),
-  'idempotency.complete': (tx, fixture) =>
-    tx.idempotency.complete({
-      sessionId: fixture.sessionId,
-      key: fixture.idempotencyKey,
-      statusCode: 201,
-      body: { accepted: true },
-    }),
+const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
+  'sessions.find': [(tx, fixture) => tx.sessions.find(fixture.sessionId)],
+  'sessions.lock': [(tx, fixture) => tx.sessions.lock(fixture.sessionId)],
+  'sessions.touch': [
+    (tx, fixture) =>
+      tx.sessions.touch({
+        sessionId: fixture.sessionId,
+        expectedVersion: 0n,
+        lastSeenAt: FIXED_NOW,
+      }),
+  ],
+  'accounts.lockWallet': [
+    (tx, fixture) =>
+      tx.accounts.lockWallet({ sessionId: fixture.sessionId, currency: 'KRW' }),
+  ],
+  'accounts.lockPosition': [
+    (tx, fixture) =>
+      tx.accounts.lockPosition({
+        sessionId: fixture.sessionId,
+        marketCode: 'US',
+        symbol: 'AAPL',
+      }),
+  ],
+  'accounts.reserveCash': [
+    async (tx, fixture) => {
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: fixture.sessionId,
+        currency: 'KRW',
+      });
+      if (wallet === undefined) {
+        throw new Error('the wallet disappeared');
+      }
+      return await tx.accounts.reserveCash({ wallet, amount: '10' });
+    },
+    // The probe above pre-locks the row `for update`, which exempts the
+    // declaration and leaves its strength unmeasured. This one reserves against
+    // a row nobody locked, so the declared strength is the one PostgreSQL takes.
+    (tx, fixture) =>
+      tx.accounts.reserveCash({
+        wallet: unlockedWallet(fixture.walletId, fixture.sessionId, 0n),
+        amount: '10',
+      }),
+  ],
+  'accounts.reservePosition': [
+    async (tx, fixture) => {
+      const position = await tx.accounts.lockPosition({
+        sessionId: fixture.sessionId,
+        marketCode: 'US',
+        symbol: 'AAPL',
+      });
+      if (position === undefined) {
+        throw new Error('the position disappeared');
+      }
+      return await tx.accounts.reservePosition({ position, quantity: '1' });
+    },
+    (tx, fixture) =>
+      tx.accounts.reservePosition({
+        position: unlockedPosition(fixture.positionId, fixture.sessionId, 0n),
+        quantity: '1',
+      }),
+  ],
+  'accounts.recordReservation': [
+    (tx, fixture) =>
+      tx.accounts.recordReservation({
+        id: randomUUID(),
+        sessionId: fixture.sessionId,
+        orderId: fixture.lowerOrderId,
+        kind: 'POSITION',
+        amount: '1',
+        marketCode: 'US',
+        symbol: 'AAPL',
+      }),
+  ],
+  'orders.insert': [
+    (tx, fixture) =>
+      tx.orders.insert({
+        id: randomUUID(),
+        sessionId: fixture.sessionId,
+        marketCode: 'US',
+        symbol: 'AAPL',
+        orderType: 'LIMIT',
+        side: 'BUY',
+        limitPrice: '100',
+        quantity: '1',
+        status: 'OPEN',
+        ocoGroupId: fixture.ocoGroupId,
+      }),
+  ],
+  'orders.lock': [(tx, fixture) => tx.orders.lock(fixture.lowerOrderId)],
+  'orders.lockOcoGroup': [
+    (tx, fixture) => tx.orders.lockOcoGroup(fixture.ocoGroupId),
+  ],
+  'orders.update': [
+    (tx, fixture) =>
+      tx.orders.update({
+        id: fixture.lowerOrderId,
+        expectedVersion: 0n,
+        status: 'CANCELLED',
+      }),
+    // The three columns the first probe never writes. `is_oco_winner` is a
+    // column of a partial unique index, so it is the one argument that could
+    // change the row lock PostgreSQL takes — and the one that claims the
+    // winner slot.
+    (tx, fixture) =>
+      tx.orders.update({
+        id: fixture.groupedOrderId,
+        expectedVersion: 0n,
+        status: 'FILLED',
+        filledQuantity: '10',
+        terminalReason: 'IOC_REMAINDER',
+        isOcoWinner: true,
+        ocoGroupId: fixture.ocoGroupId,
+      }),
+  ],
+  'orders.resolveOcoGroup': [
+    (tx, fixture) =>
+      tx.orders.resolveOcoGroup({
+        id: fixture.ocoGroupId,
+        expectedVersion: 0n,
+        resolvedAt: FIXED_NOW,
+      }),
+  ],
+  'audit.append': [
+    (tx, fixture) =>
+      tx.audit.append({
+        id: randomUUID(),
+        eventType: 'ORDER_PLACED',
+        payload: { probe: 'audit' },
+        occurredAt: FIXED_NOW,
+        orderId: fixture.lowerOrderId,
+      }),
+  ],
+  'outbox.append': [
+    (tx, fixture) =>
+      tx.outbox.append({
+        id: randomUUID(),
+        eventId: randomUUID(),
+        sessionId: fixture.sessionId,
+        streamSequence: 2n,
+        eventType: 'ORDER_PLACED',
+        payload: { probe: 'outbox' },
+      }),
+  ],
+  'idempotency.begin': [
+    (tx, fixture) =>
+      tx.idempotency.begin({
+        sessionId: fixture.sessionId,
+        key: 'fresh-key',
+        requestHash: 'hash-fresh',
+      }),
+  ],
+  'idempotency.find': [
+    (tx, fixture) =>
+      tx.idempotency.find({
+        sessionId: fixture.sessionId,
+        key: fixture.idempotencyKey,
+      }),
+  ],
+  'idempotency.complete': [
+    (tx, fixture) =>
+      tx.idempotency.complete({
+        sessionId: fixture.sessionId,
+        key: fixture.idempotencyKey,
+        statusCode: 201,
+        body: { accepted: true },
+      }),
+  ],
+};
+
+/**
+ * The unique-index entries each probe writes, and therefore the claims it must
+ * declare. Every other probe declares none: the empty lists are as load-bearing
+ * as the populated ones, because a claim nobody needs is a false ordering
+ * constraint.
+ */
+const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
+  'sessions.find#0': [],
+  'sessions.lock#0': [],
+  'sessions.touch#0': [],
+  'accounts.lockWallet#0': [],
+  'accounts.lockPosition#0': [],
+  'accounts.reserveCash#0': [],
+  'accounts.reserveCash#1': [],
+  'accounts.reservePosition#0': [],
+  'accounts.reservePosition#1': [],
+  'accounts.recordReservation#0': [],
+  'orders.insert#0': [],
+  'orders.lock#0': [],
+  'orders.lockOcoGroup#0': [],
+  'orders.update#0': [],
+  'orders.update#1': ['orders_one_oco_winner_per_group'],
+  'orders.resolveOcoGroup#0': [],
+  'audit.append#0': [],
+  'outbox.append#0': ['outbox_events_session_id_stream_sequence_key'],
+  'idempotency.begin#0': [
+    'idempotency_requests_session_id_idempotency_key_key',
+  ],
+  'idempotency.find#0': [],
+  'idempotency.complete#0': [],
 };
 
 interface LockAccounting {
   readonly declared: Record<string, LockStrength>;
   readonly observed: Record<string, ObservedLockMode>;
+  readonly claimedIndexes: readonly string[];
   readonly referenceModes: readonly ObservedLockMode[];
+}
+
+/**
+ * Compares what the guard was told against what PostgreSQL holds, in both
+ * directions.
+ *
+ * The direction is the point. A lock taken but not declared is an undeclared
+ * acquisition; a lock declared but not taken is a fiction that would let a
+ * declaration drift away from the statement it describes. Equality catches
+ * both, and the unit test below pins that it catches both — a subset check
+ * looks identical while the code is correct.
+ */
+function lockAccountingMismatch(
+  declared: Record<string, LockStrength>,
+  observed: Record<string, ObservedLockMode>,
+): string | undefined {
+  const declaredText = JSON.stringify(declared);
+  const observedText = JSON.stringify(observed);
+  return declaredText === observedText
+    ? undefined
+    : `declared ${declaredText} observed ${observedText}`;
 }
 
 /**
@@ -1591,6 +1836,7 @@ async function accountForLocks(probe: LockProbe): Promise<LockAccounting> {
   const unitOfWork = new UnitOfWork(db, {
     backoff: recordBackoff().backoff,
     onLock: locks.onLock,
+    onClaim: locks.onClaim,
   });
   const acquired = gate();
   const mayCommit = gate();
@@ -1626,60 +1872,74 @@ async function accountForLocks(probe: LockProbe): Promise<LockAccounting> {
 
   mayCommit.open();
   await run;
-  return { declared, observed, referenceModes };
+  return {
+    declared,
+    observed,
+    claimedIndexes: locks.claims.map((claim) => claim.index),
+    referenceModes,
+  };
 }
 
 describe('lock accounting', () => {
   it('has a probe for every repository method', async () => {
     const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
 
+    // Reflected off `tx` itself rather than off a hand-written list, so a
+    // seventh repository added to TradingTransaction needs a probe too.
     const methods = await unitOfWork.run(async (tx) =>
-      Object.entries({
-        sessions: tx.sessions,
-        accounts: tx.accounts,
-        orders: tx.orders,
-        audit: tx.audit,
-        outbox: tx.outbox,
-        idempotency: tx.idempotency,
-      }).flatMap(([repository, api]) =>
-        Object.keys(api).map((method) => `${repository}.${method}`),
+      Object.entries(tx).flatMap(([repository, api]) =>
+        Object.keys(api as object).map((method) => `${repository}.${method}`),
       ),
     );
 
     // A new repository method with no probe is a method whose locks nobody
     // measured, which is exactly how an undeclared lock ships.
     expect([...methods].sort()).toEqual(Object.keys(LOCK_PROBES).sort());
+    expect(methods.length).toBeGreaterThan(0);
+  });
+
+  it('measures every table the ledger names', async () => {
+    const fixture = await ledgerFixture();
+    const measured = new Set(observableRows(fixture).map((row) => row.table));
+
+    // A lock on an unmeasured row reads as no lock at all, so the row set has
+    // to cover the whole reachable surface, not only the ranked tables.
+    const named = new Set<string>([
+      ...LEDGER_LOCK_ORDER,
+      ...LEDGER_REFERENCE_TABLES,
+      ...Object.values(LEDGER_UNIQUE_INDEXES).map((entry) => entry.table),
+      'reservations',
+      'fills',
+    ]);
+    expect([...named].filter((table) => !measured.has(table))).toEqual([]);
   });
 
   it(
     'declares exactly the row locks PostgreSQL actually holds, for every method',
     async () => {
-      const mismatches: Record<
-        string,
-        {
-          declared: Record<string, LockStrength>;
-          observed: Record<string, ObservedLockMode>;
-        }
-      > = {};
+      const mismatches: Record<string, string> = {};
       const strongerThanShared: Record<string, readonly ObservedLockMode[]> =
         {};
+      const claims: Record<string, readonly string[]> = {};
 
-      for (const [method, probe] of Object.entries(LOCK_PROBES)) {
-        const accounting = await accountForLocks(probe);
-        if (
-          JSON.stringify(accounting.observed) !==
-          JSON.stringify(accounting.declared)
-        ) {
-          mismatches[method] = {
-            declared: accounting.declared,
-            observed: accounting.observed,
-          };
-        }
-        const stronger = accounting.referenceModes.filter(
-          (mode) => mode === 'NO_KEY_UPDATE' || mode === 'UPDATE',
-        );
-        if (stronger.length > 0) {
-          strongerThanShared[method] = stronger;
+      for (const [method, probes] of Object.entries(LOCK_PROBES)) {
+        for (const [index, probe] of probes.entries()) {
+          const label = `${method}#${index}`;
+          const accounting = await accountForLocks(probe);
+          const mismatch = lockAccountingMismatch(
+            accounting.declared,
+            accounting.observed,
+          );
+          if (mismatch !== undefined) {
+            mismatches[label] = mismatch;
+          }
+          claims[label] = accounting.claimedIndexes;
+          const stronger = accounting.referenceModes.filter(
+            (mode) => mode === 'NO_KEY_UPDATE' || mode === 'UPDATE',
+          );
+          if (stronger.length > 0) {
+            strongerThanShared[label] = stronger;
+          }
         }
       }
 
@@ -1688,8 +1948,63 @@ describe('lock accounting', () => {
       // them is shared, and shared locks never wait on one another.
       expect(strongerThanShared).toEqual({});
       expect(LEDGER_REFERENCE_TABLES).toEqual(['markets']);
+      // And every unique-index entry a statement writes is claimed.
+      expect(claims).toEqual(EXPECTED_CLAIMS);
     },
     CONTAINER_TIMEOUT_MS,
+  );
+
+  it('rejects a mismatch in either direction', () => {
+    const declared: Record<string, LockStrength> = {
+      'wallets:s:KRW': 'UPDATE',
+    };
+
+    expect(
+      lockAccountingMismatch(declared, { 'wallets:s:KRW': 'UPDATE' }),
+    ).toBe(undefined);
+    // Declared but never taken.
+    expect(lockAccountingMismatch(declared, {})).toBeDefined();
+    // Taken but never declared.
+    expect(
+      lockAccountingMismatch({}, { 'wallets:s:KRW': 'UPDATE' } as Record<
+        string,
+        ObservedLockMode
+      >),
+    ).toBeDefined();
+    // Same rows, wrong strength.
+    expect(
+      lockAccountingMismatch(declared, { 'wallets:s:KRW': 'KEY_SHARE' }),
+    ).toBeDefined();
+  });
+
+  it(
+    'accounts for every unique index the schema defines',
+    async () => {
+      const result = await sql<{ table_name: string; index_name: string }>`
+        select source.relname as table_name, index_class.relname as index_name
+        from pg_class as source
+        join pg_index as index_meta on index_meta.indrelid = source.oid
+        join pg_class as index_class on index_class.oid = index_meta.indexrelid
+        join pg_namespace as space on space.oid = source.relnamespace
+        where index_meta.indisunique
+          and space.nspname = 'public'
+          and source.relname = any(${[...LEDGER_TOUCHED_TABLES]}::text[])
+      `.execute(db);
+
+      // Read out of PostgreSQL's own catalog: a unique index nobody classified
+      // is a wait on a transaction id nobody reasoned about.
+      const catalog = Object.fromEntries(
+        result.rows.map((row) => [row.index_name, row.table_name]),
+      );
+      const classified = Object.fromEntries(
+        Object.entries(LEDGER_UNIQUE_INDEXES).map(([index, entry]) => [
+          index,
+          entry.table,
+        ]),
+      );
+      expect(catalog).toEqual(classified);
+    },
+    TEST_TIMEOUT_MS,
   );
 });
 
@@ -1745,49 +2060,69 @@ describe('the lock-order guard', () => {
     ]);
   });
 
-  it('refuses a strengthening of a held lock that goes backwards', () => {
-    const guard = createLockOrderGuard();
-
+  it('refuses every strengthening of a held lock, in order or not', () => {
+    const backwards = createLockOrderGuard();
     // A foreign-key check pins the session row shared; the order row is then
     // locked exclusively. Upgrading the session row afterwards is a real
-    // acquisition that can block, so it must obey the order.
-    guard.acquireLock({
+    // acquisition that can block.
+    backwards.acquireLock({
       table: 'anonymous_sessions',
       key: 's',
       strength: 'KEY_SHARE',
     });
-    guard.acquireLock({ table: 'orders', key: 'o', strength: 'UPDATE' });
+    backwards.acquireLock({ table: 'orders', key: 'o', strength: 'UPDATE' });
 
     expect(() =>
-      guard.acquireLock({
+      backwards.acquireLock({
         table: 'anonymous_sessions',
         key: 's',
         strength: 'UPDATE',
       }),
-    ).toThrow('lock order violation');
-  });
+    ).toThrow('may not be strengthened');
 
-  it('allows a strengthening of a held lock that keeps the order', () => {
-    const observed: LockTarget[] = [];
-    const guard = createLockOrderGuard((target) => observed.push(target));
-
-    guard.acquireLock({
+    // An upgrade that keeps the table order is refused just the same: two
+    // transactions running this identical sequence wait for one another, so no
+    // ordering can make it safe.
+    const forwards = createLockOrderGuard();
+    forwards.acquireLock({
       table: 'anonymous_sessions',
       key: 's',
       strength: 'KEY_SHARE',
     });
-    guard.acquireLock({
-      table: 'anonymous_sessions',
-      key: 's',
-      strength: 'UPDATE',
-    });
+
+    expect(() =>
+      forwards.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'UPDATE',
+      }),
+    ).toThrow('may not be strengthened');
+    expect(() =>
+      forwards.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'NO_KEY_UPDATE',
+      }),
+    ).toThrow('may not be strengthened');
+  });
+
+  it('reports the strengthening as a lock-order violation, never as transient', () => {
+    const guard = createLockOrderGuard();
     guard.acquireLock({ table: 'orders', key: 'o', strength: 'KEY_SHARE' });
 
-    expect(observed).toEqual([
-      { table: 'anonymous_sessions', key: 's', strength: 'KEY_SHARE' },
-      { table: 'anonymous_sessions', key: 's', strength: 'UPDATE' },
-      { table: 'orders', key: 'o', strength: 'KEY_SHARE' },
-    ]);
+    const error = (() => {
+      try {
+        guard.acquireLock({ table: 'orders', key: 'o', strength: 'UPDATE' });
+        return undefined;
+      } catch (caught: unknown) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(DomainError);
+    expect((error as DomainError).code).toBe('INVARIANT_VIOLATION');
+    expect((error as DomainError).retryable).toBe(false);
+    expect((error as DomainError).message).toContain('lock order violation');
   });
 
   it('ranks every table of the lock order exactly once', () => {
@@ -1883,18 +2218,48 @@ const INVERSION_CASES: readonly InversionCase[] = [
     },
   },
   {
-    name: 'orders.update after the idempotency record is written',
+    name: 'idempotency.complete after an order lock',
     invert: async (tx, fixture) => {
-      await tx.idempotency.complete({
+      await tx.orders.lock(fixture.lowerOrderId);
+      return await tx.idempotency.complete({
         sessionId: fixture.sessionId,
         key: fixture.idempotencyKey,
         statusCode: 201,
         body: { accepted: true },
       });
-      return await tx.orders.update({
-        id: fixture.lowerOrderId,
+    },
+  },
+  {
+    name: 'an order lock after the OCO winner claim of its own group',
+    invert: async (tx, fixture) => {
+      await tx.orders.update({
+        id: fixture.groupedOrderId,
         expectedVersion: 0n,
-        status: 'CANCELLED',
+        status: 'FILLED',
+        isOcoWinner: true,
+        ocoGroupId: fixture.ocoGroupId,
+      });
+      return await tx.orders.lock(fixture.lowerOrderId);
+    },
+  },
+  {
+    name: 'an outbox append with a lower stream sequence than the last',
+    invert: async (tx, fixture) => {
+      await tx.outbox.append({
+        id: randomUUID(),
+        eventId: randomUUID(),
+        sessionId: fixture.sessionId,
+        streamSequence: 10n,
+        eventType: 'ORDER_PLACED',
+        payload: { probe: 'outbox' },
+      });
+      return await tx.outbox.append({
+        id: randomUUID(),
+        eventId: randomUUID(),
+        sessionId: fixture.sessionId,
+        streamSequence: 9n,
+        eventType: 'ORDER_PLACED',
+        payload: { probe: 'outbox' },
       });
     },
   },
@@ -2084,7 +2449,8 @@ describe('write paths obey the global lock order', () => {
       await expect(ordered).resolves.toBe('committed');
       expect(inverting.attempts).toEqual([]);
       expect(documented.attempts).toEqual([]);
-      expect((await countLedgerRows(db)).orders).toBe(2);
+      // Three fixture orders survive; the inverted insert rolled back.
+      expect((await countLedgerRows(db)).orders).toBe(3);
     },
     TEST_TIMEOUT_MS,
   );
@@ -2299,6 +2665,945 @@ describe('retry classification of hostile errors', () => {
       expect((error as { cause?: unknown }).cause).toMatchObject({
         code: '40001',
       });
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The two ways PostgreSQL makes a transaction wait
+//
+// A total order on row locks is not enough on its own. A transaction can also
+// strengthen a lock it already holds — which no ordering can make safe, because
+// two transactions running the identical sequence wait for one another — and it
+// can wait on another transaction's uncommitted unique-index entry, which is a
+// wait on a transaction id that no row-lock order can see. Everything below
+// reproduces one of those, through the public repository API, with both sides
+// obeying the documented table order.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function barrier(parties: number): { arrive(): Promise<void> } {
+  let waiting = 0;
+  const released = gate();
+  return {
+    arrive: async () => {
+      waiting += 1;
+      if (waiting >= parties) {
+        released.open();
+      }
+      await released.opened;
+    },
+  };
+}
+
+async function insertGroupedOrderRow(
+  sessionId: string,
+  ocoGroupId: string,
+): Promise<string> {
+  const id = randomUUID();
+  await sql`
+    insert into orders (
+      id, session_id, market_code, symbol, oco_group_id, order_type, side,
+      limit_price, quantity, status
+    ) values (
+      ${id}, ${sessionId}, 'US', 'AAPL', ${ocoGroupId}, 'LIMIT', 'BUY',
+      '100', '10', 'OPEN'
+    )
+  `.execute(db);
+  return id;
+}
+
+/** The outcome of one settled transaction, as a single comparable string. */
+function settledCode(outcome: PromiseSettledResult<unknown>): string {
+  if (outcome.status === 'fulfilled') {
+    return `FULFILLED|${String(outcome.value)}`;
+  }
+  const reason: unknown = outcome.reason;
+  if (reason instanceof DomainError) {
+    return `${reason.code}|${reason.message.includes('lock order') ? 'lock order' : reason.message}`;
+  }
+  return String(reason);
+}
+
+interface UpgradeOutcome {
+  readonly codes: readonly string[];
+  readonly lockOrderRefusals: number;
+  readonly backoffs: readonly BackoffConsultation[];
+}
+
+/**
+ * Runs `work` in `fleet` concurrent transactions that are all released from a
+ * barrier at the same point, and reports what each one was told.
+ */
+async function raceTransactions(
+  fleet: number,
+  work: (tx: TradingTransaction, arrive: () => Promise<void>) => Promise<void>,
+): Promise<UpgradeOutcome> {
+  const backoffs: BackoffConsultation[] = [];
+  const meeting = barrier(fleet);
+  const runs = Array.from({ length: fleet }, async () => {
+    const unitOfWork = new UnitOfWork(db, {
+      backoff: async (attempt: number, sqlState: string) => {
+        backoffs.push({ attempt, sqlState });
+      },
+    });
+    return await unitOfWork.run(async (tx) => {
+      await work(tx, meeting.arrive);
+    });
+  });
+
+  const settled = await Promise.allSettled(runs);
+  const codes = settled.map((outcome) =>
+    outcome.status === 'fulfilled'
+      ? 'FULFILLED'
+      : outcome.reason instanceof DomainError
+        ? outcome.reason.code
+        : String(outcome.reason),
+  );
+  const lockOrderRefusals = settled.filter(
+    (outcome) =>
+      outcome.status === 'rejected' &&
+      outcome.reason instanceof DomainError &&
+      outcome.reason.message.includes('lock order'),
+  ).length;
+  return { codes, lockOrderRefusals, backoffs };
+}
+
+describe('a lock upgrade is an ordering event, not an exemption', () => {
+  it('refuses the guard-level strengthening of a row already pinned shared', () => {
+    const guard = createLockOrderGuard();
+
+    guard.acquireLock({
+      table: 'anonymous_sessions',
+      key: 's',
+      strength: 'KEY_SHARE',
+    });
+
+    expect(() =>
+      guard.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'UPDATE',
+      }),
+    ).toThrow(DomainError);
+  });
+
+  it(
+    'refuses outbox.append then sessions.lock instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      let sequence = 0n;
+
+      const outcome = await raceTransactions(2, async (tx, arrive) => {
+        sequence += 1n;
+        await tx.outbox.append({
+          id: randomUUID(),
+          eventId: randomUUID(),
+          sessionId,
+          streamSequence: sequence,
+          eventType: 'ORDER_PLACED',
+          payload: { probe: 'upgrade' },
+        });
+        await arrive();
+        await tx.sessions.lock(sessionId);
+      });
+
+      expect(outcome.codes).toEqual([
+        'INVARIANT_VIOLATION',
+        'INVARIANT_VIOLATION',
+      ]);
+      expect(outcome.lockOrderRefusals).toBe(2);
+      expect(outcome.backoffs).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses orders.insert then lockOcoGroup instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      const ocoGroupId = await insertOcoGroup(sessionId);
+
+      const outcome = await raceTransactions(2, async (tx, arrive) => {
+        await tx.orders.insert({
+          id: randomUUID(),
+          sessionId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'BUY',
+          limitPrice: '100',
+          quantity: '1',
+          status: 'OPEN',
+          ocoGroupId,
+        });
+        await arrive();
+        await tx.orders.lockOcoGroup(ocoGroupId);
+      });
+
+      expect(outcome.codes).toEqual([
+        'INVARIANT_VIOLATION',
+        'INVARIANT_VIOLATION',
+      ]);
+      expect(outcome.lockOrderRefusals).toBe(2);
+      expect(outcome.backoffs).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses idempotency.begin then sessions.lock instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      let key = 0;
+
+      const outcome = await raceTransactions(2, async (tx, arrive) => {
+        key += 1;
+        await tx.idempotency.begin({
+          sessionId,
+          key: `upgrade-${key}`,
+          requestHash: 'hash-upgrade',
+        });
+        await arrive();
+        await tx.sessions.lock(sessionId);
+      });
+
+      expect(outcome.codes).toEqual([
+        'INVARIANT_VIOLATION',
+        'INVARIANT_VIOLATION',
+      ]);
+      expect(outcome.lockOrderRefusals).toBe(2);
+      expect(outcome.backoffs).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses recordReservation then orders.lock instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      const orderId = await insertOrderRow(sessionId);
+
+      const outcome = await raceTransactions(2, async (tx, arrive) => {
+        await tx.accounts.recordReservation({
+          id: randomUUID(),
+          sessionId,
+          orderId,
+          kind: 'CASH',
+          amount: '1',
+          currency: 'KRW',
+        });
+        await arrive();
+        await tx.orders.lock(orderId);
+      });
+
+      expect(outcome.codes).toEqual([
+        'INVARIANT_VIOLATION',
+        'INVARIANT_VIOLATION',
+      ]);
+      expect(outcome.lockOrderRefusals).toBe(2);
+      expect(outcome.backoffs).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses every member of a six-way upgrade fleet instead of exhausting the retries',
+    async () => {
+      const sessionId = await insertSession();
+      let sequence = 0n;
+
+      const outcome = await raceTransactions(6, async (tx, arrive) => {
+        sequence += 1n;
+        await tx.outbox.append({
+          id: randomUUID(),
+          eventId: randomUUID(),
+          sessionId,
+          streamSequence: sequence,
+          eventType: 'ORDER_PLACED',
+          payload: { probe: 'fleet' },
+        });
+        await arrive();
+        await tx.sessions.lock(sessionId);
+      });
+
+      expect(new Set(outcome.codes)).toEqual(new Set(['INVARIANT_VIOLATION']));
+      expect(outcome.lockOrderRefusals).toBe(6);
+      expect(outcome.backoffs).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe('a unique-index claim is an ordering event too', () => {
+  it(
+    'refuses the idempotency claim taken after the wallet instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      await insertWallet(sessionId, 'KRW', '1000');
+      const claimant = recordBackoff();
+      const racer = recordBackoff();
+      // No retries on either side, so a deadlock cannot be hidden by a replay:
+      // the SQLSTATE reaches the caller.
+      const claimantUnitOfWork = new UnitOfWork(db, {
+        backoff: claimant.backoff,
+        maxRetries: 0,
+      });
+      const racerUnitOfWork = new UnitOfWork(db, {
+        backoff: racer.backoff,
+        maxRetries: 0,
+      });
+      const keyClaimed = gate();
+      const walletHeld = gate();
+
+      // Lane B's B3: the claimant owns the uncommitted idempotency key and then
+      // wants the wallet; the racer owns the wallet and then wants the key. Both
+      // ascend the table order, so only ordering the claim itself can refuse it.
+      const claimantRun = claimantUnitOfWork
+        .run(async (tx) => {
+          await tx.idempotency.begin({
+            sessionId,
+            key: 'shared-key',
+            requestHash: 'hash-shared',
+          });
+          keyClaimed.open();
+          await walletHeld.opened;
+          await tx.accounts.lockWallet({ sessionId, currency: 'KRW' });
+          return 'claimant committed';
+        })
+        .finally(() => keyClaimed.open());
+
+      const racerRun = racerUnitOfWork
+        .run(async (tx) => {
+          await keyClaimed.opened;
+          await tx.orders.insert({
+            id: randomUUID(),
+            sessionId,
+            marketCode: 'US',
+            symbol: 'AAPL',
+            orderType: 'LIMIT',
+            side: 'BUY',
+            limitPrice: '100',
+            quantity: '1',
+            status: 'OPEN',
+          });
+          await tx.accounts.lockWallet({ sessionId, currency: 'KRW' });
+          walletHeld.open();
+          await tx.idempotency.begin({
+            sessionId,
+            key: 'shared-key',
+            requestHash: 'hash-shared',
+          });
+          return 'racer committed';
+        })
+        .finally(() => walletHeld.open());
+
+      const [claimantOutcome, racerOutcome] = await Promise.allSettled([
+        claimantRun,
+        racerRun,
+      ]);
+
+      expect({
+        claimant: settledCode(claimantOutcome),
+        racer: settledCode(racerOutcome),
+      }).toEqual({
+        claimant: 'FULFILLED|claimant committed',
+        racer: 'INVARIANT_VIOLATION|lock order',
+      });
+      expect(claimant.attempts).toEqual([]);
+      expect(racer.attempts).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses an order lock taken after the OCO winner claim instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      const ocoGroupId = await insertOcoGroup(sessionId);
+      const first = await insertGroupedOrderRow(sessionId, ocoGroupId);
+      const second = await insertGroupedOrderRow(sessionId, ocoGroupId);
+      const lower = first < second ? first : second;
+      const higher = first < second ? second : first;
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+      // Both order rows are taken in ascending id order, so the row-lock half of
+      // the order is satisfied throughout: only the winner claim is out of
+      // order, and only the claim can refuse this.
+      const error = await unitOfWork
+        .run(async (tx) => {
+          await tx.orders.lock(lower);
+          await tx.orders.update({
+            id: lower,
+            expectedVersion: 0n,
+            status: 'FILLED',
+            isOcoWinner: true,
+            ocoGroupId,
+          });
+          await tx.orders.lock(higher);
+        })
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(DomainError);
+      expect((error as DomainError).code).toBe('INVARIANT_VIOLATION');
+      expect((error as DomainError).message).toContain('lock order');
+      expect(backoff.attempts).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'lets the ordered winner commit while the inverted one is refused',
+    async () => {
+      const sessionId = await insertSession();
+      const ocoGroupId = await insertOcoGroup(sessionId);
+      const first = await insertGroupedOrderRow(sessionId, ocoGroupId);
+      const second = await insertGroupedOrderRow(sessionId, ocoGroupId);
+      const lower = first < second ? first : second;
+      const higher = first < second ? second : first;
+      const inverting = recordBackoff();
+      const documented = recordBackoff();
+      const invertingUnitOfWork = new UnitOfWork(db, {
+        backoff: inverting.backoff,
+      });
+      const documentedUnitOfWork = new UnitOfWork(db, {
+        backoff: documented.backoff,
+      });
+      const winnerClaimed = gate();
+      const higherLocked = gate();
+
+      // Lane A's xid-wait reproduction: one transaction claims the winner slot
+      // and then wants an order row the other holds, while the other wants the
+      // winner slot. Before the claim was ordered this closed a real cycle.
+      const inverted = invertingUnitOfWork
+        .run(async (tx) => {
+          await tx.orders.lock(lower);
+          await tx.orders.update({
+            id: lower,
+            expectedVersion: 0n,
+            status: 'FILLED',
+            isOcoWinner: true,
+            ocoGroupId,
+          });
+          winnerClaimed.open();
+          await higherLocked.opened;
+          await tx.orders.lock(higher);
+        })
+        .finally(() => winnerClaimed.open());
+
+      const documentedRun = documentedUnitOfWork.run(async (tx) => {
+        await winnerClaimed.opened;
+        await tx.orders.lock(higher);
+        higherLocked.open();
+        await tx.orders.update({
+          id: higher,
+          expectedVersion: 0n,
+          status: 'FILLED',
+          isOcoWinner: true,
+          ocoGroupId,
+        });
+        return 'committed';
+      });
+
+      const [invertedOutcome, documentedOutcome] = await Promise.allSettled([
+        inverted,
+        documentedRun,
+      ]);
+
+      expect({
+        inverted: settledCode(invertedOutcome),
+        documented: settledCode(documentedOutcome),
+      }).toEqual({
+        inverted: 'INVARIANT_VIOLATION|lock order',
+        documented: 'FULFILLED|committed',
+      });
+      expect(inverting.attempts).toEqual([]);
+      expect(documented.attempts).toEqual([]);
+      const winners = await sql<{ id: string }>`
+        select id from orders where is_oco_winner
+      `.execute(db);
+      expect(winners.rows.map((row) => row.id)).toEqual([higher]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe('the unique-key claim guard', () => {
+  it('refuses a table that has no rank in the lock order', () => {
+    const guard = createLockOrderGuard();
+
+    expect(() =>
+      guard.claimUniqueKey({
+        table: 'fills' as LockTable,
+        key: 'row',
+        index: 'orders_one_oco_winner_per_group',
+      }),
+    ).toThrow('no rank');
+  });
+
+  it('refuses an index this order does not claim', () => {
+    const guard = createLockOrderGuard();
+
+    // A primary key whose value the application generates per row is classified
+    // FRESH_IDENTITY, not claimed: declaring it would order a wait that cannot
+    // happen between two well-behaved callers.
+    expect(() =>
+      guard.claimUniqueKey({
+        table: 'orders',
+        key: 'k',
+        index: 'orders_pkey' as 'orders_one_oco_winner_per_group',
+      }),
+    ).toThrow('is not a claimed unique index');
+    // An index that belongs to another table cannot borrow this table's rank.
+    expect(() =>
+      guard.claimUniqueKey({
+        table: 'orders',
+        key: 'k',
+        index: 'outbox_events_session_id_stream_sequence_key',
+      }),
+    ).toThrow('is not a claimed unique index');
+  });
+
+  it('orders a claim against the row locks of the same table', () => {
+    const claims: UniqueKeyClaim[] = [];
+    const guard = createLockOrderGuard(undefined, (claim) =>
+      claims.push(claim),
+    );
+
+    guard.acquireLock({
+      table: 'orders',
+      key: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      strength: 'NO_KEY_UPDATE',
+    });
+    guard.claimUniqueKey({
+      table: 'orders',
+      key: ocoWinnerClaimKey('g'),
+      index: 'orders_one_oco_winner_per_group',
+    });
+    // Claiming the same slot again acquires nothing.
+    guard.claimUniqueKey({
+      table: 'orders',
+      key: ocoWinnerClaimKey('g'),
+      index: 'orders_one_oco_winner_per_group',
+    });
+
+    expect(claims).toEqual([
+      {
+        table: 'orders',
+        key: 'oco-winner:g',
+        index: 'orders_one_oco_winner_per_group',
+      },
+    ]);
+    // PostgreSQL locks the row first and writes the index entry second, so an
+    // order row may not be locked after the winner slot has been claimed.
+    expect(() =>
+      guard.acquireLock({
+        table: 'orders',
+        key: '00000000-0000-0000-0000-000000000000',
+        strength: 'UPDATE',
+      }),
+    ).toThrow('lock order violation');
+  });
+
+  it('lets the row lock of a claimed key follow its claim', () => {
+    const guard = createLockOrderGuard();
+
+    // `begin` claims the idempotency key and the completion updates that same
+    // row: one resource, one position in the order.
+    guard.claimUniqueKey({
+      table: 'idempotency_requests',
+      key: compositeLockKey('s', 'k'),
+      index: 'idempotency_requests_session_id_idempotency_key_key',
+    });
+    guard.acquireLock({
+      table: 'idempotency_requests',
+      key: compositeLockKey('s', 'k'),
+      strength: 'NO_KEY_UPDATE',
+    });
+
+    expect(() =>
+      guard.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'UPDATE',
+      }),
+    ).toThrow('lock order violation');
+  });
+});
+
+describe('lock keys', () => {
+  it('keeps two different rows apart when a key part contains the delimiter', () => {
+    // Without the escape, ('a:b', 'c') and ('a', 'b:c') would render to one key
+    // and the guard would treat two rows as one, skipping an ordering check.
+    expect(compositeLockKey('a:b', 'c')).not.toBe(compositeLockKey('a', 'b:c'));
+    expect(compositeLockKey('a\\b', 'c')).not.toBe(
+      compositeLockKey('a', '\\b:c'),
+    );
+    expect(compositeLockKey('s', 'KRW')).toBe('s:KRW');
+  });
+
+  it('renders a sequence so string order is numeric order', () => {
+    expect(sequenceLockKey(2n) < sequenceLockKey(10n)).toBe(true);
+    expect(sequenceLockKey(1n)).toBe('00000000000000000001');
+    expect(sequenceLockKey(9_223_372_036_854_775_807n)).toHaveLength(20);
+    expect(() => sequenceLockKey(-1n)).toThrow(DomainError);
+  });
+
+  it('sorts the OCO winner claim above every order id', () => {
+    // Order ids are uuids, so their keys only contain 0-9, a-f and '-'.
+    expect(
+      'ffffffff-ffff-ffff-ffff-ffffffffffff' < ocoWinnerClaimKey('g'),
+    ).toBe(true);
+    expect(
+      '00000000-0000-0000-0000-000000000000' < ocoWinnerClaimKey('g'),
+    ).toBe(true);
+  });
+});
+
+describe('every versioned update advances its own version', () => {
+  it('advances the session version by one', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    const version = await unitOfWork.run(async (tx) =>
+      tx.sessions.touch({
+        sessionId: fixture.sessionId,
+        expectedVersion: 0n,
+        lastSeenAt: FIXED_NOW,
+      }),
+    );
+
+    expect(version).toBe(1n);
+    expect(await readVersion('anonymous_sessions', fixture.sessionId)).toBe(
+      '1',
+    );
+  });
+
+  it('advances the wallet version by one', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    await unitOfWork.run(async (tx) =>
+      tx.accounts.reserveCash({
+        wallet: unlockedWallet(fixture.walletId, fixture.sessionId, 0n),
+        amount: '10',
+      }),
+    );
+
+    // The version column is the optimistic-concurrency token: without the
+    // increment, two callers that each read version N both succeed in sequence.
+    expect(await readWallet(fixture.walletId)).toEqual({
+      total: '1000',
+      available: '990',
+      reserved: '10',
+      version: '1',
+    });
+  });
+
+  it('advances the position version by one', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    await unitOfWork.run(async (tx) =>
+      tx.accounts.reservePosition({
+        position: unlockedPosition(fixture.positionId, fixture.sessionId, 0n),
+        quantity: '1',
+      }),
+    );
+
+    expect(await readVersion('positions', fixture.positionId)).toBe('1');
+  });
+
+  it('advances the OCO group version by one', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    const version = await unitOfWork.run(async (tx) =>
+      tx.orders.resolveOcoGroup({
+        id: fixture.ocoGroupId,
+        expectedVersion: 0n,
+        resolvedAt: FIXED_NOW,
+      }),
+    );
+
+    expect(version).toBe(1n);
+    expect(await readVersion('oco_groups', fixture.ocoGroupId)).toBe('1');
+  });
+
+  it('refuses to resolve an OCO group that is already resolved', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    await unitOfWork.run(async (tx) =>
+      tx.orders.resolveOcoGroup({
+        id: fixture.ocoGroupId,
+        expectedVersion: 0n,
+        resolvedAt: FIXED_NOW,
+      }),
+    );
+
+    // `status = 'ACTIVE'` is a guarantee of its own, not a duplicate of the
+    // version predicate: at the right version a resolved group would otherwise
+    // be resolved a second time and its resolved_at overwritten.
+    await expect(
+      unitOfWork.run(async (tx) =>
+        tx.orders.resolveOcoGroup({
+          id: fixture.ocoGroupId,
+          expectedVersion: 1n,
+          resolvedAt: new Date('2026-08-23T00:00:00.000Z'),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+
+    const resolved = await sql<{ resolved_at: Date; version: string }>`
+      select resolved_at, version from oco_groups where id = ${fixture.ocoGroupId}
+    `.execute(db);
+    expect(resolved.rows[0]?.resolved_at).toEqual(FIXED_NOW);
+    expect(resolved.rows[0]?.version).toBe('1');
+  });
+});
+
+describe('an OCO order names its group or it is not updated', () => {
+  it('refuses to update a grouped order that does not name its group', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    // Every update of a grouped order rewrites its winner-index entry, so an
+    // update that cannot declare the claim must not be allowed to run.
+    await expect(
+      unitOfWork.run(async (tx) =>
+        tx.orders.update({
+          id: fixture.groupedOrderId,
+          expectedVersion: 0n,
+          status: 'CANCELLED',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+
+    expect(await readVersion('orders', fixture.groupedOrderId)).toBe('0');
+  });
+
+  it('refuses to update an ungrouped order under someone else’s group', async () => {
+    const fixture = await ledgerFixture();
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+
+    await expect(
+      unitOfWork.run(async (tx) =>
+        tx.orders.update({
+          id: fixture.lowerOrderId,
+          expectedVersion: 0n,
+          status: 'CANCELLED',
+          ocoGroupId: fixture.ocoGroupId,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'ORDER_STATE_CONFLICT' });
+  });
+
+  it(
+    'claims the winner slot on every update of a grouped order',
+    async () => {
+      const fixture = await ledgerFixture();
+      const locks = recordLocks();
+      const unitOfWork = new UnitOfWork(db, {
+        backoff: recordBackoff().backoff,
+        onLock: locks.onLock,
+        onClaim: locks.onClaim,
+      });
+
+      await unitOfWork.run(async (tx) =>
+        tx.orders.update({
+          id: fixture.groupedOrderId,
+          expectedVersion: 0n,
+          status: 'FILLED',
+          isOcoWinner: true,
+          ocoGroupId: fixture.ocoGroupId,
+        }),
+      );
+
+      // A plain status update of a row that is *already* the winner rewrites
+      // its entry in the partial unique index just the same, so the claim is
+      // still the resource being taken — the winner flag is not what decides it.
+      const error = await unitOfWork
+        .run(async (tx) => {
+          await tx.orders.update({
+            id: fixture.groupedOrderId,
+            expectedVersion: 1n,
+            status: 'CANCELLED',
+            ocoGroupId: fixture.ocoGroupId,
+          });
+          await tx.orders.lock(fixture.lowerOrderId);
+        })
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(DomainError);
+      expect((error as DomainError).message).toContain('lock order');
+      expect(
+        locks.claims.filter(
+          (claim) => claim.index === 'orders_one_oco_winner_per_group',
+        ),
+      ).toHaveLength(2);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it('refuses to name a winner without naming its group', async () => {
+    const fixture = await ledgerFixture();
+    const backoff = recordBackoff();
+    const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+    await expect(
+      unitOfWork.run(async (tx) =>
+        tx.orders.update({
+          id: fixture.groupedOrderId,
+          expectedVersion: 0n,
+          status: 'FILLED',
+          isOcoWinner: true,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'INVARIANT_VIOLATION' });
+
+    expect(backoff.attempts).toEqual([]);
+  });
+});
+
+describe('snapshotInput', () => {
+  it('reads every field once into a frozen null-prototype copy', () => {
+    const reads: string[] = [];
+    const hostile = {
+      get sessionId(): string {
+        reads.push('sessionId');
+        return 'session';
+      },
+    };
+
+    const snapshot = snapshotInput({ sessionId: hostile.sessionId });
+
+    expect(reads).toEqual(['sessionId']);
+    expect(snapshot.sessionId).toBe('session');
+    expect(snapshot.sessionId).toBe('session');
+    expect(reads).toEqual(['sessionId']);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.getPrototypeOf(snapshot)).toBe(null);
+  });
+
+  it('cannot inherit an absent field from a polluted prototype', () => {
+    const polluted = Object.prototype as unknown as Record<string, unknown>;
+    polluted.currency = 'USD';
+    try {
+      const snapshot = snapshotInput<{ currency?: string }>({});
+
+      expect(snapshot.currency).toBe(undefined);
+      expect(({} as { currency?: string }).currency).toBe('USD');
+    } finally {
+      delete polluted.currency;
+    }
+  });
+
+  it('is a copy, so mutating the caller’s object cannot change it', () => {
+    const fields = { amount: '100' };
+    const snapshot = snapshotInput(fields);
+
+    fields.amount = '999';
+
+    expect(snapshot.amount).toBe('100');
+  });
+});
+
+describe('the deadlock class this order does not claim', () => {
+  it(
+    'absorbs a reused order id with the retry and leaves exactly one effect',
+    async () => {
+      const sessionId = await insertSession();
+      await insertWallet(sessionId, 'KRW', '1000');
+      // The same order id from two concurrent requests: a caller that reused an
+      // identity. orders_pkey is classified FRESH_IDENTITY precisely because
+      // this cannot be ordered — both transactions believe they are writing the
+      // same row — so the guarantee is that the retry absorbs it, in bounded
+      // time, with one effect.
+      const reusedOrderId = randomUUID();
+      const first = recordBackoff();
+      const second = recordBackoff();
+      const firstUnitOfWork = new UnitOfWork(db, { backoff: first.backoff });
+      const secondUnitOfWork = new UnitOfWork(db, { backoff: second.backoff });
+      const idClaimed = gate();
+      const walletHeld = gate();
+      let executions = 0;
+
+      const insertReused = (tx: TradingTransaction): Promise<void> =>
+        tx.orders.insert({
+          id: reusedOrderId,
+          sessionId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'BUY',
+          limitPrice: '100',
+          quantity: '1',
+          status: 'OPEN',
+        });
+
+      const firstRun = firstUnitOfWork
+        .run(async (tx) => {
+          executions += 1;
+          await insertReused(tx);
+          idClaimed.open();
+          await walletHeld.opened;
+          await tx.accounts.lockWallet({ sessionId, currency: 'KRW' });
+          return 'first committed';
+        })
+        .finally(() => idClaimed.open());
+
+      const secondRun = secondUnitOfWork
+        .run(async (tx) => {
+          executions += 1;
+          await idClaimed.opened;
+          await tx.orders.insert({
+            id: randomUUID(),
+            sessionId,
+            marketCode: 'US',
+            symbol: 'AAPL',
+            orderType: 'LIMIT',
+            side: 'BUY',
+            limitPrice: '100',
+            quantity: '1',
+            status: 'OPEN',
+          });
+          await tx.accounts.lockWallet({ sessionId, currency: 'KRW' });
+          walletHeld.open();
+          await insertReused(tx);
+          return 'second committed';
+        })
+        .finally(() => walletHeld.open());
+
+      const settled = await Promise.allSettled([firstRun, secondRun]);
+
+      // Bounded: both transactions settle, and the deadlock is what drove the
+      // one retry rather than a silent stall.
+      expect(
+        settled.filter((outcome) => outcome.status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect(
+        [...first.attempts, ...second.attempts].map(
+          (attempt) => attempt.sqlState,
+        ),
+      ).toContain('40P01');
+      expect(executions).toBeLessThanOrEqual(4);
+      const rejected = settled.find(
+        (outcome) => outcome.status === 'rejected',
+      ) as PromiseRejectedResult;
+      expect((rejected.reason as { code?: string }).code).toBe('23505');
+      // Exactly one effect: the reused id exists once.
+      const rows = await sql<{ total: string }>`
+        select count(*) as total from orders where id = ${reusedOrderId}
+      `.execute(db);
+      expect(rows.rows[0]?.total).toBe('1');
     },
     TEST_TIMEOUT_MS,
   );
