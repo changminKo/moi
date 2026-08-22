@@ -11,6 +11,9 @@ export {
   type PlaceStopOrderCommand,
   type PlaceTakeProfitOrderCommand,
   type PortfolioSnapshot,
+  readCancelOrderCommand,
+  readExchangeCommand,
+  readPlaceOrderCommand,
 } from './broker.js';
 export {
   PaperBroker,

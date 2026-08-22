@@ -204,14 +204,22 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
     status,
     version: readVersion(body.version, 'order version'),
   };
+  // One read per optional field, for the same reason the command side reads each
+  // caller field once: a response body is an object too, so its fields may be
+  // accessors that answer differently twice. `terminalReason` is the sharp case,
+  // because what the snapshot carries is a literal this decoder writes — a
+  // second read would let it validate absence and emit a terminal reason the
+  // paper API never reported, on an order it also reports as `OPEN`.
+  const suppliedFilledQuantity = body.filledQuantity;
+  const suppliedTerminalReason = body.terminalReason;
   const filledQuantity =
-    body.filledQuantity === undefined
+    suppliedFilledQuantity === undefined
       ? undefined
-      : readQuantity(body.filledQuantity, 'filled quantity');
+      : readQuantity(suppliedFilledQuantity, 'filled quantity');
 
   if (
-    body.terminalReason !== undefined &&
-    body.terminalReason !== 'IOC_REMAINDER'
+    suppliedTerminalReason !== undefined &&
+    suppliedTerminalReason !== 'IOC_REMAINDER'
   ) {
     malformed('order terminal reason');
   }
@@ -219,7 +227,7 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
   return {
     ...base,
     ...(filledQuantity === undefined ? {} : { filledQuantity }),
-    ...(body.terminalReason === undefined
+    ...(suppliedTerminalReason === undefined
       ? {}
       : { terminalReason: 'IOC_REMAINDER' as const }),
   };

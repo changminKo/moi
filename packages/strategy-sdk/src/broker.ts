@@ -257,16 +257,27 @@ function assertPriceField(
  * as a `MARKET` order carrying a limit price. Reading once, here, is what makes
  * the validated value and the forwarded value the same value.
  *
- * The snapshot has a null prototype so nothing ambient — a polluted
- * `Object.prototype`, most of all — can add a field to it afterwards: on the
- * snapshot, presence *is* an own key, so the price rules and the request body
- * cannot see different fields.
+ * What makes the price rules and the request body agree is narrower than the
+ * snapshot's prototype: both read this one object through the same
+ * `readOptionalField` policy, which holds whatever prototype it has. The null
+ * prototype buys something else, and only for one input — a caller command that
+ * is itself prototype-free cannot see a polluted `Object.prototype`, so a
+ * snapshot taken from it must not see one either, or an ordinary `MARKET` order
+ * is refused over ambient state nothing on this call path touched.
+ * `paper-broker.test.ts` pins exactly that input.
  *
  * This is the discipline trading-core already applies to untrusted fee-model
  * input (`snapshotFeeSchedule`, `snapshotFeeCalculationInput`). It differs in
  * one respect on purpose: a throw out of a caller's accessor is not wrapped
  * here, because that throw is caller code failing rather than the boundary
  * rejecting a value, and the README documents it as passing through.
+ *
+ * Taking the whole snapshot before validating any of it has one visible
+ * consequence: every field's accessor runs, in the order listed below, even when
+ * an earlier field is already invalid. Each field is still read exactly once, so
+ * nothing is amplified, but a command whose accessors have side effects sees all
+ * of them fire on a command that is then refused, and a throw from a late
+ * accessor surfaces in place of the `DomainError` an earlier field had earned.
  */
 function snapshotPlaceOrderCommand(command: unknown): Record<string, unknown> {
   assertCommandObject(command, 'place order command');
@@ -356,8 +367,10 @@ export function readPlaceOrderCommand(command: unknown): PlaceOrderCommand {
  * Note what this narrowing can and cannot promise: it says the command's fields
  * *were* valid when read. It cannot say a later read of the same
  * accessor-backed object returns the same values, which is why an
- * implementation acts on `readPlaceOrderCommand`'s snapshot instead of
- * re-reading its argument.
+ * implementation acts on a snapshot instead of re-reading its argument — and
+ * why `readPlaceOrderCommand`, which returns the snapshot it validated, is
+ * published beside this assertion rather than kept internal. An implementation
+ * that only asserts has nothing to act on but the caller's object.
  */
 export function assertPlaceOrderCommand(
   command: unknown,

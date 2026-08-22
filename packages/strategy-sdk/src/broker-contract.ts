@@ -91,11 +91,27 @@ const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
 });
 
 /**
- * A `LIMIT` command whose fields are prototype accessors that answer with a
- * `MARKET` order type once read more than once. A published command type is an
- * `interface`, so this satisfies it; every implementation must therefore read
- * each field once at its boundary and act on that snapshot, or it applies a rule
- * to one command and an effect to another.
+ * A `LIMIT` command whose fields are prototype accessors that answer differently
+ * from the *second* read onwards. A published command type is an `interface`, so
+ * this satisfies it; every implementation must therefore read each field once at
+ * its boundary and act on that snapshot, or it applies a rule to one command and
+ * an effect to another.
+ *
+ * Every field drifts on read two, not on read three: the defect this property
+ * exists to catch is validate-once-then-build-from-a-second-read, so a fixture
+ * that repeats its first value once absorbs that extra read for free and blesses
+ * exactly the implementation it is meant to fail. `limitBuy` is this command's
+ * first read of every field, which is what makes the replay below a replay.
+ *
+ * All eight fields drift, and a second read of any one of them is observable
+ * through the four `Broker` methods alone: `type` decides `OPEN` against
+ * `FILLED`, `sessionId` decides whether the account accepts the command at all,
+ * `idempotencyKey` decides which key the effect is stored under, and the
+ * remaining five decide what the effect *is* — so replaying `limitBuy` under the
+ * same key either returns the same snapshot or proves the stored effect was
+ * built from a value the rules never saw. One-extra-read mutants for all eight
+ * fields are recorded in the wave-4 report; every one of them fails this
+ * property, in both of the drivers this package ships.
  */
 const driftingLimitBuy = (idempotencyKey: string): PlaceOrderCommand => {
   const reads = new Map<string, number>();
@@ -112,14 +128,14 @@ const driftingLimitBuy = (idempotencyKey: string): PlaceOrderCommand => {
     });
   };
 
-  drift('sessionId', [CONTRACT_SESSION_ID]);
-  drift('idempotencyKey', [idempotencyKey]);
-  drift('market', ['US']);
-  drift('symbol', ['AAPL']);
-  drift('side', ['BUY']);
-  drift('quantity', ['2']);
-  drift('limitPrice', ['190.25']);
-  drift('type', ['LIMIT', 'LIMIT', 'MARKET']);
+  drift('sessionId', [CONTRACT_SESSION_ID, 'session-drifted']);
+  drift('idempotencyKey', [idempotencyKey, `${idempotencyKey}-drifted`]);
+  drift('market', ['US', 'KR']);
+  drift('symbol', ['AAPL', 'MSFT']);
+  drift('side', ['BUY', 'SELL']);
+  drift('quantity', ['2', '9']);
+  drift('limitPrice', ['190.25', '1e-8']);
+  drift('type', ['LIMIT', 'MARKET']);
 
   return Object.create(prototype) as PlaceOrderCommand;
 };
@@ -193,11 +209,26 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
     const placed = await broker.placeOrder(driftingLimitBuy('drift-key-1'));
     const after = await broker.getPortfolio(harness.sessionId);
 
-    // A LIMIT order stays OPEN; the second read says MARKET, which fills.
+    // A LIMIT order stays OPEN; the second read says MARKET, which fills. A
+    // second read of `sessionId` names an account that is not this one, so an
+    // implementation that re-reads it is refused rather than merely wrong.
     expect(placed.status).toBe('OPEN');
     expect(
       after.activeOrders.filter((order) => order.id === placed.id),
     ).toHaveLength(1);
+
+    // The key the effect is stored under has to be the key that was validated.
+    // `limitBuy` is the drifting command's first read of every field, so for an
+    // implementation that acts on its snapshot this is a replay: same snapshot
+    // back, no second effect. An implementation that stored the effect under a
+    // second read of `idempotencyKey` has nothing under this key and places
+    // another order instead.
+    const replayed = await broker.placeOrder(limitBuy('drift-key-1'));
+    const afterReplay = await broker.getPortfolio(harness.sessionId);
+
+    expect(replayed).toStrictEqual(placed);
+    expect(afterReplay.accountSequence).toBe(after.accountSequence);
+    expect(afterReplay.activeOrders).toStrictEqual(after.activeOrders);
   });
 
   it('rejects a reused idempotency key that carries a different payload', async () => {

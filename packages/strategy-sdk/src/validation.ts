@@ -193,11 +193,22 @@ export interface OptionalFieldRead {
  * The cost of a prototype-inclusive read is that a polluted `Object.prototype`
  * is indistinguishable from a caller's own accessor, so a polluted
  * `Object.prototype.limitPrice` supplies one — and makes a `MARKET` order fail
- * closed as `INVALID_ORDER`. That is a deliberate trade, pinned by test:
- * own-property-only presence would have this boundary reject the class and
- * builder shapes its own published interfaces bless, and descriptor-walking to
- * exclude `Object.prototype` specifically would reject a `Proxy` whose price
- * exists only behind a `get` trap.
+ * closed as `INVALID_ORDER`. That is a deliberate trade, pinned by test.
+ *
+ * Own-property-only presence would have this boundary reject the class and
+ * builder shapes its own published interfaces bless. Excluding `Object.prototype`
+ * by walking the prototype chain for a field's resolved descriptor is the real
+ * alternative, and it is declined on cost rather than on impossibility: a `Proxy`
+ * whose price lives behind a `get` trap has no resolved descriptor anywhere in
+ * its chain, so such a rule would not fire on it and the price would stand. What
+ * it does cost is a descriptor read on every *supplied* optional field — an
+ * extra call into caller code on the happy path, and a `Proxy` whose
+ * `getOwnPropertyDescriptor` trap throws or answers inconsistently is exactly as
+ * blessed a shape as one whose `get` trap does. This policy asks for a
+ * descriptor only after a value read came back `undefined`, which
+ * `paper-broker.test.ts` pins directly; and the gadget the walk would remove
+ * needs same-realm prototype pollution, which already implies the attacker runs
+ * code in this realm.
  */
 export function readOptionalField(
   source: object,

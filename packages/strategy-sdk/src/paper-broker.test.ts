@@ -436,7 +436,7 @@ describe('PaperBroker', () => {
     );
     const { command, reads } = drifting({
       ...DRIFTING_LIMIT,
-      type: ['LIMIT', 'LIMIT', 'LIMIT', 'LIMIT', 'MARKET'],
+      type: ['LIMIT', 'MARKET'],
     });
 
     await new PaperBroker(transport).placeOrder(command as PlaceOrderCommand);
@@ -518,8 +518,9 @@ describe('PaperBroker', () => {
   // MARKET order fail closed at the boundary instead of at the engine. The
   // alternatives are worse: own-property-only refuses the class and builder
   // shapes the published interfaces bless, and walking descriptors to exclude
-  // `Object.prototype` specifically refuses a Proxy whose price lives behind a
-  // `get` trap.
+  // `Object.prototype` — which would work, a `get`-trap Proxy having no resolved
+  // descriptor to find — costs a descriptor read on every supplied optional
+  // field, which the pin below measures.
   it('reads a polluted Object.prototype as a supplied price, both ways', async () => {
     const { transport, requests } = createFakeTransport(
       createPaperAccountFake(),
@@ -553,6 +554,110 @@ describe('PaperBroker', () => {
     });
     expect(marketRejection).toMatchObject({ code: 'INVALID_ORDER' });
     expect(requests).toHaveLength(1);
+  });
+
+  // What the snapshot's null prototype actually buys, as the one input that can
+  // tell: a null-prototype caller command cannot see a polluted
+  // `Object.prototype`, so its MARKET order supplies no price — and neither does
+  // the snapshot taken from it. A snapshot with the default prototype would see
+  // the pollution the caller could not, and the order would be refused on
+  // ambient state nothing on this call path touched.
+  //
+  // The transport here records and answers rather than replaying the request
+  // through the in-memory account: the account would rebuild the command as a
+  // plain object in this same realm and see the pollution itself, which is a
+  // property of the harness and not of the adapter. A real paper API is another
+  // process.
+  //
+  // Note what this does *not* pin, because the doc comment used to claim it: the
+  // price rules and the request body cannot disagree whatever the snapshot's
+  // prototype is, since both read it through the same `readOptionalField`. The
+  // null prototype removes an ambient-refusal path; it is not what makes the
+  // validated value and the wire value the same value.
+  it('keeps a null-prototype command clear of a polluted Object.prototype', async () => {
+    const requests: PaperBrokerRequest[] = [];
+    const transport: PaperBrokerTransport = {
+      request: async (request) => {
+        requests.push(request);
+
+        return {
+          status: 200,
+          body: { id: 'order-null-proto', status: 'FILLED', version: '2' },
+        };
+      },
+    };
+    const command = Object.assign(
+      Object.create(null) as Record<string, unknown>,
+      { ...marketBuy, idempotencyKey: 'null-proto-1' },
+    ) as unknown as PlaceOrderCommand;
+    let outcome: unknown;
+
+    try {
+      (Object.prototype as Record<string, unknown>).limitPrice = '999.99';
+
+      outcome = await new PaperBroker(transport)
+        .placeOrder(command)
+        .catch((error: unknown) => error);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'limitPrice');
+    }
+
+    expect(outcome).toMatchObject({ id: 'order-null-proto' });
+    expect(requests[0]?.body).toStrictEqual({
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'MARKET',
+      quantity: '3',
+    });
+  });
+
+  // The other half of that trade, and the reason it survives re-examination.
+  // Excluding a polluted `Object.prototype` means resolving each optional
+  // field's descriptor, and a descriptor read is a second call into caller code
+  // on the happy path — a `Proxy` whose `getOwnPropertyDescriptor` trap throws
+  // or lies is a shape the published interfaces bless. The present policy asks
+  // for a descriptor only when the value read came back `undefined`, so the OCO
+  // command below — both prices supplied through `get` — never touches the trap
+  // and is accepted. A descriptor walk would touch it and this order would be
+  // refused, which is the cost the README states.
+  it('never asks a supplied field for its descriptor', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const target: Record<string, unknown> = {
+      sessionId: CONTRACT_SESSION_ID,
+      idempotencyKey: 'proxy-descriptor-1',
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'OCO',
+      quantity: '3',
+      limitPrice: '190.25',
+      triggerPrice: '180.00',
+    };
+    let descriptorReads = 0;
+    const command = new Proxy(target, {
+      get: (source, key) => source[key as string],
+      getOwnPropertyDescriptor: (source, key) => {
+        descriptorReads += 1;
+
+        return Object.getOwnPropertyDescriptor(source, key);
+      },
+    }) as unknown as PlaceOrderCommand;
+
+    await new PaperBroker(transport).placeOrder(command);
+
+    expect(requests[0]?.body).toStrictEqual({
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'OCO',
+      quantity: '3',
+      limitPrice: '190.25',
+      triggerPrice: '180.00',
+    });
+    expect(descriptorReads).toBe(0);
   });
 
   it('decodes a stable paper-API error into the same domain code', async () => {

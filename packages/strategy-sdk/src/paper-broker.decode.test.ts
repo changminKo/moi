@@ -217,6 +217,85 @@ describe('PaperBroker decodes money fields at the boundary', () => {
   });
 });
 
+// The command side of this boundary reads each caller field exactly once, for a
+// reason that is symmetric: a response body is also an object whose fields may be
+// accessors, so a decoder that validates one read and returns another emits a
+// value nothing checked. On `terminalReason` the emitted value is a *literal* the
+// decoder writes itself, so the drift fabricates a reason the paper API never
+// reported — on an order it also reports as `OPEN`.
+describe('PaperBroker decodes the order snapshot it validated', () => {
+  const driftingOrderBody = (
+    field: string,
+    values: readonly unknown[],
+  ): { readonly body: Record<string, unknown>; reads: () => number } => {
+    let reads = 0;
+    const body: Record<string, unknown> = {
+      id: 'order-decode-1',
+      status: 'OPEN',
+      version: '1',
+    };
+
+    Object.defineProperty(body, field, {
+      enumerable: true,
+      get: () => {
+        const index = reads;
+        reads += 1;
+
+        return values[Math.min(index, values.length - 1)];
+      },
+    });
+
+    return { body, reads: () => reads };
+  };
+
+  it('emits no terminal reason for a body that reported none', async () => {
+    const { body, reads } = driftingOrderBody('terminalReason', [
+      undefined,
+      'IOC_REMAINDER',
+    ]);
+
+    const snapshot = await new PaperBroker(ok(body)).placeOrder(marketBuy);
+
+    expect(snapshot).toStrictEqual({
+      id: 'order-decode-1',
+      status: 'OPEN',
+      version: 1n,
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it('emits the terminal reason it validated', async () => {
+    const { body, reads } = driftingOrderBody('terminalReason', [
+      'IOC_REMAINDER',
+      undefined,
+    ]);
+
+    const snapshot = await new PaperBroker(ok(body)).placeOrder(marketBuy);
+
+    expect(snapshot).toStrictEqual({
+      id: 'order-decode-1',
+      status: 'OPEN',
+      version: 1n,
+      terminalReason: 'IOC_REMAINDER',
+    });
+    expect(reads()).toBe(1);
+  });
+
+  it('reads a filled quantity once and returns that read', async () => {
+    const { body, reads } = driftingOrderBody('filledQuantity', ['2', '-9']);
+
+    const snapshot = await new PaperBroker(ok(body)).placeOrder(marketBuy);
+
+    expect(snapshot).toStrictEqual({
+      id: 'order-decode-1',
+      status: 'OPEN',
+      version: 1n,
+      filledQuantity: '2',
+    });
+    expect(reads()).toBe(1);
+  });
+});
+
 describe('PaperBroker scopes every response to the requested session', () => {
   it('rejects an exchange receipt issued for another session', async () => {
     const broker = new PaperBroker(

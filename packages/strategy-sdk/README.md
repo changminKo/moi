@@ -97,8 +97,10 @@ plain form, which is narrower than what trading-core's own readers parse:
   through a private `Decimal` clone configured identically to trading-core's,
   with its exponent bounds stated rather than inherited — a clone captures them
   when it is made, and this module is made whenever a consumer first imports it,
-  so a `Decimal.set` anywhere in the realm moves neither this boundary nor the
-  order in which it was loaded.
+  which after a lazy `await import` is arbitrarily late. Stating the bounds is
+  what makes this boundary a property of the values: neither a `Decimal.set`
+  anywhere in the realm nor the order in which the module was loaded can move
+  it.
 - **Quantities** are plain positive whole numbers: `3`, not `1e3` or `0x10`,
   both of which `decimal.js` would read as `3000` and `16`. The wire carries the
   string verbatim, so the plain form is settled before the request is built.
@@ -128,17 +130,50 @@ value on the wire, the `orderId` that was checked is the one in the path, and th
 header. `assertPlaceOrderCommand` reports whether a command's fields *were*
 valid when read; it cannot promise a later read of the same object agrees, which
 is why an implementation must act on a snapshot rather than re-read its
-argument.
+argument. `readPlaceOrderCommand`, `readCancelOrderCommand`, and
+`readExchangeCommand` are exported from the main entry point for exactly that:
+they validate and return the snapshot they validated, so an implementation
+outside this package can satisfy the property `runBrokerContract` enforces
+without hand-rolling the boundary.
+
+```ts
+import { readPlaceOrderCommand, type Broker } from '@skipjack/strategy-sdk';
+
+const myBroker: Pick<Broker, 'placeOrder'> = {
+  async placeOrder(command) {
+    const validated = readPlaceOrderCommand(command);
+
+    return send(validated); // never `command` again
+  },
+};
+```
+
+Taking the whole snapshot before validating any of it has one consequence worth
+knowing if your accessors do more than return a value: every field is read, in
+declaration order, even when an earlier field is invalid. Each field is still
+read exactly once, but a command that is going to be refused has already run all
+of your getters, and a throw from a later one surfaces instead of the
+`DomainError` an earlier field had earned.
 
 Presence is what ordinary property access means — prototype-inclusive — because
 that is the only reading that accepts every shape the published types bless. One
 consequence follows and is pinned by test: a polluted `Object.prototype.limitPrice`
 is indistinguishable from a caller's own accessor, so it supplies a `LIMIT`
 order's price, and it makes an ordinary `MARKET` order fail closed with
-`INVALID_ORDER` at this boundary rather than at the engine. Own-property-only
-presence would instead refuse the class and builder shapes the types bless, and
-excluding `Object.prototype` by walking descriptors would refuse a `Proxy` whose
-price exists only behind a `get` trap.
+`INVALID_ORDER` at this boundary rather than at the engine.
+
+Own-property-only presence would instead refuse the class and builder shapes the
+types bless. Excluding `Object.prototype` by walking the prototype chain for a
+field's resolved descriptor is the alternative that *would* work — a `Proxy`
+whose price lives behind a `get` trap has no resolved descriptor anywhere, so
+the rule would not fire on it — and it is declined on cost, not on
+impossibility. The walk asks every supplied optional field for a descriptor,
+which is an extra call into your code on the happy path: a `Proxy` whose
+`getOwnPropertyDescriptor` trap throws or answers inconsistently is as blessed a
+shape as one whose `get` trap does, and today a supplied value is never asked
+for a descriptor at all. Against that, the behaviour being kept fails *closed*,
+and the injection the walk would remove needs same-realm prototype pollution,
+which already means the attacker runs code in your realm.
 
 ## The contract suite
 
