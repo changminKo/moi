@@ -94,8 +94,11 @@ plain form, which is narrower than what trading-core's own readers parse:
   reader also accepts `007` and `-5`; the SDK does not, because every value it
   emits or forwards is canonical `Decimal.toString()` output, which never has
   either. The magnitude bounds are trading-core's exact money domain, parsed
-  through a private `Decimal` clone configured identically to trading-core's, so
-  no `Decimal.set` elsewhere in the realm can move this boundary.
+  through a private `Decimal` clone configured identically to trading-core's,
+  with its exponent bounds stated rather than inherited — a clone captures them
+  when it is made, and this module is made whenever a consumer first imports it,
+  so a `Decimal.set` anywhere in the realm moves neither this boundary nor the
+  order in which it was loaded.
 - **Quantities** are plain positive whole numbers: `3`, not `1e3` or `0x10`,
   both of which `decimal.js` would read as `3000` and `16`. The wire carries the
   string verbatim, so the plain form is settled before the request is built.
@@ -108,6 +111,34 @@ plain form, which is narrower than what trading-core's own readers parse:
 - **A `retryAfter` hint** is kept only when it is a finite, non-negative number
   on an error that trading-core's own table calls retryable; it has no upper
   bound, because the ceiling belongs to whatever retry policy the caller runs.
+
+## The boundary snapshot
+
+A command type is an `interface`, so a class instance, a builder result, an
+`Object.create` shape, and a `Proxy` all satisfy it — and a strategy that
+computes its price from a live quote is the ordinary reason to use one. That
+makes a property read a call into your code, and your code need not answer twice
+the same way.
+
+So every public method reads each field of its command **exactly once**, into a
+plain snapshot with no prototype, then validates that snapshot and builds its
+request from it. The value the price rules were applied to is therefore the
+value on the wire, the `orderId` that was checked is the one in the path, and the
+`idempotencyKey` that cleared the control-character guard is the one in the
+header. `assertPlaceOrderCommand` reports whether a command's fields *were*
+valid when read; it cannot promise a later read of the same object agrees, which
+is why an implementation must act on a snapshot rather than re-read its
+argument.
+
+Presence is what ordinary property access means — prototype-inclusive — because
+that is the only reading that accepts every shape the published types bless. One
+consequence follows and is pinned by test: a polluted `Object.prototype.limitPrice`
+is indistinguishable from a caller's own accessor, so it supplies a `LIMIT`
+order's price, and it makes an ordinary `MARKET` order fail closed with
+`INVALID_ORDER` at this boundary rather than at the engine. Own-property-only
+presence would instead refuse the class and builder shapes the types bless, and
+excluding `Object.prototype` by walking descriptors would refuse a `Proxy` whose
+price exists only behind a `get` trap.
 
 ## The contract suite
 

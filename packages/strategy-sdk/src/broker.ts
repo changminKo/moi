@@ -17,6 +17,8 @@ import {
   assertIdentifier,
   isPositiveMoneyAmount,
   isPositiveWholeQuantity,
+  type OptionalFieldRead,
+  projectOptionalField,
   readOptionalField,
 } from './validation.js';
 
@@ -209,16 +211,16 @@ function assertPositivePrice(value: unknown, field: string): void {
 }
 
 function assertPriceField(
-  candidate: Record<string, unknown>,
+  read: OptionalFieldRead,
   field: 'limitPrice' | 'triggerPrice',
   rule: PriceRule,
   type: OrderType,
 ): void {
-  // `readOptionalField` is the boundary's single presence policy, shared with
-  // the request-body builder that puts these fields on the wire. Reading a
-  // price any other way here would let the two disagree, and a disagreement in
-  // either direction re-opens the hole the price rules exist to close.
-  const { supplied, value } = readOptionalField(candidate, field);
+  // The read handed in is the one the boundary snapshot already performed, so
+  // the price inspected here is the price the request body carries. Reading the
+  // field again would let the two disagree, and a disagreement in either
+  // direction re-opens the hole the price rules exist to close.
+  const { supplied, value } = read;
 
   if (!supplied) {
     if (rule === 'required') {
@@ -242,43 +244,156 @@ function assertPriceField(
 }
 
 /**
- * Validates a command that crossed a runtime boundary. The type-level union
- * already rejects impossible shapes, but decoded JSON and JavaScript callers
- * bypass it, so every implementation validates before acting.
+ * Snapshots a command that crossed a runtime boundary: every field is read
+ * exactly once, into plain own data with no prototype, and the snapshot is what
+ * gets validated and what every caller works from afterwards.
+ *
+ * A published command type is an `interface`, so a caller may satisfy it with a
+ * class, a builder result, an `Object.create` shape, or a `Proxy` — all of which
+ * this boundary supports deliberately. That makes a property read a call into
+ * caller code, and caller code need not answer twice the same way. A validator
+ * that reads a field and a request builder that reads it again therefore inspect
+ * and forward *different* values: a `LIMIT` order validates clean and is POSTed
+ * as a `MARKET` order carrying a limit price. Reading once, here, is what makes
+ * the validated value and the forwarded value the same value.
+ *
+ * The snapshot has a null prototype so nothing ambient — a polluted
+ * `Object.prototype`, most of all — can add a field to it afterwards: on the
+ * snapshot, presence *is* an own key, so the price rules and the request body
+ * cannot see different fields.
+ *
+ * This is the discipline trading-core already applies to untrusted fee-model
+ * input (`snapshotFeeSchedule`, `snapshotFeeCalculationInput`). It differs in
+ * one respect on purpose: a throw out of a caller's accessor is not wrapped
+ * here, because that throw is caller code failing rather than the boundary
+ * rejecting a value, and the README documents it as passing through.
  */
-export function assertPlaceOrderCommand(
-  command: unknown,
-): asserts command is PlaceOrderCommand {
+function snapshotPlaceOrderCommand(command: unknown): Record<string, unknown> {
   assertCommandObject(command, 'place order command');
 
-  const candidate: Record<string, unknown> = command;
+  const source: Record<string, unknown> = command;
 
-  assertIdentifier(candidate.sessionId, 'sessionId');
-  assertIdentifier(candidate.idempotencyKey, 'idempotencyKey');
-  assertIdentifier(candidate.symbol, 'symbol');
-  assertMember(candidate.market, MARKETS, 'market');
-  assertMember(candidate.side, SIDES, 'side');
-  assertMember(candidate.type, PLACE_ORDER_PRICE_RULES, 'type');
+  return Object.assign(Object.create(null) as Record<string, unknown>, {
+    sessionId: source.sessionId,
+    idempotencyKey: source.idempotencyKey,
+    market: source.market,
+    symbol: source.symbol,
+    side: source.side,
+    type: source.type,
+    quantity: source.quantity,
+    ...projectOptionalField(source, 'limitPrice'),
+    ...projectOptionalField(source, 'triggerPrice'),
+  });
+}
+
+function assertPlaceOrderFields(
+  snapshot: unknown,
+): asserts snapshot is PlaceOrderCommand {
+  const candidate = snapshot as Record<string, unknown>;
+  const { sessionId, idempotencyKey, symbol, market, side, type, quantity } =
+    candidate;
+
+  assertIdentifier(sessionId, 'sessionId');
+  assertIdentifier(idempotencyKey, 'idempotencyKey');
+  assertIdentifier(symbol, 'symbol');
+  assertMember(market, MARKETS, 'market');
+  assertMember(side, SIDES, 'side');
+  assertMember(type, PLACE_ORDER_PRICE_RULES, 'type');
 
   // trading-core parses quantities with decimal.js, which reads `'1e3'`,
   // `'0x10'`, and `'+1'` as positive whole numbers. The wire carries the string
   // verbatim, so the plain form is settled here before delegating.
-  if (!isPositiveWholeQuantity(candidate.quantity)) {
+  //
+  // The delegate parses on the shared global `Decimal`, so a same-realm
+  // `Decimal.set({ maxE })` can make it refuse a quantity this boundary
+  // accepts. That fails closed, and the delegate lives in trading-core, so
+  // hardening it the way the money predicate is hardened is a trading-core
+  // change rather than one available here.
+  if (!isPositiveWholeQuantity(quantity)) {
     throw new DomainError(
       'INVALID_QUANTITY',
       'quantity must be a positive whole number in plain decimal form',
     );
   }
 
-  assertPositiveWholeQuantity(candidate.quantity);
+  assertPositiveWholeQuantity(quantity);
 
-  const rules = PLACE_ORDER_PRICE_RULES[candidate.type];
+  const rules = PLACE_ORDER_PRICE_RULES[type];
 
-  assertPriceField(candidate, 'limitPrice', rules.limitPrice, candidate.type);
   assertPriceField(
-    candidate,
+    readOptionalField(candidate, 'limitPrice'),
+    'limitPrice',
+    rules.limitPrice,
+    type,
+  );
+  assertPriceField(
+    readOptionalField(candidate, 'triggerPrice'),
     'triggerPrice',
     rules.triggerPrice,
-    candidate.type,
+    type,
   );
+}
+
+/**
+ * Snapshots and validates a place-order command, returning the snapshot that
+ * was validated. Every implementation of `Broker` builds its request from the
+ * returned object rather than from the caller's, so the value on the wire is
+ * provably the value the rules were applied to.
+ */
+export function readPlaceOrderCommand(command: unknown): PlaceOrderCommand {
+  const snapshot = snapshotPlaceOrderCommand(command);
+
+  assertPlaceOrderFields(snapshot);
+
+  return snapshot;
+}
+
+/**
+ * Validates a command that crossed a runtime boundary. The type-level union
+ * already rejects impossible shapes, but decoded JSON and JavaScript callers
+ * bypass it, so every implementation validates before acting.
+ *
+ * Note what this narrowing can and cannot promise: it says the command's fields
+ * *were* valid when read. It cannot say a later read of the same
+ * accessor-backed object returns the same values, which is why an
+ * implementation acts on `readPlaceOrderCommand`'s snapshot instead of
+ * re-reading its argument.
+ */
+export function assertPlaceOrderCommand(
+  command: unknown,
+): asserts command is PlaceOrderCommand {
+  readPlaceOrderCommand(command);
+}
+
+/**
+ * The same snapshot-then-validate discipline for the two identifier-only
+ * commands: an `orderId` reaches a URL path segment and an `idempotencyKey`
+ * reaches a header, so the one that was checked has to be the one that is sent.
+ */
+export function readCancelOrderCommand(command: unknown): CancelOrderCommand {
+  assertCommandObject(command, 'cancel order command');
+
+  const source: Record<string, unknown> = command;
+  // One destructuring read per field, so the identifier that is checked below
+  // is the identifier that is returned.
+  const { sessionId, idempotencyKey, orderId } = source;
+
+  assertIdentifier(sessionId, 'sessionId');
+  assertIdentifier(idempotencyKey, 'idempotencyKey');
+  assertIdentifier(orderId, 'orderId');
+
+  return { sessionId, idempotencyKey, orderId };
+}
+
+export function readExchangeCommand(command: unknown): ExchangeCommand {
+  assertCommandObject(command, 'exchange command');
+
+  const source: Record<string, unknown> = command;
+  const { sessionId, idempotencyKey, quoteId } = source;
+
+  assertIdentifier(sessionId, 'sessionId');
+  assertIdentifier(idempotencyKey, 'idempotencyKey');
+  assertIdentifier(quoteId, 'quoteId');
+
+  return { sessionId, idempotencyKey, quoteId };
 }

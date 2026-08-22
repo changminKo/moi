@@ -17,13 +17,15 @@ import {
 } from '@skipjack/trading-core';
 import { beforeEach, expect, it } from 'vitest';
 import {
-  assertPlaceOrderCommand,
   type Broker,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
   type PlaceOrderCommand,
   type PortfolioSnapshot,
+  readCancelOrderCommand,
+  readExchangeCommand,
+  readPlaceOrderCommand,
 } from './broker.js';
 
 // The suite is driven by more than one implementation, so every fixture is a
@@ -89,6 +91,40 @@ const limitBuy = (idempotencyKey: string): PlaceOrderCommand => ({
 });
 
 /**
+ * A `LIMIT` command whose fields are prototype accessors that answer with a
+ * `MARKET` order type once read more than once. A published command type is an
+ * `interface`, so this satisfies it; every implementation must therefore read
+ * each field once at its boundary and act on that snapshot, or it applies a rule
+ * to one command and an effect to another.
+ */
+const driftingLimitBuy = (idempotencyKey: string): PlaceOrderCommand => {
+  const reads = new Map<string, number>();
+  const prototype: Record<string, unknown> = {};
+  const drift = (field: string, values: readonly string[]): void => {
+    Object.defineProperty(prototype, field, {
+      enumerable: true,
+      get: () => {
+        const index = reads.get(field) ?? 0;
+        reads.set(field, index + 1);
+
+        return values[Math.min(index, values.length - 1)];
+      },
+    });
+  };
+
+  drift('sessionId', [CONTRACT_SESSION_ID]);
+  drift('idempotencyKey', [idempotencyKey]);
+  drift('market', ['US']);
+  drift('symbol', ['AAPL']);
+  drift('side', ['BUY']);
+  drift('quantity', ['2']);
+  drift('limitPrice', ['190.25']);
+  drift('type', ['LIMIT', 'LIMIT', 'MARKET']);
+
+  return Object.create(prototype) as PlaceOrderCommand;
+};
+
+/**
  * Everything an implementation must expose so the shared suite observes durable
  * effects instead of trusting returned snapshots alone.
  */
@@ -148,6 +184,20 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
       afterSecond.activeOrders.filter((order) => order.id === first.id),
     ).toHaveLength(1);
     expect(afterSecond.activeOrders).toStrictEqual(afterFirst.activeOrders);
+  });
+
+  // Snapshot-at-the-boundary, as a contract property rather than an
+  // implementation detail: a command's fields may be accessors, so an
+  // implementation that re-reads them validates one order and places another.
+  it('acts on the command it validated rather than re-reading it', async () => {
+    const placed = await broker.placeOrder(driftingLimitBuy('drift-key-1'));
+    const after = await broker.getPortfolio(harness.sessionId);
+
+    // A LIMIT order stays OPEN; the second read says MARKET, which fills.
+    expect(placed.status).toBe('OPEN');
+    expect(
+      after.activeOrders.filter((order) => order.id === placed.id),
+    ).toHaveLength(1);
   });
 
   it('rejects a reused idempotency key that carries a different payload', async () => {
@@ -352,8 +402,11 @@ export function createPaperAccountFake(): PaperAccountFake {
   };
 
   return {
-    place(command) {
-      assertPlaceOrderCommand(command);
+    place(input) {
+      // The snapshot the rules were applied to. Re-reading `input` would let a
+      // command validate as one order and take effect as another.
+      const command = readPlaceOrderCommand(input);
+
       assertSession(command.sessionId);
 
       const hash = JSON.stringify([
@@ -398,7 +451,9 @@ export function createPaperAccountFake(): PaperAccountFake {
       return order;
     },
 
-    cancel(command) {
+    cancel(input) {
+      const command = readCancelOrderCommand(input);
+
       assertSession(command.sessionId);
 
       const hash = JSON.stringify(['cancel', command.orderId]);
@@ -439,7 +494,9 @@ export function createPaperAccountFake(): PaperAccountFake {
       return cancelled;
     },
 
-    exchange(command) {
+    exchange(input) {
+      const command = readExchangeCommand(input);
+
       assertSession(command.sessionId);
 
       const hash = JSON.stringify(['exchange', command.quoteId]);

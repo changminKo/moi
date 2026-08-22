@@ -10,16 +10,17 @@ import {
   type WalletSnapshot,
 } from '@skipjack/trading-core';
 import {
-  assertPlaceOrderCommand,
   type Broker,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
   type PlaceOrderCommand,
   type PortfolioSnapshot,
+  readCancelOrderCommand,
+  readExchangeCommand,
+  readPlaceOrderCommand,
 } from './broker.js';
 import {
-  assertCommandObject,
   assertIdentifier,
   isIsoInstant,
   isMoneyAmount,
@@ -445,58 +446,57 @@ export class PaperBroker implements Broker {
   }
 
   async placeOrder(command: PlaceOrderCommand): Promise<OrderSnapshot> {
-    assertPlaceOrderCommand(command);
+    // The snapshot the price rules were applied to, not the caller's object: a
+    // command's fields may be accessors, and a second read of an accessor is a
+    // second call into caller code that need not answer the same way.
+    const validated = readPlaceOrderCommand(command);
 
     const body = {
-      market: command.market,
-      symbol: command.symbol,
-      side: command.side,
-      type: command.type,
-      quantity: command.quantity,
-      // The same policy the validator applied, so the wire carries exactly the
-      // price fields `assertPlaceOrderCommand` inspected — never one more, and
-      // never one fewer.
-      ...projectOptionalField(command, 'limitPrice'),
-      ...projectOptionalField(command, 'triggerPrice'),
+      market: validated.market,
+      symbol: validated.symbol,
+      side: validated.side,
+      type: validated.type,
+      quantity: validated.quantity,
+      // The snapshot is plain own data with no prototype, so this is the same
+      // policy over the same values the validator saw: the wire carries exactly
+      // the price fields it inspected — never one more, and never one fewer.
+      ...projectOptionalField(validated, 'limitPrice'),
+      ...projectOptionalField(validated, 'triggerPrice'),
     };
 
     return decodeOrderSnapshot(
       await this.#send({
         method: 'POST',
         path: ORDERS_PATH,
-        idempotencyKey: command.idempotencyKey,
+        idempotencyKey: validated.idempotencyKey,
         body,
       }),
     );
   }
 
   async cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot> {
-    assertCommandObject(command, 'cancel order command');
-    assertCommandIdentifiers(command.sessionId, command.idempotencyKey);
-    assertIdentifier(command.orderId, 'orderId');
+    const { idempotencyKey, orderId } = readCancelOrderCommand(command);
 
     return decodeOrderSnapshot(
       await this.#send({
         method: 'DELETE',
-        path: `${ORDERS_PATH}/${encodeURIComponent(command.orderId)}`,
-        idempotencyKey: command.idempotencyKey,
+        path: `${ORDERS_PATH}/${encodeURIComponent(orderId)}`,
+        idempotencyKey,
       }),
     );
   }
 
   async exchange(command: ExchangeCommand): Promise<ExchangeReceipt> {
-    assertCommandObject(command, 'exchange command');
-    assertCommandIdentifiers(command.sessionId, command.idempotencyKey);
-    assertIdentifier(command.quoteId, 'quoteId');
+    const { sessionId, idempotencyKey, quoteId } = readExchangeCommand(command);
 
     return decodeExchangeReceipt(
       await this.#send({
         method: 'POST',
         path: CONVERSIONS_PATH,
-        idempotencyKey: command.idempotencyKey,
-        body: { quoteId: command.quoteId },
+        idempotencyKey,
+        body: { quoteId },
       }),
-      command.sessionId,
+      sessionId,
     );
   }
 
@@ -518,12 +518,4 @@ export class PaperBroker implements Broker {
 
     return response.body;
   }
-}
-
-function assertCommandIdentifiers(
-  sessionId: unknown,
-  idempotencyKey: unknown,
-): void {
-  assertIdentifier(sessionId, 'sessionId');
-  assertIdentifier(idempotencyKey, 'idempotencyKey');
 }

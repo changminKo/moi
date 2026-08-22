@@ -10,6 +10,8 @@ import {
 } from '@skipjack/trading-core';
 import { describe, expect, it } from 'vitest';
 import type {
+  CancelOrderCommand,
+  ExchangeCommand,
   ExchangeReceipt,
   PlaceLimitOrderCommand,
   PlaceOrderCommand,
@@ -222,6 +224,48 @@ class LimitBuyFromMid implements PlaceLimitOrderCommand {
   }
 }
 
+/**
+ * A command whose fields are prototype accessors handing back a different value
+ * on each read — the deterministic form of a price computed from a live quote.
+ * The accessors sit on the prototype because an own `get` would be flattened by
+ * a spread and hide the extra read.
+ */
+const drifting = (
+  fields: Readonly<Record<string, readonly unknown[]>>,
+): {
+  readonly command: unknown;
+  readonly reads: Record<string, number>;
+} => {
+  const reads: Record<string, number> = {};
+  const prototype: Record<string, unknown> = {};
+
+  for (const [field, values] of Object.entries(fields)) {
+    reads[field] = 0;
+    Object.defineProperty(prototype, field, {
+      enumerable: true,
+      get: () => {
+        const index = reads[field] ?? 0;
+        reads[field] = index + 1;
+
+        return values[Math.min(index, values.length - 1)];
+      },
+    });
+  }
+
+  return { command: Object.create(prototype), reads };
+};
+
+const DRIFTING_LIMIT: Readonly<Record<string, readonly unknown[]>> = {
+  sessionId: [CONTRACT_SESSION_ID],
+  idempotencyKey: ['drift-key-1'],
+  market: ['US'],
+  symbol: ['AAPL'],
+  side: ['BUY'],
+  type: ['LIMIT'],
+  quantity: ['3'],
+  limitPrice: ['190.25'],
+};
+
 const marketBuy: PlaceOrderCommand = {
   sessionId: CONTRACT_SESSION_ID,
   idempotencyKey: 'paper-key-1',
@@ -354,6 +398,161 @@ describe('PaperBroker', () => {
       new PaperBroker(transport).placeOrder(invalid),
     ).rejects.toThrow(expect.objectContaining({ code: 'INVALID_ORDER' }));
     expect(requests).toHaveLength(0);
+  });
+
+  // Every field of a command is read once, at the boundary, and the request is
+  // built from that snapshot. A second read is a second call into caller code,
+  // so without the snapshot the wire carries a value the validator never saw.
+  it('POSTs the price the validator inspected, not a later read', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const { command, reads } = drifting({
+      ...DRIFTING_LIMIT,
+      // `1e-8` is the exponent form this boundary exists to refuse, and
+      // `not-a-number` is not money at all.
+      limitPrice: ['190.25', '1e-8', 'not-a-number'],
+    });
+
+    await new PaperBroker(transport).placeOrder(command as PlaceOrderCommand);
+
+    expect(requests[0]?.body).toStrictEqual({
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '3',
+      limitPrice: '190.25',
+    });
+    expect(reads.limitPrice).toBe(1);
+  });
+
+  // The order type is the field the price rules hang off, so a drifting one
+  // turns a validated LIMIT into a MARKET order carrying a limit price — the
+  // exact shape `planReservation` rejects.
+  it('never POSTs an order type the validator did not inspect', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const { command, reads } = drifting({
+      ...DRIFTING_LIMIT,
+      type: ['LIMIT', 'LIMIT', 'LIMIT', 'LIMIT', 'MARKET'],
+    });
+
+    await new PaperBroker(transport).placeOrder(command as PlaceOrderCommand);
+
+    expect(requests[0]?.body).toMatchObject({
+      type: 'LIMIT',
+      limitPrice: '190.25',
+    });
+    expect(reads.type).toBe(1);
+  });
+
+  // The read-once pin. It is also what defends the shared
+  // `projectOptionalField` call: an inline `=== undefined` ternary reads the
+  // field a second time, and a getter can answer differently.
+  it('reads every field of a place command exactly once', async () => {
+    const { transport } = createFakeTransport(createPaperAccountFake());
+    const { command, reads } = drifting(DRIFTING_LIMIT);
+
+    await new PaperBroker(transport).placeOrder(command as PlaceOrderCommand);
+
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      market: 1,
+      symbol: 1,
+      side: 1,
+      type: 1,
+      quantity: 1,
+      limitPrice: 1,
+    });
+  });
+
+  it('addresses and keys the cancel the validator inspected', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const { command, reads } = drifting({
+      sessionId: [CONTRACT_SESSION_ID],
+      idempotencyKey: ['drift-cancel-1', 'other-key\n'],
+      orderId: [CONTRACT_OPEN_ORDER_ID, 'x/../../admin'],
+    });
+
+    await new PaperBroker(transport).cancelOrder(command as CancelOrderCommand);
+
+    expect(requests[0]?.path).toBe(`${ORDERS_PATH}/${CONTRACT_OPEN_ORDER_ID}`);
+    expect(requests[0]?.idempotencyKey).toBe('drift-cancel-1');
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      orderId: 1,
+    });
+  });
+
+  it('exchanges the quote the validator inspected', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const { command, reads } = drifting({
+      sessionId: [CONTRACT_SESSION_ID, 'session-someone-else'],
+      idempotencyKey: ['drift-exchange-1', 'other-key\n'],
+      quoteId: [CONTRACT_QUOTE_ID, 'quote-someone-else'],
+    });
+
+    await new PaperBroker(transport).exchange(command as ExchangeCommand);
+
+    expect(requests[0]?.body).toStrictEqual({ quoteId: CONTRACT_QUOTE_ID });
+    expect(requests[0]?.idempotencyKey).toBe('drift-exchange-1');
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      quoteId: 1,
+    });
+  });
+
+  // Not a RED cycle: this pins behaviour that already holds, so the cost of a
+  // prototype-inclusive presence read is a decision rather than an accident. A
+  // polluted `Object.prototype.limitPrice` is indistinguishable from a caller's
+  // own accessor, so it supplies a LIMIT order's price — and makes an ordinary
+  // MARKET order fail closed at the boundary instead of at the engine. The
+  // alternatives are worse: own-property-only refuses the class and builder
+  // shapes the published interfaces bless, and walking descriptors to exclude
+  // `Object.prototype` specifically refuses a Proxy whose price lives behind a
+  // `get` trap.
+  it('reads a polluted Object.prototype as a supplied price, both ways', async () => {
+    const { transport, requests } = createFakeTransport(
+      createPaperAccountFake(),
+    );
+    const broker = new PaperBroker(transport);
+    const limitWithoutOwnPrice = {
+      ...marketBuy,
+      idempotencyKey: 'polluted-1',
+      type: 'LIMIT',
+    } as unknown as PlaceOrderCommand;
+    let marketRejection: unknown;
+
+    try {
+      (Object.prototype as Record<string, unknown>).limitPrice = '999.99';
+
+      await broker.placeOrder(limitWithoutOwnPrice);
+      marketRejection = await broker
+        .placeOrder({ ...marketBuy, idempotencyKey: 'polluted-2' })
+        .catch((error: unknown) => error);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'limitPrice');
+    }
+
+    expect(requests[0]?.body).toStrictEqual({
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '3',
+      limitPrice: '999.99',
+    });
+    expect(marketRejection).toMatchObject({ code: 'INVALID_ORDER' });
+    expect(requests).toHaveLength(1);
   });
 
   it('decodes a stable paper-API error into the same domain code', async () => {

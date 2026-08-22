@@ -11,12 +11,15 @@ import {
   type ReservationOrder,
   type Side,
 } from '@skipjack/trading-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assertPlaceOrderCommand,
   PLACE_ORDER_PRICE_RULES,
   type PlaceLimitOrderCommand,
   type PlaceOrderCommand,
+  readCancelOrderCommand,
+  readExchangeCommand,
+  readPlaceOrderCommand,
 } from './broker.js';
 import { moneyDecimal } from './validation.js';
 
@@ -586,6 +589,48 @@ describe('the money boundary does not move with the global Decimal', () => {
       `1${'0'.repeat(25)}`,
     );
   });
+
+  // A clone snapshots its bounds when it is made, so being immune to a *later*
+  // `Decimal.set` says nothing about an earlier one. The SDK's clone is loaded
+  // whenever the consumer first imports it — after a lazy `await import`, that
+  // is arbitrarily late — so the bounds have to be stated rather than inherited.
+  it('keeps the money domain when the global was narrowed before it loaded', async () => {
+    const { minE, maxE } = globalDecimal;
+
+    try {
+      globalDecimal.set({ minE: -1 });
+      vi.resetModules();
+
+      const reloaded = await import('./validation.js');
+
+      expect(reloaded.isPositiveMoneyAmount(OUTSIDE_DOMAIN)).toBe(false);
+    } finally {
+      globalDecimal.set({ minE, maxE });
+    }
+  });
+
+  // `precision` bounds arithmetic rather than construction, so no predicate
+  // that only inspects can observe it. Read the configuration off the clone
+  // instead: that closes the last field where the two constructors could
+  // quietly differ.
+  it("pins every field of the clone's configuration", () => {
+    interface CloneConfiguration {
+      readonly precision: number;
+      readonly toExpNeg: number;
+      readonly toExpPos: number;
+      readonly minE: number;
+      readonly maxE: number;
+    }
+
+    const clone = moneyDecimal('1')
+      .constructor as unknown as CloneConfiguration;
+
+    expect(clone.precision).toBe(161);
+    expect(clone.toExpNeg).toBe(-9e15);
+    expect(clone.toExpPos).toBe(9e15);
+    expect(clone.minE).toBe(-9e15);
+    expect(clone.maxE).toBe(9e15);
+  });
 });
 
 describe('assertPlaceOrderCommand identifiers', () => {
@@ -618,6 +663,168 @@ describe('assertPlaceOrderCommand identifiers', () => {
     ['an array', []],
   ])('rejects %s as a domain error rather than a TypeError', (_l, value) => {
     expect(attempt(() => assertPlaceOrderCommand(value))).toBe('INVALID_ORDER');
+  });
+});
+
+// --- The boundary snapshot ---------------------------------------------------
+// A command is an interface, so every field may be an accessor, and an accessor
+// is caller code that need not answer twice the same way. A validator that
+// reads a field and a request builder that reads it again therefore inspect and
+// forward *different* values. The boundary reads each field exactly once, into
+// plain own data, and everything downstream works from that.
+
+/**
+ * A command whose fields are prototype accessors handing back a different value
+ * on each read — the deterministic form of a price computed from a live quote.
+ * The accessors sit on the prototype because an own `get` would be flattened by
+ * a spread and hide the extra read.
+ */
+const drifting = (
+  fields: Readonly<Record<string, readonly unknown[]>>,
+): {
+  readonly command: unknown;
+  readonly reads: Record<string, number>;
+} => {
+  const reads: Record<string, number> = {};
+  const prototype: Record<string, unknown> = {};
+
+  for (const [field, values] of Object.entries(fields)) {
+    reads[field] = 0;
+    Object.defineProperty(prototype, field, {
+      enumerable: true,
+      get: () => {
+        const index = reads[field] ?? 0;
+        reads[field] = index + 1;
+
+        return values[Math.min(index, values.length - 1)];
+      },
+    });
+  }
+
+  return { command: Object.create(prototype), reads };
+};
+
+const DRIFTING_LIMIT: Readonly<Record<string, readonly unknown[]>> = {
+  sessionId: ['session-1'],
+  idempotencyKey: ['snapshot-key'],
+  market: ['US'],
+  symbol: ['AAPL'],
+  side: ['BUY'],
+  type: ['LIMIT'],
+  quantity: ['3'],
+  limitPrice: ['190.25', '1e-8', 'not-a-number'],
+};
+
+describe('readPlaceOrderCommand', () => {
+  it('returns the first read of every field as own data', () => {
+    const { command } = drifting(DRIFTING_LIMIT);
+    const snapshot = readPlaceOrderCommand(command);
+
+    expect({ ...snapshot }).toStrictEqual({
+      sessionId: 'session-1',
+      idempotencyKey: 'snapshot-key',
+      market: 'US',
+      symbol: 'AAPL',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '3',
+      limitPrice: '190.25',
+    });
+
+    for (const field of Object.keys(DRIFTING_LIMIT)) {
+      expect(Object.hasOwn(snapshot, field), field).toBe(true);
+    }
+  });
+
+  // The read-once property every other guarantee on this boundary rests on.
+  // It also defends the shared `projectOptionalField` call: an inline
+  // `x === undefined ? {} : { x }` reads the field twice.
+  it('reads every command field exactly once', () => {
+    const { command, reads } = drifting(DRIFTING_LIMIT);
+
+    readPlaceOrderCommand(command);
+
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      market: 1,
+      symbol: 1,
+      side: 1,
+      type: 1,
+      quantity: 1,
+      limitPrice: 1,
+    });
+  });
+
+  it('validates the snapshot rather than the caller object', () => {
+    const { command } = drifting({
+      ...DRIFTING_LIMIT,
+      limitPrice: ['not-a-number', '190.25'],
+    });
+
+    expect(attempt(() => readPlaceOrderCommand(command))).toBe('INVALID_PRICE');
+  });
+
+  it('rejects a non-object before reading anything', () => {
+    expect(attempt(() => readPlaceOrderCommand(null))).toBe('INVALID_ORDER');
+  });
+});
+
+describe('readCancelOrderCommand', () => {
+  it('snapshots each identifier once', () => {
+    const { command, reads } = drifting({
+      sessionId: ['session-1'],
+      idempotencyKey: ['cancel-key', 'other-key\n'],
+      orderId: ['order-1', 'x/../../admin'],
+    });
+
+    expect({ ...readCancelOrderCommand(command) }).toStrictEqual({
+      sessionId: 'session-1',
+      idempotencyKey: 'cancel-key',
+      orderId: 'order-1',
+    });
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      orderId: 1,
+    });
+  });
+
+  it('rejects a non-object as a domain error', () => {
+    expect(attempt(() => readCancelOrderCommand(null))).toBe('INVALID_ORDER');
+  });
+});
+
+describe('readExchangeCommand', () => {
+  it('snapshots each identifier once', () => {
+    const { command, reads } = drifting({
+      sessionId: ['session-1', 'session-other'],
+      idempotencyKey: ['exchange-key', 'other-key\n'],
+      quoteId: ['quote-1', 'quote-other'],
+    });
+
+    expect({ ...readExchangeCommand(command) }).toStrictEqual({
+      sessionId: 'session-1',
+      idempotencyKey: 'exchange-key',
+      quoteId: 'quote-1',
+    });
+    expect(reads).toStrictEqual({
+      sessionId: 1,
+      idempotencyKey: 1,
+      quoteId: 1,
+    });
+  });
+
+  it('names the command with the article its description needs', () => {
+    let message: string | undefined;
+
+    try {
+      readExchangeCommand(null);
+    } catch (error) {
+      message = (error as DomainError).message;
+    }
+
+    expect(message).toBe('an exchange command must be an object');
   });
 });
 
