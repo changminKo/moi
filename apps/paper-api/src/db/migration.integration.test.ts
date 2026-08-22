@@ -10,6 +10,7 @@ import { ensureAuditPartitions, migrateToLatest } from './migrate.js';
 
 const CONTAINER_TIMEOUT_MS = 300_000;
 const TEST_TIMEOUT_MS = 60_000;
+const IDLE_ERROR_WAIT_MS = 250;
 
 const UNIQUE_VIOLATION = '23505';
 const FOREIGN_KEY_VIOLATION = '23503';
@@ -37,6 +38,25 @@ const LEDGER_TABLES = [
   'safety_incidents',
   'wallets',
   'whitelist_entries',
+  'whitelist_versions',
+];
+
+// Every table whose rows are updated in place carries `version` for optimistic
+// locking. The append-only tables (fills, outbox_events, account_sequences,
+// idempotency_requests, whitelist_entries, audit_events, markets) do not.
+const VERSION_TABLES = [
+  'anonymous_sessions',
+  'capacity_counters',
+  'fee_model_versions',
+  'leader_epochs',
+  'market_sessions',
+  'market_states',
+  'oco_groups',
+  'orders',
+  'positions',
+  'reservations',
+  'safety_incidents',
+  'wallets',
   'whitelist_versions',
 ];
 
@@ -105,6 +125,20 @@ async function insertWallet(
   `.execute(db);
 }
 
+async function insertPosition(
+  sessionId: string,
+  symbol: string,
+): Promise<void> {
+  await sql`
+    insert into positions (
+      id, session_id, market_code, symbol,
+      total_quantity, available_quantity, reserved_quantity, average_cost
+    ) values (
+      ${randomUUID()}, ${sessionId}, 'US', ${symbol}, '5', '5', '0', '190'
+    )
+  `.execute(db);
+}
+
 async function insertOcoGroup(sessionId: string): Promise<string> {
   const id = randomUUID();
   await sql`
@@ -156,6 +190,34 @@ async function insertWhitelistVersion(
   return id;
 }
 
+async function insertWhitelistEntry(
+  versionId: string,
+  symbol: string,
+): Promise<string> {
+  const id = randomUUID();
+  await sql`
+    insert into whitelist_entries (
+      id, whitelist_version_id, market_code, symbol
+    ) values (${id}, ${versionId}, 'US', ${symbol})
+  `.execute(db);
+  return id;
+}
+
+async function publishWhitelistVersion(versionId: string): Promise<void> {
+  await sql`
+    update whitelist_versions set status = 'PUBLISHED', published_at = now()
+    where id = ${versionId}
+  `.execute(db);
+}
+
+async function entryCount(versionId: string): Promise<string> {
+  const result = await sql<{ count: string }>`
+    select count(*) as count from whitelist_entries
+    where whitelist_version_id = ${versionId}
+  `.execute(db);
+  return result.rows[0]?.count ?? '0';
+}
+
 async function insertFeeModelVersion(
   versionNumber: number,
   published: boolean,
@@ -194,16 +256,89 @@ async function partitionNames(target: Database): Promise<readonly string[]> {
   return result.rows.map((row) => row.relname);
 }
 
-async function createEmptyDatabase(): Promise<{
+async function createEmptyDatabase(timeZone?: string): Promise<{
   readonly db: Database;
   readonly destroy: () => Promise<void>;
 }> {
   const name = `ledger_${randomUUID().replaceAll('-', '')}`;
   await sql`create database ${sql.id(name)}`.execute(db);
+  if (timeZone !== undefined) {
+    await sql
+      .raw(`alter database "${name}" set "TimeZone" = '${timeZone}'`)
+      .execute(db);
+  }
   const uri = new URL(container.getConnectionUri());
   uri.pathname = `/${name}`;
   const fresh = createDatabase(uri.toString());
   return { db: fresh, destroy: () => fresh.destroy() };
+}
+
+async function partitionBounds(
+  target: Database,
+): Promise<ReadonlyArray<readonly [string, string]>> {
+  return await target.transaction().execute(async (trx) => {
+    await sql`set local time zone 'UTC'`.execute(trx);
+    const result = await sql<{ relname: string; bound: string }>`
+      select child.relname, pg_get_expr(child.relpartbound, child.oid) as bound
+      from pg_inherits
+      join pg_class as parent on parent.oid = pg_inherits.inhparent
+      join pg_class as child on child.oid = pg_inherits.inhrelid
+      where parent.relname = 'audit_events'
+      order by child.relname
+    `.execute(trx);
+    return result.rows.map((row) => [row.relname, row.bound] as const);
+  });
+}
+
+async function ensurePartitionUnderTimeZone(
+  target: Database,
+  timeZone: string,
+  month: string,
+): Promise<string> {
+  return await target.transaction().execute(async (trx) => {
+    await sql.raw(`set local time zone '${timeZone}'`).execute(trx);
+    const result = await sql<{ name: string }>`
+      select ensure_audit_partition(${month}::date) as name
+    `.execute(trx);
+    return result.rows[0]?.name ?? '';
+  });
+}
+
+async function insertAuditEvent(
+  target: Database,
+  id: string,
+  occurredAt: string,
+): Promise<void> {
+  await sql`
+    insert into audit_events (
+      id, session_reference, event_type, payload, occurred_at
+    ) values (
+      ${id}, ${`pseudonym-${id}`}, 'ORDER_ACCEPTED',
+      ${JSON.stringify({ id })}::jsonb, ${occurredAt}
+    )
+  `.execute(target);
+}
+
+async function partitionIndexSuffixes(
+  target: Database,
+  table: string,
+): Promise<readonly string[]> {
+  const result = await sql<{ indexname: string }>`
+    select indexname from pg_indexes
+    where tablename = ${table} order by indexname
+  `.execute(target);
+  return result.rows.map((row) => row.indexname.replace(`${table}_`, ''));
+}
+
+async function auditPartitionOf(
+  target: Database,
+  id: string,
+): Promise<string | undefined> {
+  const result = await sql<{ partition: string }>`
+    select tableoid::regclass::text as partition
+    from audit_events where id = ${id}
+  `.execute(target);
+  return result.rows[0]?.partition;
 }
 
 function monthPartitionName(date: Date): string {
@@ -226,6 +361,38 @@ afterAll(async () => {
   if (containerStartupMs > 0) {
     console.log(`postgres:17-alpine startup: ${containerStartupMs}ms`);
   }
+});
+
+describe('createDatabase', () => {
+  it(
+    'reports a terminated idle backend instead of crashing the process',
+    async () => {
+      const reported: Error[] = [];
+      const fresh = createDatabase(container.getConnectionUri(), (error) => {
+        reported.push(error);
+      });
+      try {
+        const backend = await sql<{ pid: number }>`
+          select pg_backend_pid() as pid
+        `.execute(fresh);
+        const pid = backend.rows[0]?.pid;
+        expect(typeof pid).toBe('number');
+
+        await sql`select pg_terminate_backend(${pid})`.execute(db);
+        await new Promise((resolve) => setTimeout(resolve, IDLE_ERROR_WAIT_MS));
+
+        expect(reported.map((error) => error.message)).toEqual([
+          'terminating connection due to administrator command',
+        ]);
+
+        const after = await sql<{ ok: number }>`select 1 as ok`.execute(fresh);
+        expect(after.rows[0]?.ok).toBe(1);
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
 });
 
 describe('ledger migration', () => {
@@ -312,19 +479,50 @@ describe('ledger migration', () => {
         expect(found?.data_type, `${table}.${column}`).toBe('numeric');
       }
 
-      const versionColumns = columns.rows.filter(
-        (row) => row.column_name === 'version',
-      );
-      expect(versionColumns.length).toBeGreaterThanOrEqual(10);
-      for (const row of versionColumns) {
-        expect(row.data_type, `${row.table_name}.version`).toBe('bigint');
-      }
-
       const inexact = columns.rows.filter(
         (row) =>
           row.data_type === 'double precision' || row.data_type === 'real',
       );
       expect(inexact).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'gives every optimistically locked table a non-null bigint version',
+    async () => {
+      const result = await sql<{
+        table_name: string;
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>`
+        select table_name, data_type, is_nullable, column_default
+        from information_schema.columns
+        where table_schema = 'public' and column_name = 'version'
+        order by table_name
+      `.execute(db);
+      expect(result.rows).toEqual(
+        VERSION_TABLES.map((table) => ({
+          table_name: table,
+          data_type: 'bigint',
+          is_nullable: 'NO',
+          column_default: '0',
+        })),
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rejects a second position for the same session, market and symbol',
+    async () => {
+      const sessionId = await insertSession();
+      await insertPosition(sessionId, 'AAPL');
+      await expectPostgresError(
+        insertPosition(sessionId, 'AAPL'),
+        UNIQUE_VIOLATION,
+      );
     },
     TEST_TIMEOUT_MS,
   );
@@ -344,6 +542,30 @@ describe('ledger migration', () => {
         select total from wallets where session_id = ${sessionId}
       `.execute(db);
       expect(stored.rows[0]?.total).toBe('12345678901234.123456789');
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+describe('migrateToLatest failure', () => {
+  it(
+    'surfaces a migration failure and leaves no ledger table behind',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await sql`create table markets (code text primary key)`.execute(
+          fresh.db,
+        );
+
+        await expect(migrateToLatest(fresh.db)).rejects.toThrow(/markets/);
+
+        const remaining = (await tableNames(fresh.db)).filter(
+          (name) => name !== 'markets' && !name.startsWith('kysely_migration'),
+        );
+        expect(remaining).toEqual([]);
+      } finally {
+        await fresh.destroy();
+      }
     },
     TEST_TIMEOUT_MS,
   );
@@ -865,6 +1087,130 @@ describe('published version immutability', () => {
   );
 
   it(
+    'refuses to move an entry out of a published whitelist version',
+    async () => {
+      const publishedId = await insertWhitelistVersion(210, false);
+      const draftId = await insertWhitelistVersion(211, false);
+      const entryId = await insertWhitelistEntry(publishedId, 'AAPL');
+      await insertWhitelistEntry(publishedId, 'MSFT');
+      await publishWhitelistVersion(publishedId);
+      expect(await entryCount(publishedId)).toBe('2');
+
+      await expectPostgresError(
+        sql`
+          update whitelist_entries set whitelist_version_id = ${draftId}
+          where id = ${entryId}
+        `.execute(db),
+        RAISE_EXCEPTION,
+      );
+      expect(await entryCount(publishedId)).toBe('2');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to move an entry into a published whitelist version',
+    async () => {
+      const draftId = await insertWhitelistVersion(212, false);
+      const publishedId = await insertWhitelistVersion(213, true);
+      const entryId = await insertWhitelistEntry(draftId, 'AAPL');
+
+      await expectPostgresError(
+        sql`
+          update whitelist_entries set whitelist_version_id = ${publishedId}
+          where id = ${entryId}
+        `.execute(db),
+        RAISE_EXCEPTION,
+      );
+      expect(await entryCount(publishedId)).toBe('0');
+      expect(await entryCount(draftId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to delete an entry of a published whitelist version',
+    async () => {
+      const versionId = await insertWhitelistVersion(214, false);
+      const entryId = await insertWhitelistEntry(versionId, 'AAPL');
+      await publishWhitelistVersion(versionId);
+
+      await expectPostgresError(
+        sql`delete from whitelist_entries where id = ${entryId}`.execute(db),
+        RAISE_EXCEPTION,
+      );
+      expect(await entryCount(versionId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'still allows moving an entry between two draft whitelist versions',
+    async () => {
+      const sourceId = await insertWhitelistVersion(215, false);
+      const targetId = await insertWhitelistVersion(216, false);
+      const entryId = await insertWhitelistEntry(sourceId, 'AAPL');
+
+      await sql`
+        update whitelist_entries set whitelist_version_id = ${targetId}
+        where id = ${entryId}
+      `.execute(db);
+
+      expect(await entryCount(sourceId)).toBe('0');
+      expect(await entryCount(targetId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to truncate whitelist versions while one is published',
+    async () => {
+      const versionId = await insertWhitelistVersion(217, true);
+      await expectPostgresError(
+        sql`truncate whitelist_versions cascade`.execute(db),
+        RAISE_EXCEPTION,
+      );
+      const survivor = await sql<{ count: string }>`
+        select count(*) as count from whitelist_versions where id = ${versionId}
+      `.execute(db);
+      expect(survivor.rows[0]?.count).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to truncate the entries of a published whitelist version',
+    async () => {
+      const versionId = await insertWhitelistVersion(218, false);
+      await insertWhitelistEntry(versionId, 'AAPL');
+      await publishWhitelistVersion(versionId);
+
+      await expectPostgresError(
+        sql`truncate whitelist_entries`.execute(db),
+        RAISE_EXCEPTION,
+      );
+      expect(await entryCount(versionId)).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to truncate fee model versions while one is published',
+    async () => {
+      const versionId = await insertFeeModelVersion(310, true);
+      await expectPostgresError(
+        sql`truncate fee_model_versions cascade`.execute(db),
+        RAISE_EXCEPTION,
+      );
+      const survivor = await sql<{ count: string }>`
+        select count(*) as count from fee_model_versions where id = ${versionId}
+      `.execute(db);
+      expect(survivor.rows[0]?.count).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'still allows publishing a draft fee model version',
     async () => {
       const versionId = await insertFeeModelVersion(302, false);
@@ -1040,6 +1386,306 @@ describe('ensureAuditPartitions', () => {
         expect(await partitionNames(fresh.db)).toEqual([
           'audit_events_default',
           'audit_events_overlap',
+        ]);
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'creates the monthly partition when the default partition already holds it',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        const now = new Date('2026-08-22T04:00:00Z');
+
+        const early = randomUUID();
+        await insertAuditEvent(fresh.db, early, now.toISOString());
+        expect(await auditPartitionOf(fresh.db, early)).toBe(
+          'audit_events_default',
+        );
+
+        expect(await ensureAuditPartitions(fresh.db, now)).toEqual([
+          'audit_events_2026_08',
+          'audit_events_2026_09',
+        ]);
+        expect(await partitionNames(fresh.db)).toEqual([
+          'audit_events_2026_08',
+          'audit_events_2026_09',
+          'audit_events_default',
+        ]);
+        expect(await auditPartitionOf(fresh.db, early)).toBe(
+          'audit_events_2026_08',
+        );
+
+        const stored = await sql<{
+          session_reference: string;
+          payload: { id: string };
+          occurred_at: Date;
+        }>`
+          select session_reference, payload, occurred_at
+          from audit_events where id = ${early}
+        `.execute(fresh.db);
+        expect(stored.rows[0]?.session_reference).toBe(`pseudonym-${early}`);
+        expect(stored.rows[0]?.payload).toEqual({ id: early });
+        expect(stored.rows[0]?.occurred_at.toISOString()).toBe(
+          now.toISOString(),
+        );
+
+        // A partition built by the recovery path has to be as complete as one
+        // built by `create table ... partition of`: same indexes, same primary
+        // key, inherited from the parent.
+        const recovered = await partitionIndexSuffixes(
+          fresh.db,
+          'audit_events_2026_08',
+        );
+        expect(recovered).toEqual([
+          'occurred_at_idx',
+          'order_id_occurred_at_idx',
+          'pkey',
+          'session_reference_occurred_at_idx',
+        ]);
+        expect(recovered).toEqual(
+          await partitionIndexSuffixes(fresh.db, 'audit_events_default'),
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'leaves default rows that belong to no monthly partition where they are',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        const now = new Date('2026-08-22T04:00:00Z');
+        const inMonth = randomUUID();
+        const outOfRange = randomUUID();
+        await insertAuditEvent(fresh.db, inMonth, now.toISOString());
+        await insertAuditEvent(fresh.db, outOfRange, '2019-01-05T00:00:00Z');
+
+        await ensureAuditPartitions(fresh.db, now);
+
+        expect(await auditPartitionOf(fresh.db, inMonth)).toBe(
+          'audit_events_2026_08',
+        );
+        expect(await auditPartitionOf(fresh.db, outOfRange)).toBe(
+          'audit_events_default',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'pins partition bounds to UTC under a non-UTC session time zone',
+    async () => {
+      const fresh = await createEmptyDatabase('Asia/Seoul');
+      try {
+        await migrateToLatest(fresh.db);
+        await ensureAuditPartitions(fresh.db, new Date('2029-05-15T00:00:00Z'));
+
+        expect(await partitionBounds(fresh.db)).toEqual([
+          [
+            'audit_events_2029_05',
+            "FOR VALUES FROM ('2029-05-01 00:00:00+00') TO ('2029-06-01 00:00:00+00')",
+          ],
+          [
+            'audit_events_2029_06',
+            "FOR VALUES FROM ('2029-06-01 00:00:00+00') TO ('2029-07-01 00:00:00+00')",
+          ],
+          ['audit_events_default', 'DEFAULT'],
+        ]);
+
+        const firstInstant = randomUUID();
+        const justBefore = randomUUID();
+        await insertAuditEvent(fresh.db, firstInstant, '2029-05-01T00:00:00Z');
+        await insertAuditEvent(fresh.db, justBefore, '2029-04-30T23:59:59Z');
+        expect(await auditPartitionOf(fresh.db, firstInstant)).toBe(
+          'audit_events_2029_05',
+        );
+        expect(await auditPartitionOf(fresh.db, justBefore)).toBe(
+          'audit_events_default',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'creates contiguous UTC bounds across a year boundary',
+    async () => {
+      const fresh = await createEmptyDatabase('Asia/Seoul');
+      try {
+        await migrateToLatest(fresh.db);
+        await ensureAuditPartitions(fresh.db, new Date('2026-12-31T23:59:59Z'));
+
+        expect(await partitionBounds(fresh.db)).toEqual([
+          [
+            'audit_events_2026_12',
+            "FOR VALUES FROM ('2026-12-01 00:00:00+00') TO ('2027-01-01 00:00:00+00')",
+          ],
+          [
+            'audit_events_2027_01',
+            "FOR VALUES FROM ('2027-01-01 00:00:00+00') TO ('2027-02-01 00:00:00+00')",
+          ],
+          ['audit_events_default', 'DEFAULT'],
+        ]);
+
+        const rollover = randomUUID();
+        await insertAuditEvent(fresh.db, rollover, '2027-01-01T00:00:00Z');
+        expect(await auditPartitionOf(fresh.db, rollover)).toBe(
+          'audit_events_2027_01',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'creates contiguous UTC bounds for a leap-day month',
+    async () => {
+      const fresh = await createEmptyDatabase('Asia/Seoul');
+      try {
+        await migrateToLatest(fresh.db);
+        await ensureAuditPartitions(fresh.db, new Date('2028-02-29T12:00:00Z'));
+
+        expect(await partitionBounds(fresh.db)).toEqual([
+          [
+            'audit_events_2028_02',
+            "FOR VALUES FROM ('2028-02-01 00:00:00+00') TO ('2028-03-01 00:00:00+00')",
+          ],
+          [
+            'audit_events_2028_03',
+            "FOR VALUES FROM ('2028-03-01 00:00:00+00') TO ('2028-04-01 00:00:00+00')",
+          ],
+          ['audit_events_default', 'DEFAULT'],
+        ]);
+
+        const leapDay = randomUUID();
+        await insertAuditEvent(fresh.db, leapDay, '2028-02-29T23:59:59Z');
+        expect(await auditPartitionOf(fresh.db, leapDay)).toBe(
+          'audit_events_2028_02',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps months contiguous when the session time zone changes between calls',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        expect(
+          await ensurePartitionUnderTimeZone(
+            fresh.db,
+            'Asia/Seoul',
+            '2030-01-01',
+          ),
+        ).toBe('audit_events_2030_01');
+        expect(
+          await ensurePartitionUnderTimeZone(fresh.db, 'UTC', '2030-02-01'),
+        ).toBe('audit_events_2030_02');
+        expect(
+          await ensurePartitionUnderTimeZone(
+            fresh.db,
+            'America/New_York',
+            '2030-03-01',
+          ),
+        ).toBe('audit_events_2030_03');
+
+        expect(await partitionBounds(fresh.db)).toEqual([
+          [
+            'audit_events_2030_01',
+            "FOR VALUES FROM ('2030-01-01 00:00:00+00') TO ('2030-02-01 00:00:00+00')",
+          ],
+          [
+            'audit_events_2030_02',
+            "FOR VALUES FROM ('2030-02-01 00:00:00+00') TO ('2030-03-01 00:00:00+00')",
+          ],
+          [
+            'audit_events_2030_03',
+            "FOR VALUES FROM ('2030-03-01 00:00:00+00') TO ('2030-04-01 00:00:00+00')",
+          ],
+          ['audit_events_default', 'DEFAULT'],
+        ]);
+
+        const februaryFirst = randomUUID();
+        const marchFirst = randomUUID();
+        await insertAuditEvent(fresh.db, februaryFirst, '2030-02-01T00:00:00Z');
+        await insertAuditEvent(fresh.db, marchFirst, '2030-03-01T00:00:00Z');
+        expect(await auditPartitionOf(fresh.db, februaryFirst)).toBe(
+          'audit_events_2030_02',
+        );
+        expect(await auditPartitionOf(fresh.db, marchFirst)).toBe(
+          'audit_events_2030_03',
+        );
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'serialises two concurrent maintenance calls on separate connections',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        const now = new Date('2026-08-22T04:00:00Z');
+        const expected = ['audit_events_2026_08', 'audit_events_2026_09'];
+
+        // Both calls take ACCESS EXCLUSIVE on audit_events in the same order,
+        // so the loser waits and then observes the partitions the winner
+        // created instead of deadlocking or failing.
+        const [first, second] = await Promise.all([
+          ensureAuditPartitions(fresh.db, now),
+          ensureAuditPartitions(fresh.db, now),
+        ]);
+        expect(first).toEqual(expected);
+        expect(second).toEqual(expected);
+        expect(await partitionNames(fresh.db)).toEqual([
+          ...expected,
+          'audit_events_default',
+        ]);
+      } finally {
+        await fresh.destroy();
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses to treat a squatted table name as an existing partition',
+    async () => {
+      const fresh = await createEmptyDatabase();
+      try {
+        await migrateToLatest(fresh.db);
+        await sql`create table audit_events_2029_03 (x int)`.execute(fresh.db);
+
+        await expect(
+          ensureAuditPartitions(fresh.db, new Date('2029-03-15T00:00:00Z')),
+        ).rejects.toThrow(/audit_events_2029_03/);
+
+        expect(await partitionNames(fresh.db)).toEqual([
+          'audit_events_default',
         ]);
       } finally {
         await fresh.destroy();

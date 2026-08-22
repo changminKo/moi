@@ -31,6 +31,11 @@ create table wallets (
   id uuid primary key,
   session_id uuid not null references anonymous_sessions(id) on delete cascade,
   currency text not null check (currency in ('KRW', 'USD')),
+  -- `total >= 0` is implied by the composition check below plus the two
+  -- component floors, and is kept deliberately: it states the invariant at the
+  -- column, and it survives on its own if a later migration ever adds a third
+  -- component bucket and relaxes the composition check. Being redundant, it
+  -- cannot be violated in isolation, so it has no isolating negative test.
   total numeric not null check (total >= 0),
   available numeric not null check (available >= 0),
   reserved numeric not null check (reserved >= 0),
@@ -44,6 +49,7 @@ create table positions (
   session_id uuid not null references anonymous_sessions(id) on delete cascade,
   market_code text not null references markets(code),
   symbol text not null check (length(symbol) > 0),
+  -- Redundant floor, kept for the same reason as wallets.total.
   total_quantity numeric not null check (total_quantity >= 0),
   available_quantity numeric not null check (available_quantity >= 0),
   reserved_quantity numeric not null check (reserved_quantity >= 0),
@@ -305,23 +311,36 @@ create trigger fee_model_versions_published_is_immutable
   before update or delete on fee_model_versions
   for each row execute function reject_published_version_change();
 
+-- An entry's membership belongs to its version, so BOTH parents of a row
+-- change matter: reparenting an entry away from a published version removes it
+-- from that version's operational record just as surely as reparenting one into
+-- a published version adds to it. Checking only NEW would leave the move-out
+-- direction open.
+--
+-- fee_model_versions needs no counterpart: it owns no child table, so nothing
+-- can be reparented out of a published fee model. Its only inbound reference is
+-- orders.fee_model_version_id, and which fee model an order used is a property
+-- of the order, not part of the version's definition.
 create function reject_published_whitelist_entry_change() returns trigger
 language plpgsql as $$
 declare
-  target_version uuid;
-  target_status text;
+  old_version uuid;
+  new_version uuid;
+  published_parents bigint;
 begin
-  if tg_op = 'DELETE' then
-    target_version := old.whitelist_version_id;
-  else
-    target_version := new.whitelist_version_id;
+  if tg_op <> 'INSERT' then
+    old_version := old.whitelist_version_id;
+  end if;
+  if tg_op <> 'DELETE' then
+    new_version := new.whitelist_version_id;
   end if;
 
-  select status into target_status
+  select count(*) into published_parents
   from whitelist_versions
-  where id = target_version;
+  where status = 'PUBLISHED'
+    and (id = old_version or id = new_version);
 
-  if target_status = 'PUBLISHED' then
+  if published_parents > 0 then
     raise exception 'entries of a published whitelist version are immutable';
   end if;
 
@@ -335,6 +354,56 @@ $$;
 create trigger whitelist_entries_published_is_immutable
   before insert or update or delete on whitelist_entries
   for each row execute function reject_published_whitelist_entry_change();
+
+-- Row triggers are DML-only, so TRUNCATE would otherwise erase a published
+-- version and its entries without ever consulting the rules above. Statement
+-- triggers close that path; TRUNCATE stays available while nothing is
+-- published, which is what a draft-only environment needs.
+create function reject_truncate_of_published_versions() returns trigger
+language plpgsql as $$
+declare
+  has_published boolean;
+begin
+  execute format(
+    'select exists (select 1 from %I where status = %L)',
+    tg_table_name,
+    'PUBLISHED'
+  ) into has_published;
+  if has_published then
+    raise exception 'published % rows are immutable', tg_table_name;
+  end if;
+  return null;
+end;
+$$;
+
+create function reject_truncate_of_published_whitelist_entries()
+  returns trigger language plpgsql as $$
+begin
+  if exists (
+    select 1
+    from whitelist_entries as entry
+    join whitelist_versions as version
+      on version.id = entry.whitelist_version_id
+    where version.status = 'PUBLISHED'
+  ) then
+    raise exception 'entries of a published whitelist version are immutable';
+  end if;
+  return null;
+end;
+$$;
+
+create trigger whitelist_versions_published_survives_truncate
+  before truncate on whitelist_versions
+  for each statement execute function reject_truncate_of_published_versions();
+
+create trigger fee_model_versions_published_survives_truncate
+  before truncate on fee_model_versions
+  for each statement execute function reject_truncate_of_published_versions();
+
+create trigger whitelist_entries_published_survives_truncate
+  before truncate on whitelist_entries
+  for each statement
+  execute function reject_truncate_of_published_whitelist_entries();
 
 -- Audit history outlives the session it describes, so it stores a pseudonymous
 -- session reference and deliberately carries no foreign key to
