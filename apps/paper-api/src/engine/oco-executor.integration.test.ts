@@ -7,8 +7,13 @@ describe('OcoExecutor', () => {
     const executor = new OcoExecutor({
       groups: new Map([['g', { legs: ['stop', 'take'], status: 'ACTIVE' }]]),
       acquireParent: async () => undefined,
-      execute: async ({ legId, siblingId }) => { effects.push(`win:${legId}`); effects.push(`cancel:${siblingId}`); },
-      onReservationRelease: async () => { effects.push('release'); },
+      execute: async ({ legId, siblingId }) => {
+        effects.push(`win:${legId}`);
+        effects.push(`cancel:${siblingId}`);
+      },
+      onReservationRelease: async () => {
+        effects.push('release');
+      },
     });
     await Promise.allSettled([
       executor.trigger('g', 'stop', { source: 'WEBSOCKET' }),
@@ -25,9 +30,15 @@ describe('OcoExecutor', () => {
     const executor = new OcoExecutor({
       groups: new Map([['g', { legs: ['stop', 'take'], status: 'ACTIVE' }]]),
       acquireParent: async () => undefined,
-      execute: async ({ legId }) => { winners.push(legId); },
+      execute: async ({ legId }) => {
+        winners.push(legId);
+      },
     });
-    await executor.trigger('g', 'take', { source: 'RECOVERY_REST', bothConditionsTrue: true, stopLegId: 'stop' });
+    await executor.trigger('g', 'take', {
+      source: 'RECOVERY_REST',
+      bothConditionsTrue: true,
+      stopLegId: 'stop',
+    });
     expect(winners).toEqual(['stop']);
   });
 });

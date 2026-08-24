@@ -32,11 +32,22 @@ export class MarketStateStore<T = unknown> {
     this.#token = options.leaderFencingToken ?? 0n;
   }
 
-  get recoveryEpoch(): bigint { return this.#epoch; }
-  get leaderFencingToken(): bigint { return this.#token; }
-  get currentVersion(): bigint { return this.#version; }
+  get recoveryEpoch(): bigint {
+    return this.#epoch;
+  }
+  get leaderFencingToken(): bigint {
+    return this.#token;
+  }
+  get currentVersion(): bigint {
+    return this.#version;
+  }
 
-  beginEpoch(epoch?: bigint | { readonly recoveryEpoch: bigint; readonly leaderFencingToken: bigint }, token?: bigint): { recoveryEpoch: bigint; leaderFencingToken: bigint } {
+  beginEpoch(
+    epoch?:
+      | bigint
+      | { readonly recoveryEpoch: bigint; readonly leaderFencingToken: bigint },
+    token?: bigint,
+  ): { recoveryEpoch: bigint; leaderFencingToken: bigint } {
     if (typeof epoch === 'object') {
       this.#epoch = epoch.recoveryEpoch;
       this.#token = epoch.leaderFencingToken;
@@ -52,32 +63,60 @@ export class MarketStateStore<T = unknown> {
   applyEvent(event: MarketStateEvent<T>): MarketEnvelope<T> {
     this.#assertOwner(event.recoveryEpoch, event.leaderFencingToken);
     const sequence = event.version ?? event.marketDataVersion;
-    if (sequence === undefined) throw new DomainError('INVARIANT_VIOLATION', 'market event has no symbol version');
+    if (sequence === undefined)
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'market event has no symbol version',
+      );
     const previous = this.#symbols.get(event.symbol);
     if (previous !== undefined && sequence <= previous.version) {
-      throw new DomainError('ORDER_STATE_CONFLICT', `out-of-order market event for ${event.symbol}`);
+      throw new DomainError(
+        'ORDER_STATE_CONFLICT',
+        `out-of-order market event for ${event.symbol}`,
+      );
     }
     this.#version += 1n;
-    this.#symbols.set(event.symbol, { version: sequence, payload: event.payload });
+    this.#symbols.set(event.symbol, {
+      version: sequence,
+      payload: event.payload,
+    });
     return this.envelope(event.payload);
   }
 
-  replaceBaseline(symbol: string, payload: T, epoch = this.#epoch, token = this.#token): MarketEnvelope<T> {
+  replaceBaseline(
+    symbol: string,
+    payload: T,
+    epoch = this.#epoch,
+    token = this.#token,
+  ): MarketEnvelope<T> {
     this.#assertOwner(epoch, token);
     this.#version += 1n;
     this.#symbols.set(symbol, { version: this.#version, payload });
     return this.envelope(payload);
   }
 
-  get(symbol: string): T | undefined { return this.#symbols.get(symbol)?.payload; }
+  get(symbol: string): T | undefined {
+    return this.#symbols.get(symbol)?.payload;
+  }
 
   private envelope(payload: T): MarketEnvelope<T> {
-    return { recoveryEpoch: this.#epoch, leaderFencingToken: this.#token, marketDataVersion: this.#version, payload };
+    return {
+      recoveryEpoch: this.#epoch,
+      leaderFencingToken: this.#token,
+      marketDataVersion: this.#version,
+      payload,
+    };
   }
 
   #assertOwner(epoch?: bigint, token?: bigint): void {
-    if ((epoch ?? this.#epoch) !== this.#epoch || (token ?? this.#token) !== this.#token) {
-      throw new DomainError('ORDER_STATE_CONFLICT', 'stale market epoch or fencing token');
+    if (
+      (epoch ?? this.#epoch) !== this.#epoch ||
+      (token ?? this.#token) !== this.#token
+    ) {
+      throw new DomainError(
+        'ORDER_STATE_CONFLICT',
+        'stale market epoch or fencing token',
+      );
     }
   }
 }

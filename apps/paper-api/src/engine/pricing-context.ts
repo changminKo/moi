@@ -22,20 +22,28 @@ export function createPricingContext(input: PricingContext): PricingContext {
     symbol: input.book.symbol,
     market: input.book.market,
     currency: input.book.currency,
-    bids: input.book.bids.map((level) => snapshotInput({ price: level.price, volume: level.volume })),
-    asks: input.book.asks.map((level) => snapshotInput({ price: level.price, volume: level.volume })),
+    bids: input.book.bids.map((level) =>
+      snapshotInput({ price: level.price, volume: level.volume }),
+    ),
+    asks: input.book.asks.map((level) =>
+      snapshotInput({ price: level.price, volume: level.volume }),
+    ),
   });
-  return Object.freeze(snapshotInput({
-    source: input.source,
-    recoveryEpoch: input.recoveryEpoch,
-    marketDataVersion: input.marketDataVersion,
-    leaderFencingToken: input.leaderFencingToken,
-    referencePrice: input.referencePrice,
-    referenceTimestamp: input.referenceTimestamp,
-    book,
-    pricingModelVersion: input.pricingModelVersion,
-    feeModelVersion: input.feeModelVersion,
-    recoveryFill: input.recoveryFill ?? false,
-    ...(input.incidentId === undefined ? {} : { incidentId: input.incidentId }),
-  }));
+  return Object.freeze(
+    snapshotInput({
+      source: input.source,
+      recoveryEpoch: input.recoveryEpoch,
+      marketDataVersion: input.marketDataVersion,
+      leaderFencingToken: input.leaderFencingToken,
+      referencePrice: input.referencePrice,
+      referenceTimestamp: input.referenceTimestamp,
+      book,
+      pricingModelVersion: input.pricingModelVersion,
+      feeModelVersion: input.feeModelVersion,
+      recoveryFill: input.recoveryFill ?? false,
+      ...(input.incidentId === undefined
+        ? {}
+        : { incidentId: input.incidentId }),
+    }),
+  );
 }

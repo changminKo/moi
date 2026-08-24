@@ -1,8 +1,8 @@
 import {
   calculateExecution,
+  type ExecutionOrder,
   type ExecutionResult,
   type FeeModel,
-  type ExecutionOrder,
   type OrderBookSnapshot,
   type OrderStatus,
   type Quantity,
@@ -34,13 +34,17 @@ export function matchOrder(
     referenceMid: pricing.referencePrice,
     maxDeviationBps,
   });
-  const filled = BigInt(order.filledQuantity ?? '0') + BigInt(execution.filledQuantity);
+  const filled =
+    BigInt(order.filledQuantity ?? '0') + BigInt(execution.filledQuantity);
   const total = BigInt(order.quantity);
-  const nextStatus = filled >= total
-    ? 'FILLED'
-    : execution.terminalReason === 'IOC_REMAINDER'
-      ? 'CANCELLED'
-      : execution.filledQuantity === '0' ? 'OPEN' : 'PARTIALLY_FILLED';
+  const nextStatus =
+    filled >= total
+      ? 'FILLED'
+      : execution.terminalReason === 'IOC_REMAINDER'
+        ? 'CANCELLED'
+        : execution.filledQuantity === '0'
+          ? 'OPEN'
+          : 'PARTIALLY_FILLED';
   return { order, execution, nextStatus, filledQuantity: filled.toString() };
 }
 
