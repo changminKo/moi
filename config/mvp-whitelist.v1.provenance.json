@@ -1,0 +1,10 @@
+{
+  "version": "mvp-whitelist.v1",
+  "author": "changminKo <rhckdals123@gmail.com>",
+  "provider": "Toss REST instrument catalog",
+  "snapshotRetrievedAt": "2026-08-22T00:00:00.000Z",
+  "sourceResponseSha256": "offline-sanitized-snapshot-pinned-in-repository",
+  "normalizedProviderIdentifiers": "market/symbol identifiers normalized from the dated catalog snapshot",
+  "validation": { "result": "validated", "count": 80, "liveCiCalls": false },
+  "note": "Credentials and raw provider response are intentionally excluded; CI must not call Toss."
+}
