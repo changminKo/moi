@@ -89,17 +89,25 @@ async function readRequest(
  * means the holder is an uncommitted concurrent request, which is reported as
  * IN_PROGRESS — the one answer that is true whichever way that request ends.
  *
- * The insert takes no lock on its own invisible new row, but its foreign key
- * pins the session row `for key share`, so that lock is declared. The conflict
- * path can also wait on a concurrent inserter of the same key, and that is a
- * wait on a transaction id rather than on a row: nothing about the session row
- * prevents it, because two concurrent requests carrying one key both pin the
- * session `for key share` and two shared holders do not serialise with one
- * another. So the index entry is declared as a claim, at the rank of
- * `idempotency_requests` itself, and the ordering discipline covers the wait.
- * That is what makes this the second lock a mutation takes rather than the
+ * The insert takes no lock on its own invisible new row, but it does take two
+ * that can wait. The conflict path waits on a concurrent inserter of the same
+ * key, and that is a wait on a transaction id rather than on a row: nothing
+ * about the session row prevents it, because two concurrent requests carrying
+ * one key both pin the session `for key share` and two shared holders do not
+ * serialise with one another. So the index entry is declared as a claim, at the
+ * rank of `idempotency_requests` itself, and the ordering discipline covers the
+ * wait. That is what makes this the second lock a mutation takes rather than the
  * last: a transaction that claimed the key and then waits for a wallet is in
  * order, and one that holds a wallet and then claims a key is refused.
+ *
+ * The claim is declared before the session pin because that is the order
+ * PostgreSQL takes them in: the speculative index entry is written while the
+ * statement runs and the foreign-key check is an AFTER ROW trigger of it. A
+ * rank-0 pin after a rank-1 claim is a descent no ranking can absorb, so the
+ * guard refuses it unless the session row is already held — which makes the pin
+ * acquire nothing, and therefore unable to wait. Claiming a key without pinning
+ * the session first deadlocked two guard-clean transactions on this index; it is
+ * now inexpressible.
  */
 export async function beginIdempotentRequest(
   connection: LedgerConnection,
@@ -110,15 +118,15 @@ export async function beginIdempotentRequest(
     key: input.key,
     requestHash: input.requestHash,
   });
-  connection.acquireLock({
-    table: 'anonymous_sessions',
-    key: request.sessionId,
-    strength: 'KEY_SHARE',
-  });
   connection.claimUniqueKey({
     table: 'idempotency_requests',
     key: compositeLockKey(request.sessionId, request.key),
     index: 'idempotency_requests_session_id_idempotency_key_key',
+  });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: request.sessionId,
+    strength: 'KEY_SHARE',
   });
 
   const claim = await sql<{ id: string }>`

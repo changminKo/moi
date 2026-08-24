@@ -25,14 +25,25 @@ export interface OutboxRepository {
  * and `event_id` are unique in the schema, so a duplicate publish is refused by
  * PostgreSQL rather than by a check the application could forget.
  *
- * The table is append-only and nothing ever locks a row in it, but the insert's
- * foreign key still takes a `for key share` lock on the session row, so that
- * lock is declared — and `(session_id, stream_sequence)` is a key two concurrent
- * requests for one session can legitimately compute, so the index entry is
- * claimed too. Without that claim a transaction holding a wallet could wait on
- * another transaction's uncommitted event while that one waits for the wallet:
- * a wait on a transaction id, which no row-lock order can see. The sequence is
- * rendered zero-padded so the claim keys of one session sort numerically.
+ * The table is append-only and nothing ever locks a row in it, but the insert
+ * still takes two locks that can wait, and it takes them in this order:
+ * `(session_id, stream_sequence)` is a key two concurrent requests for one
+ * session can legitimately compute, so the index entry is claimed — and
+ * PostgreSQL writes that entry *before* the foreign-key check pins the session
+ * row, because the check is an AFTER ROW trigger of the same statement. Without
+ * the claim a transaction holding a wallet could wait on another transaction's
+ * uncommitted event while that one waits for the wallet: a wait on a transaction
+ * id, which no row-lock order can see. The sequence is rendered zero-padded so
+ * the claim keys of one session sort numerically.
+ *
+ * The session pin is declared after the claim, which is where PostgreSQL takes
+ * it, and that is why it may only be a re-declaration: a rank-0 lock acquired
+ * after a rank-6 claim is a descent no order can absorb, so the guard refuses it
+ * unless the caller already holds the session row. `for key share` from an
+ * earlier insert is enough — the rule is that the pin acquires nothing and
+ * therefore cannot wait, not that the row is held strongly. Appending without
+ * pinning the session first was the shape that deadlocked two guard-clean
+ * transactions on this very index.
  *
  * `event_id` is a fresh uuid per event, so two concurrent requests never
  * compute the same one and it needs no claim (see LEDGER_UNIQUE_INDEXES).
@@ -49,11 +60,6 @@ export async function appendOutboxEvent(
     eventType: input.eventType,
     payload: toJsonText(input.payload, 'the outbox payload'),
   });
-  connection.acquireLock({
-    table: 'anonymous_sessions',
-    key: event.sessionId,
-    strength: 'KEY_SHARE',
-  });
   connection.claimUniqueKey({
     table: 'outbox_events',
     key: compositeLockKey(
@@ -61,6 +67,11 @@ export async function appendOutboxEvent(
       sequenceLockKey(event.streamSequence),
     ),
     index: 'outbox_events_session_id_stream_sequence_key',
+  });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: event.sessionId,
+    strength: 'KEY_SHARE',
   });
 
   await sql`

@@ -35,6 +35,7 @@ import * as unitOfWorkModule from './unit-of-work.js';
 import {
   commitTradingMutation,
   type TradingMutationInput,
+  type TradingMutationResult,
   type TradingTransaction,
   UnitOfWork,
   UnknownCommitOutcomeError,
@@ -465,6 +466,9 @@ describe('UnitOfWork.run transaction boundary', () => {
 
     await expect(
       unitOfWork.run(async (tx) => {
+        // A claiming statement pins the session after it writes its entry, so
+        // the session has to be held before it runs.
+        await tx.sessions.lock(sessionId);
         await tx.idempotency.begin({
           sessionId,
           key: 'key-1',
@@ -635,6 +639,69 @@ describe('row locking', () => {
       positions: [],
     });
   });
+
+  it(
+    'keeps total = available + reserved across twenty concurrent rounds',
+    async () => {
+      const sessionId = await insertSession();
+      const walletId = await insertWallet(sessionId, 'KRW', '1000');
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+      let succeeded = 0;
+
+      for (let round = 0; round < 20; round += 1) {
+        const settled = await Promise.allSettled(
+          Array.from({ length: 4 }, () =>
+            unitOfWork.run(async (tx) => {
+              const wallet = await tx.accounts.lockWallet({
+                sessionId,
+                currency: 'KRW',
+              });
+              if (wallet === undefined) {
+                throw new Error('the wallet disappeared');
+              }
+              await tx.accounts.reserveCash({ wallet, amount: '10' });
+            }),
+          ),
+        );
+        succeeded += settled.filter(
+          (outcome) => outcome.status === 'fulfilled',
+        ).length;
+
+        // Checked after every round, not only at the end: a round that broke
+        // the identity and a later one that restored it would both be hidden by
+        // a single final assertion.
+        const wallet = await readWallet(walletId);
+        expect(BigInt(wallet.total)).toBe(
+          BigInt(wallet.available) + BigInt(wallet.reserved),
+        );
+        assertAccountInvariants({
+          wallets: [
+            {
+              currency: 'KRW',
+              total: wallet.total,
+              available: wallet.available,
+              reserved: wallet.reserved,
+              version: BigInt(wallet.version),
+            },
+          ],
+          positions: [],
+        });
+      }
+
+      // Every one of the eighty reservations is serialised by the row lock, so
+      // every one of them commits.
+      expect(succeeded).toBe(80);
+      const wallet = await readWallet(walletId);
+      expect([wallet.total, wallet.available, wallet.reserved]).toEqual([
+        '1000',
+        '200',
+        '800',
+      ]);
+      expect(backoff.attempts).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
 
   it('documents one global lock order and rejects any inversion of it', async () => {
     expect(LEDGER_LOCK_ORDER).toEqual([
@@ -1080,6 +1147,54 @@ describe('commitTradingMutation', () => {
     expect(wallet.reserved).toBe('200');
   });
 
+  it(
+    'replays one key under eight-way concurrency with exactly one effect',
+    async () => {
+      const sessionId = await insertSession();
+      const walletId = await insertWallet(sessionId, 'KRW', '1000');
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+      // One request, eight times at once. Every one of them locks the session
+      // first, so they serialise on the rank-0 row: one does the work and the
+      // rest find the recorded result rather than an in-progress claim.
+      const input = mutationInput(sessionId);
+
+      const settled = await Promise.allSettled(
+        Array.from({ length: 8 }, () =>
+          commitTradingMutation(unitOfWork, input),
+        ),
+      );
+
+      const results = settled.map((outcome) =>
+        outcome.status === 'fulfilled'
+          ? `replayed=${(outcome.value as TradingMutationResult).replayed}`
+          : settledCode(outcome),
+      );
+      expect(results.filter((result) => result === 'replayed=false')).toEqual([
+        'replayed=false',
+      ]);
+      expect(
+        results.filter((result) => result === 'replayed=true'),
+      ).toHaveLength(7);
+      expect(await countLedgerRows(db)).toEqual({
+        orders: 1,
+        audit: 1,
+        outbox: 1,
+        idempotency: 1,
+        reservations: 0,
+      });
+      // The cash was reserved once, not eight times.
+      const wallet = await readWallet(walletId);
+      expect([wallet.total, wallet.available, wallet.reserved]).toEqual([
+        '1000',
+        '800',
+        '200',
+      ]);
+      expect(backoff.attempts).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it('rejects the same idempotency key with a different request hash', async () => {
     const sessionId = await insertSession();
     await insertWallet(sessionId, 'KRW', '1000');
@@ -1092,6 +1207,37 @@ describe('commitTradingMutation', () => {
         mutationInput(sessionId, { requestHash: 'hash-2' }),
       ),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it('refuses a mutation whose key another writer holds in progress', async () => {
+    const sessionId = await insertSession();
+    await insertWallet(sessionId, 'KRW', '1000');
+    // An abandoned IN_PROGRESS claim committed by another writer. Taking it over
+    // would stamp that writer's record with this request's response and commit
+    // an order under it, so the mutation refuses instead.
+    await insertIdempotencyRow(sessionId, 'in-flight-key');
+    const backoff = recordBackoff();
+    const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+    const error = await commitTradingMutation(
+      unitOfWork,
+      mutationInput(sessionId, {
+        idempotencyKey: 'in-flight-key',
+        requestHash: 'hash-existing',
+      }),
+    ).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(DomainError);
+    expect((error as DomainError).code).toBe('IDEMPOTENCY_CONFLICT');
+    expect((error as DomainError).message).toContain('already in progress');
+    expect(backoff.attempts).toEqual([]);
+    expect(await readIdempotencyStatus(sessionId, 'in-flight-key')).toBe(
+      'IN_PROGRESS',
+    );
+    expect((await countLedgerRows(db)).orders).toBe(0);
   });
 
   it('rolls the whole mutation back when the reservation is refused', async () => {
@@ -1232,11 +1378,16 @@ describe('persistence encapsulation', () => {
 const FIXED_NOW = new Date('2026-08-22T00:00:00.000Z');
 
 /**
- * Every table a repository statement inserts into, updates, or locks.
+ * Every table a repository statement touches — inserts into, updates, locks, or
+ * reaches as a foreign-key parent.
  *
- * The unique-index accounting is scoped to these: a unique index on a table no
- * statement writes cannot be conflicted on, and the audit partitions inherit
- * their parent's classification rather than carrying their own.
+ * The unique-index accounting is scoped to these. `markets` and `fills` are in
+ * the list even though nothing writes them, because an insert does pin a market
+ * row and a fill's parent order: scoping the accounting to the written tables
+ * alone would have made the completeness claim narrower than it reads. The
+ * partitions of `audit_events` are excluded by name, and the test below measures
+ * that their unique indexes enforce the parent's key rather than a key of their
+ * own.
  */
 const LEDGER_TOUCHED_TABLES = Object.freeze([
   'anonymous_sessions',
@@ -1249,6 +1400,8 @@ const LEDGER_TOUCHED_TABLES = Object.freeze([
   'reservations',
   'audit_events',
   'account_sequences',
+  'fills',
+  'markets',
 ] as const);
 
 async function insertIdempotencyRow(
@@ -1730,23 +1883,33 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
       }),
   ],
   'outbox.append': [
-    (tx, fixture) =>
-      tx.outbox.append({
+    // The session pin of a claiming insert is taken after the claim, so it can
+    // only ever be a re-declaration of a row the caller already holds — which is
+    // why every probe of a claiming method locks the session first, exactly as
+    // `commitTradingMutation` does. That leaves the pin's own strength
+    // unmeasured here; `orders.insert#0` and `accounts.recordReservation#0`
+    // measure that an insert's foreign-key pin is `for key share`.
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      return await tx.outbox.append({
         id: randomUUID(),
         eventId: randomUUID(),
         sessionId: fixture.sessionId,
         streamSequence: 2n,
         eventType: 'ORDER_PLACED',
         payload: { probe: 'outbox' },
-      }),
+      });
+    },
   ],
   'idempotency.begin': [
-    (tx, fixture) =>
-      tx.idempotency.begin({
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      return await tx.idempotency.begin({
         sessionId: fixture.sessionId,
         key: 'fresh-key',
         requestHash: 'hash-fresh',
-      }),
+      });
+    },
   ],
   'idempotency.find': [
     (tx, fixture) =>
@@ -1819,8 +1982,21 @@ function lockAccountingMismatch(
   declared: Record<string, LockStrength>,
   observed: Record<string, ObservedLockMode>,
 ): string | undefined {
-  const declaredText = JSON.stringify(declared);
-  const observedText = JSON.stringify(observed);
+  // Rendered key-sorted, because the two maps are built in different orders —
+  // declaration order against `observableRows` order — and a difference in
+  // insertion order is not a difference in what was locked. Comparing the raw
+  // serialisations would have turned an innocuous reordering inside a
+  // repository method into a false mismatch.
+  const render = (
+    accounting: Record<string, LockStrength | ObservedLockMode>,
+  ): string =>
+    JSON.stringify(
+      Object.entries(accounting).sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
+      ),
+    );
+  const declaredText = render(declared);
+  const observedText = render(observed);
   return declaredText === observedText
     ? undefined
     : `declared ${declaredText} observed ${observedText}`;
@@ -1975,6 +2151,13 @@ describe('lock accounting', () => {
     expect(
       lockAccountingMismatch(declared, { 'wallets:s:KRW': 'KEY_SHARE' }),
     ).toBeDefined();
+    // Two rows in the other insertion order are the same accounting.
+    expect(
+      lockAccountingMismatch(
+        { 'anonymous_sessions:s': 'UPDATE', 'wallets:s:KRW': 'UPDATE' },
+        { 'wallets:s:KRW': 'UPDATE', 'anonymous_sessions:s': 'UPDATE' },
+      ),
+    ).toBe(undefined);
   });
 
   it(
@@ -2003,6 +2186,40 @@ describe('lock accounting', () => {
         ]),
       );
       expect(catalog).toEqual(classified);
+
+      // The partitions of audit_events are the one set of unique indexes the
+      // query above excludes by name. They need no classification of their own
+      // only because each enforces the parent's key, which is measured here
+      // rather than assumed.
+      const partitions = await sql<{
+        index_name: string;
+        columns: readonly string[];
+      }>`
+        select
+          index_class.relname as index_name,
+          (
+            select array_agg(attribute.attname::text order by attribute.attnum)
+            from pg_attribute as attribute
+            where attribute.attrelid = source.oid
+              and attribute.attnum = any(index_meta.indkey)
+          ) as columns
+        from pg_class as source
+        join pg_index as index_meta on index_meta.indrelid = source.oid
+        join pg_class as index_class on index_class.oid = index_meta.indexrelid
+        join pg_namespace as space on space.oid = source.relnamespace
+        where index_meta.indisunique
+          and space.nspname = 'public'
+          and source.relname like 'audit_events\\_%'
+      `.execute(db);
+      expect(partitions.rows.length).toBeGreaterThan(0);
+      expect(
+        partitions.rows.filter(
+          (row) => row.columns.join(',') !== 'id,occurred_at',
+        ),
+      ).toEqual([]);
+      expect(LEDGER_UNIQUE_INDEXES.audit_events_pkey?.table).toBe(
+        'audit_events',
+      );
     },
     TEST_TIMEOUT_MS,
   );
@@ -2245,6 +2462,9 @@ const INVERSION_CASES: readonly InversionCase[] = [
   {
     name: 'an outbox append with a lower stream sequence than the last',
     invert: async (tx, fixture) => {
+      // Pinned first, so the refusal below is the sequence inversion rather
+      // than the held-parent rule.
+      await tx.sessions.lock(fixture.sessionId);
       await tx.outbox.append({
         id: randomUUID(),
         eventId: randomUUID(),
@@ -2796,11 +3016,28 @@ describe('a lock upgrade is an ordering event, not an exemption', () => {
 
       const outcome = await raceTransactions(2, async (tx, arrive) => {
         sequence += 1n;
+        // Read before the first await: `sequence` is shared by the fleet, so a
+        // value read after one would be the last member's, not this one's.
+        const streamSequence = sequence;
+        // The claiming append below needs the session pinned already; an insert
+        // pins it `for key share`, which is the shape that then asks to
+        // strengthen it to `for update`.
+        await tx.orders.insert({
+          id: randomUUID(),
+          sessionId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'BUY',
+          limitPrice: '100',
+          quantity: '1',
+          status: 'OPEN',
+        });
         await tx.outbox.append({
           id: randomUUID(),
           eventId: randomUUID(),
           sessionId,
-          streamSequence: sequence,
+          streamSequence,
           eventType: 'ORDER_PLACED',
           payload: { probe: 'upgrade' },
         });
@@ -2859,9 +3096,26 @@ describe('a lock upgrade is an ordering event, not an exemption', () => {
 
       const outcome = await raceTransactions(2, async (tx, arrive) => {
         key += 1;
+        // Read before the first await: `key` is shared by the fleet, so a value
+        // read after one would be the last member's, not this one's.
+        const requestKey = `upgrade-${key}`;
+        // The claim below needs the session pinned already; an insert
+        // pins it `for key share`, which is the shape that then asks to
+        // strengthen it to `for update`.
+        await tx.orders.insert({
+          id: randomUUID(),
+          sessionId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'BUY',
+          limitPrice: '100',
+          quantity: '1',
+          status: 'OPEN',
+        });
         await tx.idempotency.begin({
           sessionId,
-          key: `upgrade-${key}`,
+          key: requestKey,
           requestHash: 'hash-upgrade',
         });
         await arrive();
@@ -2915,11 +3169,28 @@ describe('a lock upgrade is an ordering event, not an exemption', () => {
 
       const outcome = await raceTransactions(6, async (tx, arrive) => {
         sequence += 1n;
+        // Read before the first await: `sequence` is shared by the fleet, so a
+        // value read after one would be the last member's, not this one's.
+        const streamSequence = sequence;
+        // The claiming append below needs the session pinned already; an insert
+        // pins it `for key share`, which is the shape that then asks to
+        // strengthen it to `for update`.
+        await tx.orders.insert({
+          id: randomUUID(),
+          sessionId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'BUY',
+          limitPrice: '100',
+          quantity: '1',
+          status: 'OPEN',
+        });
         await tx.outbox.append({
           id: randomUUID(),
           eventId: randomUUID(),
           sessionId,
-          streamSequence: sequence,
+          streamSequence,
           eventType: 'ORDER_PLACED',
           payload: { probe: 'fleet' },
         });
@@ -2961,6 +3232,20 @@ describe('a unique-index claim is an ordering event too', () => {
       // ascend the table order, so only ordering the claim itself can refuse it.
       const claimantRun = claimantUnitOfWork
         .run(async (tx) => {
+          // Both sides pin the session `for key share` through an insert, which
+          // is what a claiming statement requires and what keeps them
+          // concurrent: two shared holders do not serialise on the row.
+          await tx.orders.insert({
+            id: randomUUID(),
+            sessionId,
+            marketCode: 'US',
+            symbol: 'AAPL',
+            orderType: 'LIMIT',
+            side: 'BUY',
+            limitPrice: '100',
+            quantity: '1',
+            status: 'OPEN',
+          });
           await tx.idempotency.begin({
             sessionId,
             key: 'shared-key',
@@ -3232,6 +3517,42 @@ describe('the unique-key claim guard', () => {
         strength: 'UPDATE',
       }),
     ).toThrow('lock order violation');
+  });
+});
+
+describe('the held-parent rule of a claiming statement', () => {
+  it('names the rule when a foreign-key parent would follow a claim', () => {
+    const guard = createLockOrderGuard();
+
+    guard.claimUniqueKey({
+      table: 'outbox_events',
+      key: compositeLockKey('s', sequenceLockKey(1n)),
+      index: 'outbox_events_session_id_stream_sequence_key',
+    });
+
+    // The generic message would say the parent must not be locked after the
+    // entry, which is true and useless: there is no order that would let it.
+    expect(() =>
+      guard.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'KEY_SHARE',
+      }),
+    ).toThrow('has to be held before the statement runs');
+  });
+
+  it('says nothing about held parents when two rows are simply inverted', () => {
+    const guard = createLockOrderGuard();
+
+    guard.acquireLock({ table: 'wallets', key: 's:KRW', strength: 'UPDATE' });
+
+    expect(() =>
+      guard.acquireLock({
+        table: 'anonymous_sessions',
+        key: 's',
+        strength: 'UPDATE',
+      }),
+    ).not.toThrow('has to be held before the statement runs');
   });
 });
 
@@ -3604,6 +3925,365 @@ describe('the deadlock class this order does not claim', () => {
         select count(*) as total from orders where id = ${reusedOrderId}
       `.execute(db);
       expect(rows.rows[0]?.total).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+/**
+ * The two kinds of wait one `insert` produces, in the order PostgreSQL really
+ * takes them.
+ *
+ * An `insert` writes its index entries while the statement runs and checks its
+ * foreign keys in AFTER ROW triggers that fire when the statement ends. So a
+ * statement that both claims a unique index and pins a foreign-key parent takes
+ * the claim *first* — the opposite of the order those two declarations read in
+ * when the parent's rank is lower. No ranking can fix that: the claim cannot be
+ * ranked below a parent the same statement pins afterwards. What fixes it is
+ * requiring the parent to be held before the statement runs, so the pin
+ * acquires nothing and cannot wait, and declaring the claim in the position
+ * PostgreSQL takes it.
+ */
+describe('a claimed index entry is written before the parent it pins', () => {
+  const appendEventDirectly = async (
+    executor: Database,
+    sessionId: string,
+  ): Promise<void> => {
+    await sql`
+      insert into outbox_events (
+        id, event_id, session_id, stream_sequence, event_type, payload
+      ) values (
+        ${randomUUID()}, ${randomUUID()}, ${sessionId}, 1, 'RAW', '{}'::jsonb
+      )
+    `.execute(executor);
+  };
+
+  const anInsertIsWaiting = async (
+    table: string,
+  ): Promise<true | undefined> => {
+    const result = await sql<{ waiting: string }>`
+      select count(*) as waiting
+      from pg_stat_activity
+      where datname = current_database()
+        and pid <> pg_backend_pid()
+        and wait_event_type = 'Lock'
+        and query ilike ${`%insert into ${table}%`}
+    `.execute(db);
+    return Number(result.rows[0]?.waiting ?? 0) > 0 ? true : undefined;
+  };
+
+  it(
+    'measures the order PostgreSQL really takes the two waits in',
+    async () => {
+      const sessionId = await insertSession();
+      const sessionHeld = gate();
+
+      // Raw SQL on purpose: this measures PostgreSQL, not the repositories, and
+      // the repositories refuse the shape. The claimer writes the (session, 1)
+      // index entry and then blocks on the holder's `for update` of the session
+      // row; the holder then writes the same entry and waits for the claimer's
+      // transaction id. That cycle can only close if the entry really was
+      // written before the pin — had the pin come first, the claimer would have
+      // been waiting before it wrote anything, the holder's insert would have
+      // found no conflicting entry and committed, and the claimer would have
+      // ended on a plain 23505 instead of either of them deadlocking.
+      const claimer = db.transaction().execute(async (trx) => {
+        await sql
+          .raw(`set local deadlock_timeout = '${COMPETITOR_DEADLOCK_TIMEOUT}'`)
+          .execute(trx);
+        await sessionHeld.opened;
+        await appendEventDirectly(trx, sessionId);
+        return 'claimer committed';
+      });
+      claimer.catch(() => undefined);
+
+      const holder = db.transaction().execute(async (trx) => {
+        await sql.raw(`set local deadlock_timeout = '100ms'`).execute(trx);
+        await sql`
+          select 1 from anonymous_sessions where id = ${sessionId} for update
+        `.execute(trx);
+        sessionHeld.open();
+        await waitUntil(async () => anInsertIsWaiting('outbox_events'));
+        await appendEventDirectly(trx, sessionId);
+        return 'holder committed';
+      });
+      holder.catch(() => undefined);
+
+      const [claimerOutcome, holderOutcome] = await Promise.allSettled([
+        claimer,
+        holder,
+      ]);
+
+      expect(claimerOutcome.status).toBe('fulfilled');
+      expect(holderOutcome.status).toBe('rejected');
+      expect((holderOutcome as PromiseRejectedResult).reason).toMatchObject({
+        code: '40P01',
+      });
+      const rows = await sql<{ total: string }>`
+        select count(*) as total
+        from outbox_events where session_id = ${sessionId}
+      `.execute(db);
+      expect(rows.rows[0]?.total).toBe('1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses an outbox append that does not already hold the session row',
+    async () => {
+      const sessionId = await insertSession();
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+      const error = await unitOfWork
+        .run((tx) => outboxFixture(tx, sessionId))
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(DomainError);
+      expect((error as DomainError).code).toBe('INVARIANT_VIOLATION');
+      expect((error as DomainError).message).toContain('lock order');
+      expect((error as DomainError).message).toContain(
+        'has to be held before the statement runs',
+      );
+      expect(backoff.attempts).toEqual([]);
+      expect((await countLedgerRows(db)).outbox).toBe(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses an idempotency claim that does not already hold the session row',
+    async () => {
+      const sessionId = await insertSession();
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+      const error = await unitOfWork
+        .run((tx) =>
+          tx.idempotency.begin({
+            sessionId,
+            key: 'unpinned-key',
+            requestHash: 'hash-unpinned',
+          }),
+        )
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(DomainError);
+      expect((error as DomainError).code).toBe('INVARIANT_VIOLATION');
+      expect((error as DomainError).message).toContain(
+        'has to be held before the statement runs',
+      );
+      expect(backoff.attempts).toEqual([]);
+      expect((await countLedgerRows(db)).idempotency).toBe(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'lets a claim through once an insert has pinned the session shared',
+    async () => {
+      const sessionId = await insertSession();
+      const backoff = recordBackoff();
+      const unitOfWork = new UnitOfWork(db, { backoff: backoff.backoff });
+
+      // `for key share` is all the pin needs to be: the rule is that the parent
+      // is already held, not that it is held strongly.
+      await unitOfWork.run(async (tx) => {
+        await orderFixture(tx, sessionId);
+        await tx.idempotency.begin({
+          sessionId,
+          key: 'pinned-key',
+          requestHash: 'hash-pinned',
+        });
+        await outboxFixture(tx, sessionId);
+      });
+
+      expect(await countLedgerRows(db)).toEqual({
+        orders: 1,
+        audit: 0,
+        outbox: 1,
+        idempotency: 1,
+        reservations: 0,
+      });
+      expect(backoff.attempts).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses the outbox claim race instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      const holder = recordBackoff();
+      const claimer = recordBackoff();
+      const holderUnitOfWork = new UnitOfWork(db, { backoff: holder.backoff });
+      const claimerUnitOfWork = new UnitOfWork(db, {
+        backoff: claimer.backoff,
+      });
+      const sessionHeld = gate();
+      let claimerSettled = false;
+
+      // Lane B's D1, through two ordinary transactions: the holder pins the
+      // session and appends, the claimer appends without pinning anything. Both
+      // ascended the declared order, and the pair deadlocked on the claimed
+      // index — a 40P01 the guard never saw.
+      const holderRun = holderUnitOfWork.run(async (tx) => {
+        await tx.sessions.lock(sessionId);
+        sessionHeld.open();
+        await waitUntil(async () =>
+          claimerSettled || (await anInsertIsWaiting('outbox_events'))
+            ? true
+            : undefined,
+        );
+        await outboxFixture(tx, sessionId);
+        return 'holder committed';
+      });
+      holderRun.catch(() => undefined);
+
+      const claimerRun = claimerUnitOfWork
+        .run(async (tx) => {
+          await sessionHeld.opened;
+          await outboxFixture(tx, sessionId);
+          return 'claimer committed';
+        })
+        .finally(() => {
+          claimerSettled = true;
+        });
+      claimerRun.catch(() => undefined);
+
+      const [holderOutcome, claimerOutcome] = await Promise.allSettled([
+        holderRun,
+        claimerRun,
+      ]);
+
+      expect({
+        holder: settledCode(holderOutcome),
+        claimer: settledCode(claimerOutcome),
+      }).toEqual({
+        holder: 'FULFILLED|holder committed',
+        claimer: 'INVARIANT_VIOLATION|lock order',
+      });
+      expect(holder.attempts).toEqual([]);
+      expect(claimer.attempts).toEqual([]);
+      expect((await countLedgerRows(db)).outbox).toBe(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'refuses the idempotency claim race instead of deadlocking on it',
+    async () => {
+      const sessionId = await insertSession();
+      const holder = recordBackoff();
+      const claimer = recordBackoff();
+      const holderUnitOfWork = new UnitOfWork(db, { backoff: holder.backoff });
+      const claimerUnitOfWork = new UnitOfWork(db, {
+        backoff: claimer.backoff,
+      });
+      const sessionHeld = gate();
+      let claimerSettled = false;
+
+      // Lane B's D2. The holder's prefix is exactly commitTradingMutation's:
+      // `sessions.lock` then `idempotency.begin`.
+      const holderRun = holderUnitOfWork.run(async (tx) => {
+        await tx.sessions.lock(sessionId);
+        sessionHeld.open();
+        await waitUntil(async () =>
+          claimerSettled || (await anInsertIsWaiting('idempotency_requests'))
+            ? true
+            : undefined,
+        );
+        await tx.idempotency.begin({
+          sessionId,
+          key: 'raced-key',
+          requestHash: 'hash-raced',
+        });
+        return 'holder committed';
+      });
+      holderRun.catch(() => undefined);
+
+      const claimerRun = claimerUnitOfWork
+        .run(async (tx) => {
+          await sessionHeld.opened;
+          await tx.idempotency.begin({
+            sessionId,
+            key: 'raced-key',
+            requestHash: 'hash-raced',
+          });
+          return 'claimer committed';
+        })
+        .finally(() => {
+          claimerSettled = true;
+        });
+      claimerRun.catch(() => undefined);
+
+      const [holderOutcome, claimerOutcome] = await Promise.allSettled([
+        holderRun,
+        claimerRun,
+      ]);
+
+      expect({
+        holder: settledCode(holderOutcome),
+        claimer: settledCode(claimerOutcome),
+      }).toEqual({
+        holder: 'FULFILLED|holder committed',
+        claimer: 'INVARIANT_VIOLATION|lock order',
+      });
+      expect(holder.attempts).toEqual([]);
+      expect(claimer.attempts).toEqual([]);
+      expect((await countLedgerRows(db)).idempotency).toBe(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'keeps a whole mutation clean while an unpinned append is refused',
+    async () => {
+      const sessionId = await insertSession();
+      await insertWallet(sessionId, 'KRW', '1000');
+      const competitor = recordBackoff();
+      const mutation = recordBackoff();
+      const competitorUnitOfWork = new UnitOfWork(db, {
+        backoff: competitor.backoff,
+      });
+      const mutationUnitOfWork = new UnitOfWork(db, {
+        backoff: mutation.backoff,
+      });
+
+      // Lane B's D3: the same claimed key from a bare append and from
+      // commitTradingMutation. The mutation cannot be dragged into the cycle
+      // because the bare append can no longer reach the statement that would
+      // close it.
+      const [competitorOutcome, mutationOutcome] = await Promise.allSettled([
+        competitorUnitOfWork.run(async (tx) => {
+          await outboxFixture(tx, sessionId);
+          return 'competitor committed';
+        }),
+        commitTradingMutation(mutationUnitOfWork, mutationInput(sessionId)),
+      ]);
+
+      expect(settledCode(competitorOutcome)).toBe(
+        'INVARIANT_VIOLATION|lock order',
+      );
+      expect(mutationOutcome).toMatchObject({
+        status: 'fulfilled',
+        value: { replayed: false, statusCode: 201 },
+      });
+      expect(competitor.attempts).toEqual([]);
+      expect(mutation.attempts).toEqual([]);
+      expect(await countLedgerRows(db)).toEqual({
+        orders: 1,
+        audit: 1,
+        outbox: 1,
+        idempotency: 1,
+        reservations: 0,
+      });
     },
     TEST_TIMEOUT_MS,
   );

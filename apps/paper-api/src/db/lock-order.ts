@@ -10,7 +10,8 @@ import { DomainError } from '@skipjack/trading-core';
  *
  * What that buys is stated precisely, because a total order on its own does
  * not buy deadlock freedom. PostgreSQL makes a transaction wait in exactly two
- * ways, and both have to be ordered:
+ * ways that any statement in these repositories can produce, and both have to
+ * be ordered:
  *
  *   1. **A row lock.** A set of transactions that always acquires row locks in
  *      one total order, and never *strengthens* a lock it already holds, can
@@ -32,12 +33,28 @@ import { DomainError } from '@skipjack/trading-core';
  *      reads the unique indexes out of PostgreSQL's own catalog and fails if any
  *      index is unclassified, so a new index cannot be added without an answer.
  *
- * The residue is named rather than hidden: the six indexes keyed on a uuid this
- * application generates fresh for every row are classified `FRESH_IDENTITY`,
- * and a collision on one of them means a caller reused an identity. That is a caller defect rather than contention, it cannot be
- * ordered (the two transactions are writing what they believe is the same row),
- * and the deadlock it can produce is absorbed by the retry — which the suite
- * pins, with exactly one effect.
+ * The two kinds are not taken in the order they read in. Inside one statement
+ * PostgreSQL writes the index entries while the statement runs and checks the
+ * foreign keys in AFTER ROW triggers that fire when it ends, so an `insert` that
+ * both claims an index and pins a parent takes **the claim first**. That is not
+ * something a ranking can repair: the claim of a statement cannot be ranked
+ * below a parent the same statement pins afterwards, whichever rank either one
+ * is given. So the rule for such a statement is stronger than ordering — every
+ * foreign-key parent it pins has to be **held already**, which makes the pin
+ * acquire nothing and therefore unable to wait. The claim is declared in the
+ * position PostgreSQL takes it, the pin is declared after it, and the guard
+ * refuses the pin unless the row is already held: a bare `outbox.append` or
+ * `idempotency.begin` on an unpinned session is inexpressible rather than a
+ * deadlock waiting for two concurrent callers. The suite measures that physical
+ * order against PostgreSQL itself rather than asserting it.
+ *
+ * The residue is named rather than hidden: the six indexes keyed on a per-row
+ * identity — a uuid generated here, or one the caller of the repository supplies
+ * for the row it is writing — are classified `FRESH_IDENTITY`, and a collision
+ * on one of them means a caller reused an identity. That is a caller defect
+ * rather than contention, it cannot be ordered (the two transactions are writing
+ * what they believe is the same row), and the deadlock it can produce is
+ * absorbed by the retry — which the suite pins, with exactly one effect.
  *
  * The ranks are ordered from the most coarse-grained row to the most
  * fine-grained: a mutation starts by pinning the session that owns the ledger,
@@ -106,16 +123,28 @@ export const LEDGER_REFERENCE_TABLES = Object.freeze(['markets'] as const);
  *   * `ORDERED_CLAIM` — two concurrent requests can legitimately compute this
  *     key, so the statement that writes it declares the claim through
  *     `claimUniqueKey` and the claim takes its place in `LEDGER_LOCK_ORDER`.
- *   * `FRESH_IDENTITY` — the key is a uuid this application generates for the
- *     row it is inserting. Two concurrent requests never compute the same one;
- *     a collision means a caller reused an identity, which is a defect in the
- *     caller. The resulting deadlock is retried like any other 40P01.
+ *     The declaration goes where PostgreSQL takes it — before the statement's
+ *     foreign-key pins, not after them — which is why every parent of a
+ *     claiming statement has to be held before it runs.
+ *   * `FRESH_IDENTITY` — the key is an identity supplied once per row: a uuid
+ *     generated here for `idempotency_requests`, and for the other five the
+ *     value the caller of the repository supplies for the row it is writing.
+ *     Two concurrent requests never compute the same one; a collision means a
+ *     caller reused an identity, which is a defect in the caller. The resulting
+ *     deadlock is retried like any other 40P01.
  *   * `UNWRITTEN` — no repository statement inserts into the table, and no
  *     repository `update` writes any column of the index, so no index entry is
- *     ever added and no conflict is reachable.
+ *     ever added and no conflict is reachable. `markets` and `fills` are here
+ *     too: a repository never writes either, but an insert reaches both as a
+ *     foreign-key parent, so leaving them out would have narrowed the claim
+ *     below what it says.
  *
  * The suite reads `pg_index` and asserts that this map covers exactly the unique
- * indexes the schema defines on the tables the repositories touch.
+ * indexes the schema defines on every table a repository statement touches,
+ * foreign-key parents included. The partitions of `audit_events` are outside
+ * that set by construction — a partition's unique index enforces the parent's
+ * key rather than a key of its own — and the suite measures that rather than
+ * asserting it.
  */
 export type UniqueIndexArbiter =
   | 'ORDERED_CLAIM'
@@ -154,6 +183,8 @@ export const LEDGER_UNIQUE_INDEXES: Readonly<
   },
   outbox_events_pkey: { table: 'outbox_events', arbiter: 'FRESH_IDENTITY' },
   reservations_pkey: { table: 'reservations', arbiter: 'FRESH_IDENTITY' },
+  fills_pkey: { table: 'fills', arbiter: 'UNWRITTEN' },
+  markets_pkey: { table: 'markets', arbiter: 'UNWRITTEN' },
   account_sequences_pkey: {
     table: 'account_sequences',
     arbiter: 'UNWRITTEN',
@@ -198,6 +229,13 @@ export type ClaimedUniqueIndex =
  * then wait for an order row. Order ids are uuids, so their keys only ever
  * contain `0-9`, `a-f` and `-`; `'o'` sorts above all of those. The suite pins
  * that rather than trusting it.
+ *
+ * What that means for a caller that resolves an OCO pair — cancelling the losing
+ * leg while naming the winner — is that it has to lock *both* legs at `UPDATE`,
+ * in ascending id order, before it updates either: the first winner-naming
+ * update claims the slot, and after that no order row may be locked at all. The
+ * refusal is loud rather than silent, but it is easier to read here than to
+ * discover from the message.
  */
 export function ocoWinnerClaimKey(ocoGroupId: string): string {
   return `oco-winner:${ocoGroupId}`;
@@ -304,6 +342,13 @@ function lockRank(table: string): number {
 interface OrderCursor {
   readonly rank: number;
   readonly key: string;
+  /**
+   * Which channel the resource came from. It changes only the diagnostic: a row
+   * lock that goes backwards past a *claim* is not an inversion the caller can
+   * fix by reordering, because PostgreSQL takes the claim first, so the message
+   * names the rule that does fix it.
+   */
+  readonly kind: 'row' | 'claim';
   readonly description: string;
 }
 
@@ -341,9 +386,13 @@ export function createLockOrderGuard(
       (cursor.rank < last.rank ||
         (cursor.rank === last.rank && cursor.key < last.key))
     ) {
+      const rule =
+        last.kind === 'claim' && cursor.kind === 'row'
+          ? ` — a statement that writes a claimed index entry pins its foreign-key parents after writing it, so ${cursor.description} has to be held before the statement runs`
+          : '';
       throw new DomainError(
         'INVARIANT_VIOLATION',
-        `lock order violation: ${cursor.description} must not be locked after ${last.description}`,
+        `lock order violation: ${cursor.description} must not be locked after ${last.description}${rule}`,
       );
     }
     last = cursor;
@@ -375,6 +424,7 @@ export function createLockOrderGuard(
       refuseIfBackwards({
         rank,
         key: target.key,
+        kind: 'row',
         description: `${target.table} (${target.key})`,
       });
       held.set(identity, target.strength);
@@ -402,6 +452,7 @@ export function createLockOrderGuard(
       refuseIfBackwards({
         rank,
         key: claim.key,
+        kind: 'claim',
         description: `the ${claim.index} entry (${claim.key})`,
       });
       claimed.add(identity);
