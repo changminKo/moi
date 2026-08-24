@@ -24,6 +24,7 @@ import {
   createPricingContext,
   type PricingContext,
 } from './pricing-context.js';
+import type { EmergencyLatch } from '../safety/emergency-latch.js';
 
 export interface TradeEvent {
   readonly price: DecimalString;
@@ -59,6 +60,8 @@ export interface PaperEngineOptions {
   readonly calendar?: SessionCalendar;
   readonly now?: () => Date;
   readonly isGateExclusive?: () => boolean;
+  /** Optional process-local fail-closed interlock supplied by lifecycle wiring. */
+  readonly emergencyLatch?: EmergencyLatch;
   readonly currentFencingToken?: (market: Market) => bigint;
   readonly onFill?: (
     order: PaperOrder,
@@ -141,6 +144,7 @@ export class PaperEngine {
       )
         return;
       for (const order of this.#conditional.values()) {
+        if (this.#options.emergencyLatch?.matchingOpen === false) break;
         if (
           order.market !== envelope.payload.market ||
           order.symbol !== envelope.payload.symbol ||
@@ -180,6 +184,7 @@ export class PaperEngine {
     command: ImmediateOrderCommand,
   ): Promise<PaperOrder> {
     return this.#serialize(async () => {
+      this.#options.emergencyLatch?.assertAdmission();
       const id = command.id ?? randomUUID();
       const type: OrderType = command.type ?? 'MARKET';
       const order: PaperOrder = {
@@ -251,6 +256,7 @@ export class PaperEngine {
     )
       return;
     if (this.#options.isGateExclusive?.() === true) return;
+    if (this.#options.emergencyLatch?.matchingOpen === false) return;
     const book = cloneOrderBook(envelope.payload);
     for (const order of [...this.#orders.values()]) {
       if (
