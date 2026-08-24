@@ -6,14 +6,16 @@ import {
 import type { MarketEnvelope } from '../market-data/market-state-store.js';
 import { cloneOrderBook, matchOrder, type MatchableOrder, type OrderMatch } from './match-orders.js';
 import { createPricingContext, type PricingContext } from './pricing-context.js';
+import { evaluateConditional, type ConditionalOrder } from './conditional-trigger.js';
 
-export interface TradeEvent { readonly price: DecimalString; readonly sourceTimestamp?: string | null; }
+export interface TradeEvent { readonly price: DecimalString; readonly sourceTimestamp?: string | null; readonly source?: 'WEBSOCKET' | 'RECOVERY_REST'; readonly recoveryEpoch?: bigint; }
 export interface ImmediateOrderCommand {
   readonly id?: string; readonly sessionId: string; readonly market: Market; readonly symbol: string;
   readonly currency: Currency; readonly side: Side; readonly type?: 'MARKET' | 'LIMIT';
   readonly quantity: Quantity; readonly limitPrice?: DecimalString;
 }
 export interface PaperOrder extends MatchableOrder { readonly terminalReason?: 'IOC_REMAINDER'; }
+export interface ConditionalPaperOrder extends Omit<PaperOrder, 'type'>, ConditionalOrder { readonly status: 'PENDING_TRIGGER' | 'TRIGGERED' | 'FILLED' | 'CANCELLED'; }
 export interface SessionCalendar { isRegularSession(market: Market, at: Date): boolean; }
 export interface PaperEngineOptions {
   readonly feeModel: FeeModel;
@@ -24,6 +26,7 @@ export interface PaperEngineOptions {
   readonly currentFencingToken?: (market: Market) => bigint;
   readonly onFill?: (order: PaperOrder, match: OrderMatch, pricing: PricingContext) => Promise<void> | void;
   readonly onAudit?: (event: unknown) => Promise<void> | void;
+  readonly onConditionalTrigger?: (order: ConditionalPaperOrder, pricing: PricingContext) => Promise<void> | void;
 }
 
 /** A single-writer market matcher. Persistence hooks run after all decisions are made. */
@@ -32,6 +35,7 @@ export class PaperEngine {
   readonly #orders = new Map<string, PaperOrder>();
   readonly #books = new Map<string, { envelope: MarketEnvelope<OrderBookSnapshot>; book: OrderBookSnapshot }>();
   readonly #trades = new Map<string, TradeEvent>();
+  readonly #conditional = new Map<string, ConditionalPaperOrder>();
   readonly #latest = new Map<string, MarketEnvelope<unknown>>();
   #chain: Promise<unknown> = Promise.resolve();
 
@@ -40,6 +44,8 @@ export class PaperEngine {
   async onOrderBook(envelope: MarketEnvelope<OrderBookSnapshot>): Promise<void> {
     await this.#serialize(async () => {
       this.#assertEnvelope(envelope);
+      if (this.#options.currentFencingToken?.(envelope.payload.market) !== undefined &&
+        this.#options.currentFencingToken(envelope.payload.market) !== envelope.leaderFencingToken) return;
       const book = cloneOrderBook(envelope.payload);
       if (!this.#rememberEnvelope(this.#key(book.market, book.symbol), envelope)) return;
       this.#books.set(this.#key(book.market, book.symbol), { envelope, book });
@@ -50,8 +56,22 @@ export class PaperEngine {
   async onTrade(envelope: MarketEnvelope<TradeEvent & { market: Market; symbol: string }>): Promise<void> {
     await this.#serialize(async () => {
       this.#assertEnvelope(envelope);
+      if (this.#options.currentFencingToken?.(envelope.payload.market) !== undefined &&
+        this.#options.currentFencingToken(envelope.payload.market) !== envelope.leaderFencingToken) return;
       if (!this.#rememberEnvelope(this.#key(envelope.payload.market, envelope.payload.symbol), envelope)) return;
       this.#trades.set(this.#key(envelope.payload.market, envelope.payload.symbol), envelope.payload);
+      const now = this.#options.now?.() ?? new Date();
+      if (this.#options.calendar !== undefined && !this.#options.calendar.isRegularSession(envelope.payload.market, now)) return;
+      for (const order of this.#conditional.values()) {
+        if (order.market !== envelope.payload.market || order.symbol !== envelope.payload.symbol || order.status !== 'PENDING_TRIGGER') continue;
+        if (!evaluateConditional(order, envelope.payload.price)) continue;
+        const pricing = createPricingContext({ source: envelope.payload.source ?? 'WEBSOCKET', recoveryEpoch: envelope.recoveryEpoch ?? envelope.recoveryEpoch,
+          marketDataVersion: envelope.marketDataVersion, leaderFencingToken: envelope.leaderFencingToken, referencePrice: envelope.payload.price,
+          referenceTimestamp: envelope.payload.sourceTimestamp ?? null, book: this.#books.get(this.#key(order.market, order.symbol))?.book ?? { ...({ symbol: order.symbol, market: order.market, currency: order.currency, bids: [], asks: [] } as OrderBookSnapshot) }, pricingModelVersion: this.#options.pricingModelVersion ?? 'default', feeModelVersion: this.#options.feeModel.version, recoveryFill: envelope.payload.source === 'RECOVERY_REST' });
+        const triggered = { ...order, status: 'TRIGGERED' as const };
+        this.#conditional.set(order.id, triggered);
+        await this.#options.onConditionalTrigger?.(triggered, pricing);
+      }
     });
   }
 
@@ -71,6 +91,8 @@ export class PaperEngine {
   }
 
   getOrder(id: string): PaperOrder | undefined { return this.#orders.get(id); }
+
+  registerConditionalOrder(order: ConditionalPaperOrder): void { this.#conditional.set(order.id, order); this.#orders.set(order.id, order); }
 
   #assertEnvelope(envelope: MarketEnvelope<unknown>): void {
     if (envelope.recoveryEpoch < 0n || envelope.marketDataVersion < 0n || envelope.leaderFencingToken < 0n) throw new Error('invalid market envelope');
