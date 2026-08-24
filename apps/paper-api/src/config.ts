@@ -19,6 +19,7 @@ const environmentSchema = z.object({
         .filter(Boolean),
     ),
   CSRF_SECRET: z.string().min(32),
+  ADMIN_API_KEY: z.string().min(32).optional(),
 });
 
 export interface AppConfig {
@@ -30,6 +31,7 @@ export interface AppConfig {
   readonly redisUrl: string;
   readonly sessionHashKeys: readonly [string, ...string[]];
   readonly csrfSecret: string;
+  readonly adminApiKey?: string;
 }
 
 export function loadConfig(
@@ -38,6 +40,9 @@ export function loadConfig(
   const parsed = environmentSchema.parse(environment);
   if (parsed.SESSION_HASH_KEYS.length === 0) {
     throw new Error('SESSION_HASH_KEYS must contain at least one key');
+  }
+  if (parsed.NODE_ENV === 'production' && !parsed.ADMIN_API_KEY) {
+    throw new Error('ADMIN_API_KEY is required in production');
   }
   return {
     nodeEnv: parsed.NODE_ENV,
@@ -48,5 +53,6 @@ export function loadConfig(
     redisUrl: parsed.REDIS_URL,
     sessionHashKeys: parsed.SESSION_HASH_KEYS as [string, ...string[]],
     csrfSecret: parsed.CSRF_SECRET,
+    ...(parsed.ADMIN_API_KEY ? { adminApiKey: parsed.ADMIN_API_KEY } : {}),
   };
 }

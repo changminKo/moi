@@ -2,8 +2,11 @@ export type { AppDependencies } from './app.js';
 export { buildApp } from './app.js';
 export type { AppConfig } from './config.js';
 export { loadConfig } from './config.js';
+export { buildAdminApp } from './modules/admin/admin-app.js';
+export { registerAdminRoutes } from './modules/admin/admin-routes.js';
 export { registerFxRoutes } from './modules/fx/fx-routes.js';
 export { FxService } from './modules/fx/fx-service.js';
+export { registerHealthRoutes } from './modules/health/health-routes.js';
 export { registerInstrumentRoutes } from './modules/instruments/instrument-routes.js';
 export { InstrumentService } from './modules/instruments/instrument-service.js';
 export { MarketCalendarService } from './modules/instruments/market-calendar-service.js';
@@ -51,6 +54,12 @@ export {
   StreamSession,
   type StreamSocket,
 } from './modules/stream/stream-session.js';
+export { safeAuditLog } from './observability/logger.js';
+export { MetricsRegistry } from './observability/metrics.js';
 export { registerCsrf, requireCsrf } from './plugins/csrf.js';
+export {
+  LayeredRateLimiter,
+  registerRateLimits,
+} from './plugins/rate-limits.js';
 export { registerSessionAuth } from './plugins/session-auth.js';
 export { startServer } from './server.js';

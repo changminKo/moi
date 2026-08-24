@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { LayeredRateLimiter } from '../../plugins/rate-limits.js';
 import {
   type DurableEventSource,
   StreamSession,
@@ -15,6 +16,7 @@ export interface StreamRouteDependencies {
     request: FastifyRequest,
     onSocket: (socket: StreamSocket) => Promise<void>,
   ) => void;
+  readonly limiter?: LayeredRateLimiter;
 }
 
 export async function registerStreamRoutes(
@@ -34,6 +36,42 @@ export async function registerStreamRoutes(
         requestId: request.id,
       });
     const principal = await dependencies.principal(request);
+    if (dependencies.limiter) {
+      const connection = dependencies.limiter.checkWebsocketConnection(
+        principal.id,
+      );
+      if (!connection.allowed)
+        return reply
+          .header('Retry-After', String(connection.retryAfter ?? 1))
+          .code(429)
+          .send({
+            code: 'RATE_LIMITED',
+            message: 'Too many stream connections',
+            retryable: true,
+            retryAfter: connection.retryAfter ?? 1,
+            requestId: request.id,
+          });
+      const requested = (request.query as { quoteSymbols?: string })
+        .quoteSymbols;
+      const subscriptions = requested
+        ? requested.split(',').filter(Boolean).length
+        : 0;
+      const subscription = dependencies.limiter.checkSubscription(
+        principal.id,
+        subscriptions,
+      );
+      if (!subscription.allowed)
+        return reply
+          .header('Retry-After', String(subscription.retryAfter ?? 1))
+          .code(429)
+          .send({
+            code: 'RATE_LIMITED',
+            message: 'Too many stream subscriptions',
+            retryable: true,
+            retryAfter: subscription.retryAfter ?? 1,
+            requestId: request.id,
+          });
+    }
     if (principal.status !== undefined && principal.status !== 'ACTIVE')
       throw Object.assign(new Error('session expired'), {
         statusCode: 401,
