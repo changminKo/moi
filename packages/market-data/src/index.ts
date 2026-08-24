@@ -21,6 +21,19 @@ export type {
   TokenProvider,
 } from './ports.js';
 export {
+  buildSubscriptionPlan,
+  type SubscriptionPlan,
+  TOSS_SYMBOL_WHITELIST,
+} from './toss/subscription-plan.js';
+export { TossRestClient, type TossRestOptions } from './toss/toss-rest.js';
+export {
+  reconnectDelayMs,
+  type TossSocket,
+  type TossSocketFactory,
+  TossWebSocketMarketData,
+  type TossWebSocketOptions,
+} from './toss/toss-websocket.js';
+export {
   declaredTopicKeys,
   MARKET_EVENT_FIELDS,
   type MarketDataChannel,
