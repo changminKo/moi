@@ -1752,7 +1752,10 @@ type LockProbe = (
  */
 const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
   'sessions.find': [(tx, fixture) => tx.sessions.find(fixture.sessionId)],
+  'sessions.findByTokenHash': [(tx) => tx.sessions.findByTokenHash('missing-token-hash')],
+  'sessions.bootstrap': [(tx) => tx.sessions.bootstrap({ id: randomUUID(), tokenHash: 'probe-token-hash', now: FIXED_NOW, expiresAt: new Date(FIXED_NOW.getTime() + 1000) })],
   'sessions.lock': [(tx, fixture) => tx.sessions.lock(fixture.sessionId)],
+  'sessions.expire': [(tx, fixture) => tx.sessions.expire(fixture.sessionId, FIXED_NOW)],
   'sessions.touch': [
     (tx, fixture) =>
       tx.sessions.touch({
@@ -1937,7 +1940,10 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
  */
 const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'sessions.find#0': [],
+  'sessions.findByTokenHash#0': [],
+  'sessions.bootstrap#0': [],
   'sessions.lock#0': [],
+  'sessions.expire#0': [],
   'sessions.touch#0': [],
   'accounts.lockWallet#0': [],
   'accounts.lockPosition#0': [],

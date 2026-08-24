@@ -1,5 +1,6 @@
 import { DomainError } from '@skipjack/trading-core';
 import { sql } from 'kysely';
+import { randomUUID } from 'node:crypto';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
@@ -9,6 +10,7 @@ export interface SessionRecord {
   readonly id: string;
   readonly status: SessionStatus;
   readonly expiresAt: Date;
+  readonly lastSeenAt: Date;
   readonly version: bigint;
 }
 
@@ -20,14 +22,18 @@ export interface TouchSessionInput {
 
 export interface SessionRepository {
   find(sessionId: string): Promise<SessionRecord | undefined>;
+  findByTokenHash(tokenHash: string): Promise<SessionRecord | undefined>;
   lock(sessionId: string): Promise<SessionRecord | undefined>;
   touch(input: TouchSessionInput): Promise<bigint>;
+  bootstrap(input: { id: string; tokenHash: string; now: Date; expiresAt: Date }): Promise<SessionRecord>;
+  expire(sessionId: string, now: Date): Promise<void>;
 }
 
 interface SessionRow {
   readonly id: string;
   readonly status: string;
   readonly expires_at: Date;
+  readonly last_seen_at: Date;
   readonly version: string;
 }
 
@@ -45,6 +51,7 @@ function toSessionRecord(row: SessionRow): SessionRecord {
     id: row.id,
     status: status as SessionStatus,
     expiresAt: row.expires_at,
+    lastSeenAt: row.last_seen_at,
     version: BigInt(row.version),
   };
 }
@@ -55,12 +62,40 @@ export async function findSession(
   sessionId: string,
 ): Promise<SessionRecord | undefined> {
   const result = await sql<SessionRow>`
-    select id, status, expires_at, version
+    select id, status, expires_at, last_seen_at, version
     from anonymous_sessions
     where id = ${sessionId}
   `.execute(connection.executor);
   const row = result.rows[0];
   return row === undefined ? undefined : toSessionRecord(row);
+}
+
+export async function findSessionByTokenHash(connection: LedgerConnection, tokenHash: string): Promise<SessionRecord | undefined> {
+  const result = await sql<SessionRow>`select id, status, expires_at, last_seen_at, version from anonymous_sessions where token_hash = ${tokenHash}`.execute(connection.executor);
+  return result.rows[0] === undefined ? undefined : toSessionRecord(result.rows[0]);
+}
+
+export async function bootstrapSession(connection: LedgerConnection, input: { id: string; tokenHash: string; now: Date; expiresAt: Date }): Promise<SessionRecord> {
+  const result = await sql<SessionRow>`
+    insert into anonymous_sessions (id, token_hash, created_at, expires_at, last_seen_at)
+    values (${input.id}, ${input.tokenHash}, ${input.now}, ${input.expiresAt}, ${input.now})
+    on conflict (token_hash) do update set token_hash = excluded.token_hash
+    returning id, status, expires_at, last_seen_at, version
+  `.execute(connection.executor);
+  const row = result.rows[0];
+  if (!row) throw new Error('session bootstrap did not return a row');
+  await sql`
+    insert into wallets (id, session_id, currency, total, available, reserved)
+    values (${randomUUID()}, ${row.id}, 'KRW', 10000000, 10000000, 0),
+           (${randomUUID()}, ${row.id}, 'USD', 0, 0, 0)
+    on conflict (session_id, currency) do nothing
+  `.execute(connection.executor);
+  return toSessionRecord(row);
+}
+
+export async function expireSession(connection: LedgerConnection, sessionId: string, now: Date): Promise<void> {
+  connection.acquireLock({ table: 'anonymous_sessions', key: sessionId, strength: 'NO_KEY_UPDATE' });
+  await sql`update anonymous_sessions set status = 'EXPIRED', expires_at = ${now}, version = version + 1 where id = ${sessionId} and status = 'ACTIVE'`.execute(connection.executor);
 }
 
 /**
@@ -78,7 +113,7 @@ export async function lockSession(
     strength: 'UPDATE',
   });
   const result = await sql<SessionRow>`
-    select id, status, expires_at, version
+    select id, status, expires_at, last_seen_at, version
     from anonymous_sessions
     where id = ${sessionId}
     for update
@@ -126,7 +161,10 @@ export function createSessionRepository(
 ): SessionRepository {
   return Object.freeze({
     find: (sessionId: string) => findSession(connection, sessionId),
+    findByTokenHash: (tokenHash: string) => findSessionByTokenHash(connection, tokenHash),
     lock: (sessionId: string) => lockSession(connection, sessionId),
     touch: (input: TouchSessionInput) => touchSession(connection, input),
+    bootstrap: (input: { id: string; tokenHash: string; now: Date; expiresAt: Date }) => bootstrapSession(connection, input),
+    expire: (sessionId: string, now: Date) => expireSession(connection, sessionId, now),
   });
 }
