@@ -9,9 +9,13 @@
     "typecheck": "tsc --build --pretty false"
   },
   "dependencies": {
+    "@fastify/cors": "11.3.0",
+    "@fastify/helmet": "13.1.1",
     "@skipjack/trading-core": "workspace:*",
+    "fastify": "5.12.1",
     "kysely": "0.29.5",
-    "pg": "8.23.0"
+    "pg": "8.23.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "12.1.0",
