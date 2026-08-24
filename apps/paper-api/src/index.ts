@@ -22,4 +22,9 @@ export {
 } from './modules/session/session-token.js';
 export { registerCsrf, requireCsrf } from './plugins/csrf.js';
 export { registerSessionAuth } from './plugins/session-auth.js';
+export { canonicalizeRequest, canonicalRequestHash } from './modules/orders/canonical-request.js';
+export { IdempotencyService } from './modules/orders/idempotency-service.js';
+export { OrderService } from './modules/orders/order-service.js';
+export { registerOrderRoutes } from './modules/orders/order-routes.js';
+export { amendOrderSchema, placeOrderSchema } from './modules/orders/order-schemas.js';
 export { startServer } from './server.js';
