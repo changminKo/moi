@@ -1,0 +1,23 @@
+{
+  "fixtureVersion": 1,
+  "contract": {
+    "spec": "asyncapi.json",
+    "advertisedVersion": "1.2.2",
+    "message": "realtime-trade/tradeStream",
+    "example": "tradeMessage"
+  },
+  "sanitized": {
+    "source": "published contract example",
+    "notes": "Derived from the pinned AsyncAPI example. A public trade print: no credential and no account field exists on this frame."
+  },
+  "frame": {
+    "type": "message",
+    "topic": "trade:us:AAPL",
+    "data": {
+      "price": "243.26",
+      "volume": "8",
+      "timestamp": "2026-06-18T23:30:00.000+09:00",
+      "currency": "USD"
+    }
+  }
+}

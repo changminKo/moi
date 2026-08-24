@@ -1,0 +1,25 @@
+{
+  "fixtureVersion": 1,
+  "contract": {
+    "spec": "asyncapi.json",
+    "advertisedVersion": "1.2.2",
+    "message": "connection/subscriptionsAck",
+    "example": "subscriptionsAckPartialReject"
+  },
+  "sanitized": {
+    "source": "published contract example",
+    "notes": "Derived from the pinned AsyncAPI example. Carries no access token, no accountSeq, and no personal:order topic, so nothing here identifies an account."
+  },
+  "frame": {
+    "type": "subscriptions",
+    "id": "req-2",
+    "subscribed": ["trade:us:AAPL", "orderbook:kr:005930"],
+    "rejected": [
+      {
+        "target": "trade:kr:999999",
+        "code": "stock-not-found",
+        "message": "해당 종목을 찾을 수 없습니다."
+      }
+    ]
+  }
+}

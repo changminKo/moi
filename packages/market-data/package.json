@@ -20,9 +20,11 @@
     "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"
   },
   "dependencies": {
-    "@skipjack/trading-core": "workspace:*"
+    "@skipjack/trading-core": "workspace:*",
+    "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/node": "24.13.3",
     "vitest": "4.1.11"
   }
 }
