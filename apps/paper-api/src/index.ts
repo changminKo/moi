@@ -37,6 +37,20 @@ export {
   SESSION_COOKIE,
   SESSION_MAX_AGE_SECONDS,
 } from './modules/session/session-token.js';
+export {
+  claimPendingOutbox,
+  markOutboxPublished,
+  OutboxPublisher,
+  prunePublishedOutbox,
+} from './modules/stream/outbox-publisher.js';
+export { registerStreamRoutes } from './modules/stream/stream-routes.js';
+export {
+  type DurableAccountEvent,
+  type DurableEventSource,
+  type QuoteEvent,
+  StreamSession,
+  type StreamSocket,
+} from './modules/stream/stream-session.js';
 export { registerCsrf, requireCsrf } from './plugins/csrf.js';
 export { registerSessionAuth } from './plugins/session-auth.js';
 export { startServer } from './server.js';
