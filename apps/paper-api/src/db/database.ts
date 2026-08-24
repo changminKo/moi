@@ -151,7 +151,15 @@ export function createDatabase(
     client.on('error', reportOnce);
   });
 
-  return new Kysely<LedgerDatabase>({
+  const database = new Kysely<LedgerDatabase>({
     dialect: new PostgresDialect({ pool }),
   });
+  // A lease must pin one physical client for the lifetime of an advisory
+  // lock. Keep the pool private to the DB abstraction while exposing only the
+  // narrow factory used by the market-data lease.
+  Object.defineProperty(database, '__leaderLeaseClientFactory', {
+    value: () => pool.connect(),
+    enumerable: false,
+  });
+  return database;
 }
