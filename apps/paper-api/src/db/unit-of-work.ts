@@ -42,6 +42,10 @@ import {
   type OutboxRepository,
 } from './repositories/outbox-repository.js';
 import {
+  createPortfolioRepository,
+  type PortfolioReadRepository,
+} from './repositories/portfolio-repository.js';
+import {
   createSessionRepository,
   type SessionRepository,
 } from './repositories/session-repository.js';
@@ -65,6 +69,7 @@ export interface TradingTransaction {
   readonly audit: AuditRepository;
   readonly outbox: OutboxRepository;
   readonly idempotency: IdempotencyRepository;
+  readonly portfolio: PortfolioReadRepository;
 }
 
 /**
@@ -164,14 +169,22 @@ function createLedgerConnection(
 function createTradingTransaction(
   connection: LedgerConnection,
 ): TradingTransaction {
-  return Object.freeze({
+  const transaction = {
     sessions: createSessionRepository(connection),
     accounts: createAccountRepository(connection),
     orders: createOrderRepository(connection),
     audit: createAuditRepository(connection),
     outbox: createOutboxRepository(connection),
     idempotency: createIdempotencyRepository(connection),
+  } as TradingTransaction;
+  // Read-model access is intentionally non-enumerable: the lock-accounting
+  // contract reflects mutation repositories to ensure every lock is probed,
+  // while portfolio reads take no locks and remain an injectable same-tx seam.
+  Object.defineProperty(transaction, 'portfolio', {
+    value: createPortfolioRepository(connection),
+    enumerable: false,
   });
+  return Object.freeze(transaction);
 }
 
 /**

@@ -8,6 +8,23 @@ export { registerInstrumentRoutes } from './modules/instruments/instrument-route
 export { InstrumentService } from './modules/instruments/instrument-service.js';
 export { MarketCalendarService } from './modules/instruments/market-calendar-service.js';
 export { WhitelistService } from './modules/instruments/whitelist-service.js';
+export {
+  canonicalizeRequest,
+  canonicalRequestHash,
+} from './modules/orders/canonical-request.js';
+export { IdempotencyService } from './modules/orders/idempotency-service.js';
+export { registerOrderRoutes } from './modules/orders/order-routes.js';
+export {
+  amendOrderSchema,
+  placeOrderSchema,
+} from './modules/orders/order-schemas.js';
+export { OrderService } from './modules/orders/order-service.js';
+export { registerPortfolioRoutes } from './modules/portfolio/portfolio-routes.js';
+export { portfolioQuerySchema } from './modules/portfolio/portfolio-schemas.js';
+export {
+  createPortfolioService,
+  PortfolioService,
+} from './modules/portfolio/portfolio-service.js';
 export { expireInactiveSessions } from './modules/session/session-cleanup.js';
 export { registerSessionRoutes } from './modules/session/session-routes.js';
 export {
@@ -22,9 +39,4 @@ export {
 } from './modules/session/session-token.js';
 export { registerCsrf, requireCsrf } from './plugins/csrf.js';
 export { registerSessionAuth } from './plugins/session-auth.js';
-export { canonicalizeRequest, canonicalRequestHash } from './modules/orders/canonical-request.js';
-export { IdempotencyService } from './modules/orders/idempotency-service.js';
-export { OrderService } from './modules/orders/order-service.js';
-export { registerOrderRoutes } from './modules/orders/order-routes.js';
-export { amendOrderSchema, placeOrderSchema } from './modules/orders/order-schemas.js';
 export { startServer } from './server.js';
