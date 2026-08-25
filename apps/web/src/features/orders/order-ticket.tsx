@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
+import { presentationForReason } from '../system/system-status-provider';
 import { type OrderDraft, type Side, validateOrderDraft } from './order-form';
 import { useOrderMutations } from './use-order-mutations';
 
@@ -132,14 +133,20 @@ export function OrderTicket({
         </>
       )}
       {capability.reasonCodes.map((reason) => (
-        <p key={reason}>{reason}</p>
+        <p key={reason} role="status">
+          {presentationForReason(reason)}
+        </p>
       ))}
       {error && (
         <p id="order-error" role="alert">
           {error}
         </p>
       )}
-      <button type="submit" disabled={!capability.canPlace || place.isPending}>
+      <button
+        type="submit"
+        aria-label="Order ticket — Place order"
+        disabled={!capability.canPlace || place.isPending}
+      >
         Place order
       </button>
     </form>

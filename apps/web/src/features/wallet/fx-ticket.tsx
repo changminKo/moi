@@ -4,12 +4,15 @@ import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
 import { newIdempotencyKey } from '../../lib/idempotency';
+import { presentationForReason } from '../system/system-status-provider';
 export function FxTicket({
   apiClient = defaultApiClient,
   invalidateQueries = () => undefined,
+  capability = { canFx: true, reasonCodes: [] as readonly string[] },
 }: {
   apiClient?: ApiClient;
   invalidateQueries?: () => void;
+  capability?: { canFx: boolean; reasonCodes: readonly string[] };
 }) {
   const [amount, setAmount] = useState('');
   const [quote, setQuote] = useState<FxQuote | null>(null);
@@ -64,9 +67,14 @@ export function FxTicket({
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
       />
-      <button type="button" onClick={quoteFx}>
+      <button type="button" onClick={quoteFx} disabled={!capability.canFx}>
         Get quote
       </button>
+      {capability.reasonCodes.map((reason) => (
+        <p key={reason} role="status">
+          {presentationForReason(reason)}
+        </p>
+      ))}
       {error && <p role="alert">{error}</p>}
       {quote && (
         <div aria-live="polite">
@@ -74,7 +82,11 @@ export function FxTicket({
           <p>Fee: {quote.fee}</p>
           <p>Source: {quote.sourceAmount}</p>
           <p>Destination: {quote.destinationAmount}</p>
-          <button type="button" disabled={pending} onClick={convert}>
+          <button
+            type="button"
+            disabled={pending || !capability.canFx}
+            onClick={convert}
+          >
             Convert
           </button>
         </div>

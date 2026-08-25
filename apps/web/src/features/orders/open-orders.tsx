@@ -1,6 +1,7 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
+import { presentationForReason } from '../system/system-status-provider';
 import { useOrderMutations } from './use-order-mutations';
 
 export type OpenOrder = Readonly<Record<string, unknown>>;
@@ -17,11 +18,18 @@ export function OpenOrders({
 }) {
   const { cancel } = useOrderMutations(apiClient);
   const pending = useRef(new Map<string, Promise<unknown>>());
+  const [error, setError] = useState('');
   const cancelOnce = (id: string) => {
     const active = pending.current.get(id);
     if (active) return active;
     const request = cancel
       .mutateAsync(id)
+      .catch((failure: unknown) => {
+        setError(
+          failure instanceof Error ? failure.message : 'Cancellation failed',
+        );
+        throw failure;
+      })
       .finally(() => pending.current.delete(id));
     pending.current.set(id, request);
     return request;
@@ -30,8 +38,11 @@ export function OpenOrders({
     <section className="panel" aria-labelledby="open-orders-title">
       <h2 id="open-orders-title">Open orders</h2>
       {capability.reasonCodes.map((reason) => (
-        <p key={reason}>{reason}</p>
+        <p key={reason} role="status">
+          {presentationForReason(reason)}
+        </p>
       ))}
+      {error && <p role="alert">{error}</p>}
       {orders.length === 0 ? (
         <p>No open orders.</p>
       ) : (
