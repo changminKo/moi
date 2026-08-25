@@ -1,0 +1,130 @@
+# Provider-neutral reference topology for the Skipjack public MVP.
+#
+# One public web service, one single-replica paper-api process that serves
+# HTTP and owns exactly one fenced market-data leader per market, PostgreSQL,
+# and Redis. Compose is the reference shape, not the production orchestrator:
+# docs/operations/deployment.md maps these roles onto hosted platforms.
+#
+# Every secret is injected at runtime through required interpolation
+# (`${VAR:?message}`); nothing sensitive is committed here.
+
+name: skipjack
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    image: skipjack/web:local
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      PUBLIC_API_ORIGIN: "${PUBLIC_API_ORIGIN:?public API origin, e.g. https://api.skipjack.example}"
+    depends_on:
+      paper-api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/', { method: 'HEAD' }).then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    labels:
+      skipjack.role: web
+
+  paper-api:
+    build:
+      context: ..
+      dockerfile: apps/paper-api/Dockerfile
+    image: skipjack/paper-api:local
+    ports:
+      - "${API_PORT:-3000}:3000"
+    deploy:
+      # Scaling above one replica is outside the MVP: the process owns the
+      # fenced leader lease for every market and both Toss connections.
+      replicas: 1
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.skipjack.example}"
+      DATABASE_URL: "${DATABASE_URL:?postgres connection string with the paper-api role}"
+      REDIS_URL: redis://redis:6379
+      SESSION_HASH_KEYS: "${SESSION_HASH_KEYS:?comma-separated session hash keys, newest first}"
+      CSRF_SECRET: "${CSRF_SECRET:?at least 32 random bytes}"
+      ADMIN_API_KEY: "${ADMIN_API_KEY:?at least 32 random bytes; required in production}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Readiness (db + audit reachable) gates traffic; liveness is the
+      # separate /health/live route used by the orchestrator restart policy.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # Must exceed the ShutdownCoordinator drain deadline (30s) so
+    # CANCEL_ONLY -> drain inflight -> drain outbox -> release leases completes.
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    labels:
+      skipjack.role: http+market-data-leader
+      skipjack.leader-markets: KRX,US
+      skipjack.liveness-path: /health/live
+      skipjack.readiness-path: /health/ready
+
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: skipjack
+      POSTGRES_USER: skipjack
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?database password}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skipjack -d skipjack"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    labels:
+      skipjack.role: database
+
+  redis:
+    image: redis:7.4.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    labels:
+      skipjack.role: leader-lease-and-fanout
+
+volumes:
+  postgres-data: {}
+  redis-data: {}

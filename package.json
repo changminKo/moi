@@ -11,7 +11,8 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "test": "turbo run test",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "check:deployment": "node scripts/check-deployment-contract.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.9",
@@ -19,6 +20,7 @@
     "fast-check": "4.9.0",
     "turbo": "2.10.11",
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "yaml": "2.9.0"
   }
 }
