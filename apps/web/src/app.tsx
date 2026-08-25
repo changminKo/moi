@@ -1,20 +1,5 @@
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom';
-
-function TradePlaceholder() {
-  return (
-    <section className="page-intro" aria-labelledby="trade-title">
-      <p className="eyebrow">PAPER MARKET / 01</p>
-      <h1 id="trade-title">Trade with a clear head.</h1>
-      <p className="lede">
-        A quiet cockpit for practicing conviction before capital is on the line.
-      </p>
-      <div className="signal-strip" role="status">
-        <span className="signal-dot" aria-hidden="true" /> Market feed standing
-        by
-      </div>
-    </section>
-  );
-}
+import { TradePage } from './pages/trade-page';
 
 function PortfolioPlaceholder() {
   return (
@@ -63,7 +48,7 @@ export function App() {
       </header>
       <main id="main-content">
         <Routes>
-          <Route path="/trade" element={<TradePlaceholder />} />
+          <Route path="/trade" element={<TradePage />} />
           <Route path="/portfolio" element={<PortfolioPlaceholder />} />
           <Route path="*" element={<Navigate replace to="/trade" />} />
         </Routes>

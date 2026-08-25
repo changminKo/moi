@@ -123,6 +123,21 @@ h1 {
   background: var(--color-surface);
   color: var(--color-muted);
 }
+.trade-page { display: grid; gap: var(--space-6); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.panel { padding: var(--space-5); border: 1px solid var(--color-line); background: var(--color-surface); min-width: 0; }
+.panel h2 { margin-top: 0; font-size: 1.1rem; }
+.panel input { display: block; width: 100%; max-width: 28rem; margin: var(--space-2) 0 var(--space-3); padding: .65rem; color: inherit; background: var(--color-canvas); border: 1px solid var(--color-line); }
+.panel button, .trade-page > button { margin: .25rem; padding: .55rem .8rem; cursor: pointer; }
+.panel button:disabled, .trade-page > button:disabled { cursor: not-allowed; opacity: .55; }
+.panel ul { padding: 0; list-style: none; }
+.panel li { position: relative; display: flex; gap: .5rem; align-items: center; padding: .4rem 0; }
+.panel li span[aria-label="depth"] { position: absolute; right: 0; bottom: 0; height: 2px; background: var(--color-positive); opacity: .5; }
+.quote-price { margin: .2rem 0; font-size: 2rem; font-variant-numeric: tabular-nums; }
+.status-badge { display: inline-block; padding: .15rem .4rem; font-size: .75rem; font-weight: 700; border: 1px solid currentColor; }
+.status-DEGRADED { color: var(--color-warning); }.status-RECOVERING { color: var(--color-negative); }
+.wallet-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.wallet-grid article { padding: var(--space-3); border: 1px solid var(--color-line); }.wallet-grid h3 { margin-top: 0; }
+.wallet-grid dl { display: grid; grid-template-columns: 1fr auto; gap: .25rem .75rem; margin: 0; }.wallet-grid dd { margin: 0; font-variant-numeric: tabular-nums; }
 .signal-strip {
   display: inline-flex;
   align-items: center;
