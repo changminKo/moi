@@ -27,6 +27,11 @@ export interface InsertOrderInput {
   readonly ocoGroupId?: string;
 }
 
+export interface InsertOcoGroupInput {
+  readonly id: string;
+  readonly sessionId: string;
+}
+
 export interface UpdateOrderInput {
   readonly id: string;
   readonly expectedVersion: bigint;
@@ -67,11 +72,28 @@ export interface LockedOcoGroup {
 }
 
 export interface OrderRepository {
+  insertOcoGroup(input: InsertOcoGroupInput): Promise<void>;
   insert(input: InsertOrderInput): Promise<void>;
   lock(orderId: string): Promise<LockedOrder | undefined>;
   lockOcoGroup(ocoGroupId: string): Promise<LockedOcoGroup | undefined>;
   update(input: UpdateOrderInput): Promise<bigint>;
   resolveOcoGroup(input: ResolveOcoGroupInput): Promise<bigint>;
+}
+
+export async function insertOcoGroup(
+  connection: LedgerConnection,
+  input: InsertOcoGroupInput,
+): Promise<void> {
+  const group = snapshotInput({ id: input.id, sessionId: input.sessionId });
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: group.sessionId,
+    strength: 'KEY_SHARE',
+  });
+  await sql`
+    insert into oco_groups (id, session_id)
+    values (${group.id}, ${group.sessionId})
+  `.execute(connection.executor);
 }
 
 interface OrderRow {
@@ -340,6 +362,8 @@ export function createOrderRepository(
   connection: LedgerConnection,
 ): OrderRepository {
   return Object.freeze({
+    insertOcoGroup: (input: InsertOcoGroupInput) =>
+      insertOcoGroup(connection, input),
     insert: (input: InsertOrderInput) => insertOrder(connection, input),
     lock: (orderId: string) => lockOrder(connection, orderId),
     lockOcoGroup: (ocoGroupId: string) => lockOcoGroup(connection, ocoGroupId),

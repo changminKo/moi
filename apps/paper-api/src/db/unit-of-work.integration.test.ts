@@ -10,6 +10,7 @@ import {
 } from '@testcontainers/postgresql';
 import { Kysely, sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { OrderPlacementService } from '../modules/orders/order-placement-service.js';
 import { createDatabase, type Database, snapshotInput } from './database.js';
 import * as lockOrderModule from './lock-order.js';
 import {
@@ -33,6 +34,7 @@ import type {
 } from './repositories/account-repository.js';
 import * as unitOfWorkModule from './unit-of-work.js';
 import {
+  commitOcoPlacement,
   commitTradingMutation,
   type TradingMutationInput,
   type TradingMutationResult,
@@ -1093,6 +1095,177 @@ describe('serialization and deadlock retries', () => {
 });
 
 describe('commitTradingMutation', () => {
+  it('does not register OCO engine legs again when durable idempotency replays', async () => {
+    const sessionId = await insertSession();
+    await insertPosition(sessionId, 'AAPL', '2');
+    const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
+    const registered: string[] = [];
+    let sequence = 0n;
+    let notifications = 0;
+    const service = new OrderPlacementService({
+      unitOfWork,
+      engine: () => ({
+        placeImmediateOrder: async () => undefined,
+        registerConditionalOrder: (order) => {
+          registered.push(order.id);
+        },
+      }),
+      nextSequence: async () => {
+        sequence += 1n;
+        return sequence;
+      },
+      afterPlacement: async () => {
+        notifications += 1;
+      },
+    });
+    const command = {
+      sessionId,
+      idempotencyKey: 'oco-replay-key',
+      requestHash: 'oco-replay-hash',
+      input: {
+        market: 'US' as const,
+        symbol: 'AAPL',
+        side: 'SELL' as const,
+        quantity: '2',
+        type: 'OCO' as const,
+        legs: [
+          {
+            market: 'US' as const,
+            symbol: 'AAPL',
+            side: 'SELL' as const,
+            quantity: '2',
+            type: 'LIMIT' as const,
+            limitPrice: '210',
+          },
+          {
+            market: 'US' as const,
+            symbol: 'AAPL',
+            side: 'SELL' as const,
+            quantity: '2',
+            type: 'STOP' as const,
+            stopPrice: '190',
+          },
+        ],
+      },
+    };
+
+    const first = await service.place(command);
+    const replay = await service.place(command);
+
+    expect(replay).toEqual(first);
+    expect(registered).toHaveLength(2);
+    expect(notifications).toBe(1);
+    expect(await countLedgerRows(db)).toEqual({
+      orders: 2,
+      audit: 1,
+      outbox: 1,
+      idempotency: 1,
+      reservations: 1,
+    });
+  });
+
+  it('commits an OCO pair with one shared position reservation', async () => {
+    const sessionId = await insertSession();
+    const positionId = await insertPosition(sessionId, 'AAPL', '2');
+    const groupId = randomUUID();
+    const firstLegId = randomUUID();
+    const secondLegId = randomUUID();
+    const reservationId = randomUUID();
+    const unitOfWork = new UnitOfWork(db, {
+      backoff: recordBackoff().backoff,
+    });
+
+    const result = await commitOcoPlacement(unitOfWork, {
+      sessionId,
+      idempotencyKey: 'oco-key',
+      requestHash: 'oco-hash',
+      groupId,
+      legs: [
+        {
+          id: firstLegId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'LIMIT',
+          side: 'SELL',
+          quantity: '2',
+          status: 'PENDING_TRIGGER',
+          limitPrice: '210',
+        },
+        {
+          id: secondLegId,
+          marketCode: 'US',
+          symbol: 'AAPL',
+          orderType: 'STOP',
+          side: 'SELL',
+          quantity: '2',
+          status: 'PENDING_TRIGGER',
+          stopPrice: '190',
+        },
+      ],
+      reservation: {
+        id: reservationId,
+        kind: 'POSITION',
+        marketCode: 'US',
+        symbol: 'AAPL',
+        amount: '2',
+      },
+      audit: {
+        id: randomUUID(),
+        eventType: 'ORDER_PLACED',
+        payload: { type: 'OCO' },
+        occurredAt: new Date('2026-08-22T00:00:00.000Z'),
+      },
+      outbox: {
+        id: randomUUID(),
+        eventId: randomUUID(),
+        streamSequence: 1n,
+        eventType: 'ORDER_PLACED',
+        payload: { orderId: firstLegId },
+      },
+      response: {
+        statusCode: 201,
+        body: { id: firstLegId, status: 'PENDING_TRIGGER' },
+      },
+    });
+
+    expect(result).toEqual({
+      replayed: false,
+      statusCode: 201,
+      body: { id: firstLegId, status: 'PENDING_TRIGGER' },
+    });
+    expect(await countLedgerRows(db)).toEqual({
+      orders: 2,
+      audit: 1,
+      outbox: 1,
+      idempotency: 1,
+      reservations: 1,
+    });
+    const persisted = await sql<{
+      group_id: string;
+      amount: string;
+      available: string;
+      reserved: string;
+      leg_count: string;
+    }>`
+      select r.oco_group_id::text as group_id, r.amount::text as amount,
+             p.available_quantity::text as available,
+             p.reserved_quantity::text as reserved,
+             (select count(*)::text from orders where oco_group_id = ${groupId}) as leg_count
+      from reservations r
+      join positions p on p.id = ${positionId}
+      where r.id = ${reservationId} and not r.released
+    `.execute(db);
+    expect(persisted.rows).toEqual([
+      {
+        group_id: groupId,
+        amount: '2',
+        available: '0',
+        reserved: '2',
+        leg_count: '2',
+      },
+    ]);
+  });
+
   it('commits ledger, audit, outbox, and idempotency atomically', async () => {
     const sessionId = await insertSession();
     const walletId = await insertWallet(sessionId, 'KRW', '1000');
@@ -1350,6 +1523,7 @@ describe('persistence encapsulation', () => {
     expect(Object.keys(unitOfWorkModule).sort()).toEqual([
       'UnitOfWork',
       'UnknownCommitOutcomeError',
+      'commitOcoPlacement',
       'commitTradingMutation',
     ]);
     expect(Object.keys(lockOrderModule).sort()).toEqual([
@@ -1752,10 +1926,22 @@ type LockProbe = (
  */
 const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
   'sessions.find': [(tx, fixture) => tx.sessions.find(fixture.sessionId)],
-  'sessions.findByTokenHash': [(tx) => tx.sessions.findByTokenHash('missing-token-hash')],
-  'sessions.bootstrap': [(tx) => tx.sessions.bootstrap({ id: randomUUID(), tokenHash: 'probe-token-hash', now: FIXED_NOW, expiresAt: new Date(FIXED_NOW.getTime() + 1000) })],
+  'sessions.findByTokenHash': [
+    (tx) => tx.sessions.findByTokenHash('missing-token-hash'),
+  ],
+  'sessions.bootstrap': [
+    (tx) =>
+      tx.sessions.bootstrap({
+        id: randomUUID(),
+        tokenHash: 'probe-token-hash',
+        now: FIXED_NOW,
+        expiresAt: new Date(FIXED_NOW.getTime() + 1000),
+      }),
+  ],
   'sessions.lock': [(tx, fixture) => tx.sessions.lock(fixture.sessionId)],
-  'sessions.expire': [(tx, fixture) => tx.sessions.expire(fixture.sessionId, FIXED_NOW)],
+  'sessions.expire': [
+    (tx, fixture) => tx.sessions.expire(fixture.sessionId, FIXED_NOW),
+  ],
   'sessions.touch': [
     (tx, fixture) =>
       tx.sessions.touch({
@@ -1824,6 +2010,23 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
         amount: '1',
         marketCode: 'US',
         symbol: 'AAPL',
+      }),
+    (tx, fixture) =>
+      tx.accounts.recordReservation({
+        id: randomUUID(),
+        sessionId: fixture.sessionId,
+        ocoGroupId: fixture.ocoGroupId,
+        kind: 'POSITION',
+        amount: '1',
+        marketCode: 'US',
+        symbol: 'AAPL',
+      }),
+  ],
+  'orders.insertOcoGroup': [
+    (tx, fixture) =>
+      tx.orders.insertOcoGroup({
+        id: randomUUID(),
+        sessionId: fixture.sessionId,
       }),
   ],
   'orders.insert': [
@@ -1952,6 +2155,8 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'accounts.reservePosition#0': [],
   'accounts.reservePosition#1': [],
   'accounts.recordReservation#0': [],
+  'accounts.recordReservation#1': [],
+  'orders.insertOcoGroup#0': [],
   'orders.insert#0': [],
   'orders.lock#0': [],
   'orders.lockOcoGroup#0': [],

@@ -95,8 +95,30 @@ test('cancels the OCO sibling and releases its reservation', async ({
   const orderId = await paperSystem.latestOrderId();
   await page.getByRole('link', { name: '포트폴리오' }).click();
   await expect(page.getByRole('row', { name: /AAPL 0 2 2/ })).toBeVisible();
+  const reservation = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/portfolio');
+    const snapshot = (await response.json()) as {
+      reservations: readonly Record<string, unknown>[];
+    };
+    return snapshot.reservations[0];
+  });
+  expect(reservation).toMatchObject({
+    kind: 'POSITION',
+    market: 'US',
+    symbol: 'AAPL',
+    amount: '2',
+    released: false,
+  });
   await paperSystem.triggerOco({ orderId, price: '210' });
   await expect(page.getByText('AAPL FILLED')).toHaveCount(2);
   await expect(page.getByText('AAPL CANCELLED')).toBeVisible();
   await expect(page.getByRole('row', { name: /AAPL 0 0 0/ })).toBeVisible();
+  const liveReservations = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/portfolio');
+    const snapshot = (await response.json()) as {
+      reservations: readonly Record<string, unknown>[];
+    };
+    return snapshot.reservations;
+  });
+  expect(liveReservations).toEqual([]);
 });

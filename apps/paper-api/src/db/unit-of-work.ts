@@ -345,6 +345,184 @@ export interface TradingMutationResult {
   readonly body: unknown;
 }
 
+export type OcoPlacementReservation =
+  | Readonly<{
+      id: string;
+      kind: 'CASH';
+      currency: Currency;
+      amount: DecimalString;
+    }>
+  | Readonly<{
+      id: string;
+      kind: 'POSITION';
+      marketCode: Market;
+      symbol: string;
+      amount: Quantity;
+    }>;
+
+export interface OcoPlacementInput {
+  readonly sessionId: string;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  readonly groupId: string;
+  readonly legs: readonly [TradingMutationOrder, TradingMutationOrder];
+  readonly reservation: OcoPlacementReservation;
+  readonly audit: TradingMutationAudit;
+  readonly outbox: TradingMutationOutbox;
+  readonly response: TradingMutationResponse;
+}
+
+/** Commits an OCO pair and its one shared reservation as one ledger mutation. */
+export async function commitOcoPlacement(
+  unitOfWork: UnitOfWork,
+  input: OcoPlacementInput,
+): Promise<TradingMutationResult> {
+  const firstLeg = input.legs[0];
+  const secondLeg = input.legs[1];
+  const reservation = input.reservation;
+  const audit = input.audit;
+  const outbox = input.outbox;
+  const response = input.response;
+  const request = snapshotInput({
+    sessionId: input.sessionId,
+    idempotencyKey: input.idempotencyKey,
+    requestHash: input.requestHash,
+    groupId: input.groupId,
+    firstLeg,
+    secondLeg,
+    reservation,
+    audit,
+    outbox,
+    responseStatusCode: response.statusCode,
+    responseBody: toJsonText(response.body, 'the response body'),
+  });
+  const responseBody: unknown = JSON.parse(request.responseBody);
+
+  return await unitOfWork.run(async (tx) => {
+    const session = await tx.sessions.lock(request.sessionId);
+    if (session === undefined || session.status !== 'ACTIVE') {
+      throw new DomainError(
+        'ACCOUNT_READ_ONLY',
+        `session ${request.sessionId} cannot accept mutations`,
+      );
+    }
+
+    const claim = await tx.idempotency.begin({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      requestHash: request.requestHash,
+    });
+    if (claim.state === 'COMPLETED') {
+      return {
+        replayed: true,
+        statusCode: claim.statusCode,
+        body: claim.body,
+      };
+    }
+    if (claim.state === 'IN_PROGRESS') {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        `idempotency key ${request.idempotencyKey} is already in progress`,
+      );
+    }
+    await tx.idempotency.complete({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+    });
+
+    if (request.reservation.kind === 'CASH') {
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: request.sessionId,
+        currency: request.reservation.currency,
+      });
+      if (wallet === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_CASH',
+          `session ${request.sessionId} holds no ${request.reservation.currency} wallet`,
+        );
+      }
+      await tx.accounts.reserveCash({
+        wallet,
+        amount: request.reservation.amount,
+      });
+    } else {
+      const position = await tx.accounts.lockPosition({
+        sessionId: request.sessionId,
+        marketCode: request.reservation.marketCode,
+        symbol: request.reservation.symbol,
+      });
+      if (position === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_POSITION',
+          `session ${request.sessionId} holds no ${request.reservation.symbol} position`,
+        );
+      }
+      await tx.accounts.reservePosition({
+        position,
+        quantity: request.reservation.amount,
+      });
+    }
+
+    await tx.orders.insertOcoGroup({
+      id: request.groupId,
+      sessionId: request.sessionId,
+    });
+    for (const leg of [request.firstLeg, request.secondLeg]) {
+      await tx.orders.insert({
+        id: leg.id,
+        sessionId: request.sessionId,
+        marketCode: leg.marketCode,
+        symbol: leg.symbol,
+        orderType: leg.orderType,
+        side: leg.side,
+        quantity: leg.quantity,
+        status: leg.status,
+        ...(leg.limitPrice === undefined ? {} : { limitPrice: leg.limitPrice }),
+        ...(leg.stopPrice === undefined ? {} : { stopPrice: leg.stopPrice }),
+        ocoGroupId: request.groupId,
+      });
+    }
+    await tx.accounts.recordReservation({
+      id: request.reservation.id,
+      sessionId: request.sessionId,
+      ocoGroupId: request.groupId,
+      kind: request.reservation.kind,
+      amount: request.reservation.amount,
+      ...(request.reservation.kind === 'CASH'
+        ? { currency: request.reservation.currency }
+        : {
+            marketCode: request.reservation.marketCode,
+            symbol: request.reservation.symbol,
+          }),
+    });
+    await tx.audit.append({
+      id: request.audit.id,
+      eventType: request.audit.eventType,
+      payload: request.audit.payload,
+      occurredAt: request.audit.occurredAt,
+      orderId: request.firstLeg.id,
+      ...(request.audit.sessionReference === undefined
+        ? {}
+        : { sessionReference: request.audit.sessionReference }),
+    });
+    await tx.outbox.append({
+      id: request.outbox.id,
+      eventId: request.outbox.eventId,
+      sessionId: request.sessionId,
+      streamSequence: request.outbox.streamSequence,
+      eventType: request.outbox.eventType,
+      payload: request.outbox.payload,
+    });
+    return {
+      replayed: false,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+    };
+  });
+}
+
 /**
  * Commits one trading mutation atomically.
  *

@@ -16,6 +16,7 @@ export {
   canonicalRequestHash,
 } from './modules/orders/canonical-request.js';
 export { IdempotencyService } from './modules/orders/idempotency-service.js';
+export { OrderPlacementService } from './modules/orders/order-placement-service.js';
 export { registerOrderRoutes } from './modules/orders/order-routes.js';
 export {
   amendOrderSchema,

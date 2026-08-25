@@ -22,10 +22,7 @@ import {
 import { buildApp } from '../paper-api/src/app.js';
 import type { AppConfig } from '../paper-api/src/config.js';
 import { createDatabase, type Database } from '../paper-api/src/db/database.js';
-import {
-  commitTradingMutation,
-  UnitOfWork,
-} from '../paper-api/src/db/unit-of-work.js';
+import { UnitOfWork } from '../paper-api/src/db/unit-of-work.js';
 import type { OrderMatch } from '../paper-api/src/engine/match-orders.js';
 import {
   type ConditionalPaperOrder,
@@ -41,8 +38,9 @@ import { FxService } from '../paper-api/src/modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../paper-api/src/modules/health/health-routes.js';
 import { registerInstrumentRoutes } from '../paper-api/src/modules/instruments/instrument-routes.js';
 import { InstrumentService } from '../paper-api/src/modules/instruments/instrument-service.js';
-import { canonicalRequestHash } from '../paper-api/src/modules/orders/canonical-request.js';
+import { OrderPlacementService } from '../paper-api/src/modules/orders/order-placement-service.js';
 import { registerOrderRoutes } from '../paper-api/src/modules/orders/order-routes.js';
+import { OrderService } from '../paper-api/src/modules/orders/order-service.js';
 import { registerPortfolioRoutes } from '../paper-api/src/modules/portfolio/portfolio-routes.js';
 import { registerSessionRoutes } from '../paper-api/src/modules/session/session-routes.js';
 import {
@@ -71,7 +69,6 @@ type Mode = 'NORMAL' | 'DEGRADED' | 'RECOVERING' | 'CANCEL_ONLY';
 type JsonObject = Record<string, unknown>;
 
 const books = new Map<string, Book>();
-const idempotencyKeys = new Set<string>();
 const streamSockets = new Map<string, Set<Socket>>();
 let mode: Mode = 'NORMAL';
 let snapshotRequestCount = 0;
@@ -215,161 +212,6 @@ function health(): JsonObject {
     canFx: mode === 'NORMAL' || mode === 'DEGRADED' || mode === 'RECOVERING',
     reasonCodes,
   };
-}
-
-async function placeOrder(
-  request: PublicRequest,
-  response: JsonResponse,
-  session: string,
-): Promise<void> {
-  if (mode !== 'NORMAL') {
-    json(response, 409, {
-      code: mode === 'CANCEL_ONLY' ? 'CANCEL_ONLY' : 'MARKET_DATA_DEGRADED',
-      message: 'Trading is currently restricted',
-      retryable: false,
-      requestId: randomUUID(),
-    });
-    return;
-  }
-  const key = String(request.headers['idempotency-key'] ?? '');
-  if (!key || idempotencyKeys.has(`${session}:${key}`)) {
-    json(response, 409, {
-      code: 'IDEMPOTENCY_CONFLICT',
-      message: 'A fresh idempotency key is required',
-      retryable: false,
-      requestId: randomUUID(),
-    });
-    return;
-  }
-  idempotencyKeys.add(`${session}:${key}`);
-  const input = await body(request);
-  const market = input.market as Market;
-  const symbol = String(input.symbol);
-  const type = String(input.type);
-  const side = String(input.side);
-  const quantity = String(input.quantity);
-  if (type === 'OCO') {
-    const groupId = randomUUID();
-    await pool.query(
-      'insert into oco_groups (id, session_id) values ($1, $2)',
-      [groupId, session],
-    );
-    const legs = input.legs as JsonObject[];
-    const ids: string[] = [];
-    const conditionalLegs: { id: string; leg: JsonObject }[] = [];
-    for (const leg of legs) {
-      const id = randomUUID();
-      ids.push(id);
-      conditionalLegs.push({ id, leg });
-      await pool.query(
-        `insert into orders
-           (id, session_id, market_code, symbol, oco_group_id, order_type, side,
-            limit_price, stop_price, quantity, status)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING_TRIGGER')`,
-        [
-          id,
-          session,
-          market,
-          symbol,
-          groupId,
-          leg.type,
-          side,
-          leg.limitPrice ?? null,
-          leg.stopPrice ?? null,
-          quantity,
-        ],
-      );
-    }
-    if (side === 'SELL') {
-      await pool.query(
-        `update positions
-            set available_quantity = available_quantity - $3::numeric,
-                reserved_quantity = reserved_quantity + $3::numeric
-          where session_id = $1 and symbol = $2`,
-        [session, symbol, quantity],
-      );
-    }
-    const marketEngine = engines.get(market);
-    if (!marketEngine) throw new Error(`missing ${market} paper engine`);
-    for (const { id: legId, leg } of conditionalLegs) {
-      const legType = String(leg.type);
-      marketEngine.registerConditionalOrder({
-        id: legId,
-        sessionId: session,
-        market,
-        symbol,
-        currency: market === 'KR' ? 'KRW' : 'USD',
-        side: side as 'BUY' | 'SELL',
-        type: legType === 'STOP' ? 'STOP' : 'TAKE_PROFIT',
-        quantity,
-        stopPrice: String(leg.stopPrice ?? leg.limitPrice),
-        status: 'PENDING_TRIGGER',
-        version: 0n,
-        filledQuantity: '0',
-      });
-    }
-    await publishSnapshot(session, 'ORDER_PLACED');
-    json(response, 201, { id: ids[0], status: 'PENDING_TRIGGER' });
-    return;
-  }
-  const id = randomUUID();
-  if (!unitOfWork) throw new Error('unit of work is not initialized');
-  const sequence = BigInt(await nextSequence(session, 'ORDER_PLACED'));
-  const eventId = randomUUID();
-  await commitTradingMutation(unitOfWork, {
-    sessionId: session,
-    idempotencyKey: key,
-    requestHash: canonicalRequestHash(input),
-    order: {
-      id,
-      marketCode: market,
-      symbol,
-      orderType: type as 'MARKET' | 'LIMIT',
-      side: side as 'BUY' | 'SELL',
-      quantity,
-      status: 'OPEN',
-      ...(input.limitPrice === undefined
-        ? {}
-        : { limitPrice: String(input.limitPrice) }),
-    },
-    audit: {
-      id: randomUUID(),
-      eventType: 'ORDER_PLACED',
-      payload: input,
-      occurredAt: new Date(),
-      sessionReference: session,
-    },
-    outbox: {
-      id: randomUUID(),
-      eventId,
-      streamSequence: sequence,
-      eventType: 'ORDER_PLACED',
-      payload: { orderId: id },
-    },
-    response: {
-      statusCode: 201,
-      body: { id, status: 'OPEN', filledQuantity: '0', quantity },
-    },
-  });
-  const matched = await engines.get(market)?.placeImmediateOrder({
-    id,
-    sessionId: session,
-    market,
-    symbol,
-    currency: market === 'KR' ? 'KRW' : 'USD',
-    side: side as 'BUY' | 'SELL',
-    type: type as 'MARKET' | 'LIMIT',
-    quantity,
-    ...(input.limitPrice === undefined
-      ? {}
-      : { limitPrice: String(input.limitPrice) }),
-  });
-  const status = matched?.status ?? 'OPEN';
-  const filled = matched?.filledQuantity ?? '0';
-  await publishSnapshot(session, 'ORDER_PLACED', {
-    sequence: sequence.toString(),
-  });
-  json(response, 201, { id, status, filledQuantity: filled, quantity });
 }
 
 async function upsertPosition(
@@ -572,7 +414,6 @@ async function resetState(): Promise<void> {
     { channel: 'orderBook', market: 'US', symbols: ['AAPL'] },
     { channel: 'trade', market: 'US', symbols: ['AAPL'] },
   ]);
-  idempotencyKeys.clear();
   books.clear();
   mode = 'NORMAL';
   snapshotRequestCount = 0;
@@ -970,7 +811,7 @@ async function principal(
   return authenticated.session;
 }
 
-async function executeOrder(command: {
+async function executeCancelOrAmend(command: {
   action: 'place' | 'amend' | 'cancel';
   sessionId: string;
   orderId?: string;
@@ -997,34 +838,7 @@ async function executeOrder(command: {
       code: 'ORDER_STATE_CONFLICT',
       statusCode: 409,
     });
-  let result: unknown;
-  let statusCode = 200;
-  const reply = {
-    raw: {},
-    code(code: number) {
-      statusCode = code;
-      return this;
-    },
-    headers() {
-      return this;
-    },
-    send(value: unknown) {
-      result = value;
-      return value;
-    },
-  } as unknown as FastifyReply;
-  await placeOrder(
-    {
-      raw: {},
-      body: command.input,
-      headers: { 'idempotency-key': randomUUID() },
-    } as unknown as FastifyRequest,
-    reply,
-    command.sessionId,
-  );
-  if (statusCode >= 400)
-    throw Object.assign(new Error('order rejected'), result);
-  return result;
+  throw new Error('placement must use OrderPlacementService');
 }
 
 async function main(): Promise<void> {
@@ -1148,6 +962,24 @@ async function main(): Promise<void> {
       }),
     );
   }
+  const orderPlacementService = new OrderPlacementService({
+    unitOfWork,
+    engine: (market) => engines.get(market),
+    nextSequence: async (sessionId, mutationKind) =>
+      BigInt(await nextSequence(sessionId, mutationKind)),
+    afterPlacement: (sessionId, sequence) =>
+      publishSnapshot(sessionId, 'ORDER_PLACED', {
+        sequence: sequence.toString(),
+      }),
+  });
+  const orderService = new OrderService({
+    placement: orderPlacementService,
+    execute: executeCancelOrAmend,
+    capabilities: () =>
+      mode === 'NORMAL'
+        ? new Set(['PLACE', 'AMEND', 'CANCEL'])
+        : new Set(['CANCEL']),
+  });
   const fxService = new FxService({
     loadWallets: async (sessionId) => {
       const rows = await pool.query<{
@@ -1278,11 +1110,7 @@ async function main(): Promise<void> {
       });
       await registerOrderRoutes(app, {
         principal,
-        execute: executeOrder,
-        capabilities: () =>
-          mode === 'NORMAL'
-            ? new Set(['PLACE', 'AMEND', 'CANCEL'])
-            : new Set(['CANCEL']),
+        service: orderService,
       });
     },
   });

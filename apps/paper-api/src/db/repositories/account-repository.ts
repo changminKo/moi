@@ -52,7 +52,8 @@ export interface ReservePositionInput {
 export interface ReservationInput {
   readonly id: string;
   readonly sessionId: string;
-  readonly orderId: string;
+  readonly orderId?: string;
+  readonly ocoGroupId?: string;
   readonly kind: 'CASH' | 'POSITION';
   readonly amount: DecimalString;
   readonly currency?: Currency;
@@ -314,31 +315,47 @@ export async function recordReservation(
   const reservation = snapshotInput({
     id: input.id,
     sessionId: input.sessionId,
-    orderId: input.orderId,
+    orderId: input.orderId ?? null,
+    ocoGroupId: input.ocoGroupId ?? null,
     kind: input.kind,
     amount: input.amount,
     currency: input.currency ?? null,
     marketCode: input.marketCode ?? null,
     symbol: input.symbol ?? null,
   });
+  if ((reservation.orderId === null) === (reservation.ocoGroupId === null)) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'reservation must name exactly one order or OCO group',
+    );
+  }
   connection.acquireLock({
     table: 'anonymous_sessions',
     key: reservation.sessionId,
     strength: 'KEY_SHARE',
   });
-  connection.acquireLock({
-    table: 'orders',
-    key: reservation.orderId,
-    strength: 'KEY_SHARE',
-  });
+  if (reservation.orderId !== null) {
+    connection.acquireLock({
+      table: 'orders',
+      key: reservation.orderId,
+      strength: 'KEY_SHARE',
+    });
+  } else {
+    connection.acquireLock({
+      table: 'oco_groups',
+      key: reservation.ocoGroupId as string,
+      strength: 'KEY_SHARE',
+    });
+  }
 
   await sql`
     insert into reservations (
-      id, session_id, order_id, kind, currency, market_code, symbol, amount
+      id, session_id, order_id, oco_group_id, kind, currency, market_code,
+      symbol, amount
     ) values (
       ${reservation.id}, ${reservation.sessionId}, ${reservation.orderId},
-      ${reservation.kind}, ${reservation.currency}, ${reservation.marketCode},
-      ${reservation.symbol}, ${reservation.amount}
+      ${reservation.ocoGroupId}, ${reservation.kind}, ${reservation.currency},
+      ${reservation.marketCode}, ${reservation.symbol}, ${reservation.amount}
     )
   `.execute(connection.executor);
 }
