@@ -965,8 +965,6 @@ async function main(): Promise<void> {
   const orderPlacementService = new OrderPlacementService({
     unitOfWork,
     engine: (market) => engines.get(market),
-    nextSequence: async (sessionId, mutationKind) =>
-      BigInt(await nextSequence(sessionId, mutationKind)),
     afterPlacement: (sessionId, sequence) =>
       publishSnapshot(sessionId, 'ORDER_PLACED', {
         sequence: sequence.toString(),

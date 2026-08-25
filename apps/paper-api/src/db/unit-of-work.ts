@@ -26,6 +26,10 @@ import {
   createAccountRepository,
 } from './repositories/account-repository.js';
 import {
+  type AccountSequenceRepository,
+  createAccountSequenceRepository,
+} from './repositories/account-sequence-repository.js';
+import {
   type AuditRepository,
   createAuditRepository,
 } from './repositories/audit-repository.js';
@@ -64,6 +68,7 @@ export interface LedgerConnection extends LockOrderGuard {
 /** Everything an application service may do inside one transaction. */
 export interface TradingTransaction {
   readonly sessions: SessionRepository;
+  readonly sequences: AccountSequenceRepository;
   readonly accounts: AccountRepository;
   readonly orders: OrderRepository;
   readonly audit: AuditRepository;
@@ -171,6 +176,7 @@ function createTradingTransaction(
 ): TradingTransaction {
   const transaction = {
     sessions: createSessionRepository(connection),
+    sequences: createAccountSequenceRepository(connection),
     accounts: createAccountRepository(connection),
     orders: createOrderRepository(connection),
     audit: createAuditRepository(connection),
@@ -309,7 +315,7 @@ export interface TradingMutationAudit {
 export interface TradingMutationOutbox {
   readonly id: string;
   readonly eventId: string;
-  readonly streamSequence: bigint;
+  readonly streamSequence?: bigint;
   readonly eventType: string;
   readonly payload: unknown;
 }
@@ -323,6 +329,8 @@ export interface TradingMutationInput {
   readonly sessionId: string;
   readonly idempotencyKey: string;
   readonly requestHash: string;
+  /** When present, allocate the outbox sequence inside this mutation. */
+  readonly mutationKind?: string;
   readonly order: TradingMutationOrder;
   readonly audit: TradingMutationAudit;
   readonly outbox: TradingMutationOutbox;
@@ -343,6 +351,8 @@ export interface TradingMutationResult {
   readonly replayed: boolean;
   readonly statusCode: number;
   readonly body: unknown;
+  /** Present when this mutation atomically allocated a fresh sequence. */
+  readonly sequence?: bigint;
 }
 
 export type OcoPlacementReservation =
@@ -364,6 +374,8 @@ export interface OcoPlacementInput {
   readonly sessionId: string;
   readonly idempotencyKey: string;
   readonly requestHash: string;
+  /** When present, allocate the outbox sequence inside this mutation. */
+  readonly mutationKind?: string;
   readonly groupId: string;
   readonly legs: readonly [TradingMutationOrder, TradingMutationOrder];
   readonly reservation: OcoPlacementReservation;
@@ -387,6 +399,7 @@ export async function commitOcoPlacement(
     sessionId: input.sessionId,
     idempotencyKey: input.idempotencyKey,
     requestHash: input.requestHash,
+    mutationKind: input.mutationKind,
     groupId: input.groupId,
     firstLeg,
     secondLeg,
@@ -507,11 +520,24 @@ export async function commitOcoPlacement(
         ? {}
         : { sessionReference: request.audit.sessionReference }),
     });
+    const sequence =
+      request.mutationKind === undefined
+        ? request.outbox.streamSequence
+        : await tx.sequences.allocate({
+            sessionId: request.sessionId,
+            mutationKind: request.mutationKind,
+          });
+    if (sequence === undefined) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'an outbox sequence or mutation kind is required',
+      );
+    }
     await tx.outbox.append({
       id: request.outbox.id,
       eventId: request.outbox.eventId,
       sessionId: request.sessionId,
-      streamSequence: request.outbox.streamSequence,
+      streamSequence: sequence,
       eventType: request.outbox.eventType,
       payload: request.outbox.payload,
     });
@@ -519,6 +545,7 @@ export async function commitOcoPlacement(
       replayed: false,
       statusCode: request.responseStatusCode,
       body: responseBody,
+      ...(request.mutationKind === undefined ? {} : { sequence }),
     };
   });
 }
@@ -559,6 +586,7 @@ export async function commitTradingMutation(
     sessionId: input.sessionId,
     idempotencyKey: input.idempotencyKey,
     requestHash: input.requestHash,
+    mutationKind: input.mutationKind,
     orderId: order.id,
     orderMarketCode: order.marketCode,
     orderSymbol: order.symbol,
@@ -715,11 +743,24 @@ export async function commitTradingMutation(
         : { sessionReference: request.auditSessionReference }),
     });
 
+    const sequence =
+      request.mutationKind === undefined
+        ? request.outboxStreamSequence
+        : await tx.sequences.allocate({
+            sessionId: request.sessionId,
+            mutationKind: request.mutationKind,
+          });
+    if (sequence === undefined) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'an outbox sequence or mutation kind is required',
+      );
+    }
     await tx.outbox.append({
       id: request.outboxId,
       eventId: request.outboxEventId,
       sessionId: request.sessionId,
-      streamSequence: request.outboxStreamSequence,
+      streamSequence: sequence,
       eventType: request.outboxEventType,
       payload: request.outboxPayload,
     });
@@ -728,6 +769,7 @@ export async function commitTradingMutation(
       replayed: false,
       statusCode: request.responseStatusCode,
       body: responseBody,
+      ...(request.mutationKind === undefined ? {} : { sequence }),
     };
   });
 }

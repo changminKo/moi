@@ -1095,12 +1095,136 @@ describe('serialization and deadlock retries', () => {
 });
 
 describe('commitTradingMutation', () => {
+  async function placementSequences(sessionId: string): Promise<{
+    readonly account: readonly string[];
+    readonly outbox: readonly string[];
+  }> {
+    const result = await sql<{
+      account_sequences: string[];
+      outbox_sequences: string[];
+    }>`
+      select
+        array(
+          select account_sequence::text
+          from account_sequences
+          where session_id = ${sessionId}
+          order by account_sequence
+        ) as account_sequences,
+        array(
+          select stream_sequence::text
+          from outbox_events
+          where session_id = ${sessionId}
+          order by stream_sequence
+        ) as outbox_sequences
+    `.execute(db);
+    return {
+      account: result.rows[0]?.account_sequences ?? [],
+      outbox: result.rows[0]?.outbox_sequences ?? [],
+    };
+  }
+
+  function ocoPlacementCommand(sessionId: string) {
+    return {
+      sessionId,
+      idempotencyKey: 'oco-sequence-key',
+      requestHash: 'oco-sequence-hash',
+      input: {
+        market: 'US' as const,
+        symbol: 'AAPL',
+        side: 'SELL' as const,
+        quantity: '2',
+        type: 'OCO' as const,
+        legs: [
+          {
+            market: 'US' as const,
+            symbol: 'AAPL',
+            side: 'SELL' as const,
+            quantity: '2',
+            type: 'LIMIT' as const,
+            limitPrice: '210',
+          },
+          {
+            market: 'US' as const,
+            symbol: 'AAPL',
+            side: 'SELL' as const,
+            quantity: '2',
+            type: 'STOP' as const,
+            stopPrice: '190',
+          },
+        ],
+      },
+    };
+  }
+
+  function ocoPlacementService(notifications: bigint[]) {
+    return new OrderPlacementService({
+      unitOfWork: new UnitOfWork(db, {
+        backoff: recordBackoff().backoff,
+      }),
+      engine: () => ({
+        placeImmediateOrder: async () => undefined,
+        registerConditionalOrder: () => undefined,
+      }),
+      afterPlacement: async (_sessionId, sequence) => {
+        notifications.push(sequence);
+      },
+    });
+  }
+
+  it('keeps the committed OCO sequence unchanged on durable replay', async () => {
+    const sessionId = await insertSession();
+    await insertPosition(sessionId, 'AAPL', '2');
+    const notifications: bigint[] = [];
+    const service = ocoPlacementService(notifications);
+    const command = ocoPlacementCommand(sessionId);
+
+    const first = await service.place(command);
+    const replay = await service.place(command);
+
+    expect(replay).toEqual(first);
+    expect(await placementSequences(sessionId)).toEqual({
+      account: ['1'],
+      outbox: ['1'],
+    });
+    expect(notifications).toEqual([1n]);
+  });
+
+  it('rolls back the OCO sequence when placement fails', async () => {
+    const sessionId = await insertSession();
+    const notifications: bigint[] = [];
+    const service = ocoPlacementService(notifications);
+
+    await expect(service.place(ocoPlacementCommand(sessionId))).rejects.toThrow(
+      DomainError,
+    );
+
+    expect(await placementSequences(sessionId)).toEqual({
+      account: [],
+      outbox: [],
+    });
+    expect(notifications).toEqual([]);
+  });
+
+  it('commits one OCO account sequence shared by outbox and notification', async () => {
+    const sessionId = await insertSession();
+    await insertPosition(sessionId, 'AAPL', '2');
+    const notifications: bigint[] = [];
+    const service = ocoPlacementService(notifications);
+
+    await service.place(ocoPlacementCommand(sessionId));
+
+    expect(await placementSequences(sessionId)).toEqual({
+      account: ['1'],
+      outbox: ['1'],
+    });
+    expect(notifications).toEqual([1n]);
+  });
+
   it('does not register OCO engine legs again when durable idempotency replays', async () => {
     const sessionId = await insertSession();
     await insertPosition(sessionId, 'AAPL', '2');
     const unitOfWork = new UnitOfWork(db, { backoff: recordBackoff().backoff });
     const registered: string[] = [];
-    let sequence = 0n;
     let notifications = 0;
     const service = new OrderPlacementService({
       unitOfWork,
@@ -1110,10 +1234,6 @@ describe('commitTradingMutation', () => {
           registered.push(order.id);
         },
       }),
-      nextSequence: async () => {
-        sequence += 1n;
-        return sequence;
-      },
       afterPlacement: async () => {
         notifications += 1;
       },
@@ -1950,6 +2070,15 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
         lastSeenAt: FIXED_NOW,
       }),
   ],
+  'sequences.allocate': [
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      return await tx.sequences.allocate({
+        sessionId: fixture.sessionId,
+        mutationKind: 'ORDER_PLACED',
+      });
+    },
+  ],
   'accounts.lockWallet': [
     (tx, fixture) =>
       tx.accounts.lockWallet({ sessionId: fixture.sessionId, currency: 'KRW' }),
@@ -2148,6 +2277,7 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'sessions.lock#0': [],
   'sessions.expire#0': [],
   'sessions.touch#0': [],
+  'sequences.allocate#0': [],
   'accounts.lockWallet#0': [],
   'accounts.lockPosition#0': [],
   'accounts.reserveCash#0': [],

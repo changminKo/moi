@@ -48,10 +48,6 @@ export interface OrderPlacementEngine {
 export interface OrderPlacementServiceDependencies {
   readonly unitOfWork: UnitOfWork;
   readonly engine: (market: Market) => OrderPlacementEngine | undefined;
-  readonly nextSequence: (
-    sessionId: string,
-    mutationKind: string,
-  ) => Promise<bigint>;
   readonly afterPlacement?: (
     sessionId: string,
     sequence: bigint,
@@ -89,10 +85,6 @@ export class OrderPlacementService {
     input: Exclude<PlaceOrderInput, { type: 'OCO' }>,
   ): Promise<unknown> {
     const id = this.#id();
-    const sequence = await this.#deps.nextSequence(
-      command.sessionId,
-      'ORDER_PLACED',
-    );
     const response = {
       id,
       status: 'OPEN',
@@ -103,6 +95,7 @@ export class OrderPlacementService {
       sessionId: command.sessionId,
       idempotencyKey: command.idempotencyKey,
       requestHash: command.requestHash,
+      mutationKind: 'ORDER_PLACED',
       order: {
         id,
         marketCode: input.market,
@@ -119,12 +112,13 @@ export class OrderPlacementService {
           : { stopPrice: input.stopPrice }),
       },
       audit: this.#audit(command.sessionId, input, id),
-      outbox: this.#outbox(command.sessionId, sequence, id),
+      outbox: this.#outbox(command.sessionId, id),
       response: { statusCode: 201, body: response },
     });
     if (committed.replayed) {
       return committed.body;
     }
+    const sequence = this.#committedSequence(committed.sequence);
 
     if (input.type === 'MARKET' || input.type === 'LIMIT') {
       const engine = this.#engine(input.market);
@@ -156,10 +150,6 @@ export class OrderPlacementService {
     }
     const groupId = this.#id();
     const legIds = [this.#id(), this.#id()] as const;
-    const sequence = await this.#deps.nextSequence(
-      command.sessionId,
-      'ORDER_PLACED',
-    );
     const currency = currencyFor(input.market);
     const persistedLegs = legs.map(
       (leg, index): TradingMutationOrder => ({
@@ -213,16 +203,18 @@ export class OrderPlacementService {
       sessionId: command.sessionId,
       idempotencyKey: command.idempotencyKey,
       requestHash: command.requestHash,
+      mutationKind: 'ORDER_PLACED',
       groupId,
       legs: persistedLegs,
       reservation: shared,
       audit: this.#audit(command.sessionId, input, legIds[0]),
-      outbox: this.#outbox(command.sessionId, sequence, legIds[0]),
+      outbox: this.#outbox(command.sessionId, legIds[0]),
       response: { statusCode: 201, body: response },
     });
     if (committed.replayed) {
       return committed.body;
     }
+    const sequence = this.#committedSequence(committed.sequence);
 
     const engine = this.#engine(input.market);
     for (const [index, leg] of legs.entries()) {
@@ -268,14 +260,20 @@ export class OrderPlacementService {
     };
   }
 
-  #outbox(sessionId: string, sequence: bigint, orderId: string) {
+  #outbox(sessionId: string, orderId: string) {
     return {
       id: this.#id(),
       eventId: this.#id(),
-      streamSequence: sequence,
       eventType: 'ORDER_PLACED',
       payload: { orderId },
       sessionId,
     };
+  }
+
+  #committedSequence(sequence: bigint | undefined): bigint {
+    if (sequence === undefined) {
+      throw new Error('order placement committed without an account sequence');
+    }
+    return sequence;
   }
 }
