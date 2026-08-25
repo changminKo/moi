@@ -6,5 +6,6 @@ packages:
 # Docker daemon, and pnpm fails the install while the decision is unrecorded.
 allowBuilds:
   cpu-features: false
+  esbuild: true
   protobufjs: false
   ssh2: false

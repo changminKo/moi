@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from '../../lib/api-client';
+import { readRuntimeConfig } from '../../lib/runtime-config';
 import {
   parseUserStreamMessage,
   type UserStreamMessage,
@@ -22,8 +23,7 @@ type Options = Readonly<{
 }>;
 
 function streamUrl(): string {
-  const url = new URL('/api/v1/stream', window.location.origin);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = new URL('/api/v1/stream', readRuntimeConfig().wsOrigin);
   return url.toString();
 }
 
@@ -116,9 +116,18 @@ export function usePortfolioStream(
             socket.close(4000, 'heartbeat timeout');
           }, heartbeatInterval.current * 2);
         } else if (message.type === 'event') {
-          setState((current) =>
-            current ? reducePortfolio(current, message) : current,
-          );
+          setState((current) => {
+            if (!current) return current;
+            const next = reducePortfolio(current, message);
+            if (
+              next.sync.status === 'STALE' &&
+              next.sync.refreshRequested &&
+              current.sync.status !== 'STALE'
+            ) {
+              queueMicrotask(requestRefresh);
+            }
+            return next;
+          });
         } else if (message.type === 'resync-required') {
           setState((current) =>
             current ? reducePortfolio(current, message) : current,

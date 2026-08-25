@@ -1,3 +1,4 @@
+import Decimal from 'decimal.js';
 import { useRef, useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
@@ -64,7 +65,7 @@ export function OpenOrders({
                 <span>
                   Filled {filled} / Remaining{' '}
                   {quantity && filled !== quantity
-                    ? String(Number(quantity) - Number(filled))
+                    ? new Decimal(quantity).sub(filled).toString()
                     : '0'}
                 </span>
                 {siblings?.length ? (

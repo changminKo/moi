@@ -15,7 +15,9 @@ export function readRuntimeConfig(
     apiOrigin: window.location.origin,
   },
   options: Readonly<{ production?: boolean }> = {
-    production: import.meta.env.PROD,
+    production:
+      import.meta.env.PROD &&
+      import.meta.env.VITE_SKIPJACK_ALLOW_LOCAL_HTTP !== 'true',
   },
 ): RuntimeConfig {
   let parsed: URL;

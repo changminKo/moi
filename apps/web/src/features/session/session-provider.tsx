@@ -70,11 +70,21 @@ export function SessionProvider({
   // The ref-backed promise makes this a once-per-provider bootstrap, including StrictMode.
   // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrap is intentionally invoked once.
   useEffect(() => bootstrap(), []);
+  const content =
+    state.status === 'loading' ? (
+      <p role="status">Loading session…</p>
+    ) : state.status === 'error' ? (
+      <button type="button" onClick={state.retry}>
+        Retry session
+      </button>
+    ) : (
+      children
+    );
   return (
     <SessionContext.Provider
       value={{ ...state, getCsrfToken: () => csrfToken.current }}
     >
-      {children}
+      {content}
     </SessionContext.Provider>
   );
 }

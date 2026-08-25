@@ -1,4 +1,12 @@
 import type { Wallet } from '../../lib/api-types';
+
+function displayAmount(currency: Wallet['currency'], value: string): string {
+  const [whole, fraction] = value.split('.');
+  const grouped = (whole ?? '0').replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const amount = fraction ? `${grouped}.${fraction}` : grouped;
+  return currency === 'KRW' ? `₩${amount}` : `$${amount}`;
+}
+
 export function WalletSummary({ wallets }: { wallets: readonly Wallet[] }) {
   return (
     <section className="panel" aria-labelledby="wallet-title">
@@ -9,11 +17,11 @@ export function WalletSummary({ wallets }: { wallets: readonly Wallet[] }) {
             <h3>{wallet.currency}</h3>
             <dl>
               <dt>available</dt>
-              <dd>{wallet.available}</dd>
+              <dd>{displayAmount(wallet.currency, wallet.available)}</dd>
               <dt>reserved</dt>
-              <dd>{wallet.reserved}</dd>
+              <dd>{displayAmount(wallet.currency, wallet.reserved)}</dd>
               <dt>total</dt>
-              <dd>{wallet.total}</dd>
+              <dd>{displayAmount(wallet.currency, wallet.total)}</dd>
             </dl>
           </article>
         ))}
