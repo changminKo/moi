@@ -10,6 +10,7 @@ import type {
   Side,
 } from '@skipjack/trading-core';
 import type { MarketEnvelope } from '../market-data/market-state-store.js';
+import type { EmergencyLatch } from '../safety/emergency-latch.js';
 import {
   type ConditionalOrder,
   evaluateConditional,
@@ -24,7 +25,6 @@ import {
   createPricingContext,
   type PricingContext,
 } from './pricing-context.js';
-import type { EmergencyLatch } from '../safety/emergency-latch.js';
 
 export interface TradeEvent {
   readonly price: DecimalString;
@@ -95,6 +95,20 @@ export class PaperEngine {
   async onOrderBook(
     envelope: MarketEnvelope<OrderBookSnapshot>,
   ): Promise<void> {
+    await this.#onOrderBook(envelope, 'WEBSOCKET');
+  }
+
+  /** Applies only a snapshot returned by the recovery REST boundary. */
+  async onRecoveryOrderBook(
+    envelope: MarketEnvelope<OrderBookSnapshot>,
+  ): Promise<void> {
+    await this.#onOrderBook(envelope, 'RECOVERY_REST');
+  }
+
+  async #onOrderBook(
+    envelope: MarketEnvelope<OrderBookSnapshot>,
+    source: 'WEBSOCKET' | 'RECOVERY_REST',
+  ): Promise<void> {
     await this.#serialize(async () => {
       this.#assertEnvelope(envelope);
       if (
@@ -110,7 +124,7 @@ export class PaperEngine {
       )
         return;
       this.#books.set(this.#key(book.market, book.symbol), { envelope, book });
-      await this.#matchBook(book.market, book.symbol, envelope);
+      await this.#matchBook(book.market, book.symbol, envelope, source);
     });
   }
 
@@ -206,13 +220,50 @@ export class PaperEngine {
       this.#orders.set(id, order);
       const cached = this.#books.get(this.#key(order.market, order.symbol));
       if (cached !== undefined)
-        await this.#matchBook(order.market, order.symbol, cached.envelope);
+        await this.#matchBook(
+          order.market,
+          order.symbol,
+          cached.envelope,
+          'WEBSOCKET',
+        );
       return this.#orders.get(id) as PaperOrder;
     });
   }
 
   getOrder(id: string): PaperOrder | undefined {
     return this.#orders.get(id);
+  }
+
+  async cancelOrder(id: string): Promise<PaperOrder | undefined> {
+    return this.#serialize(async () => {
+      const current = this.#orders.get(id);
+      if (!current) return undefined;
+      if (
+        current.status === 'FILLED' ||
+        current.status === 'CANCELLED' ||
+        current.status === 'EXPIRED' ||
+        current.status === 'REJECTED'
+      )
+        return current;
+      const cancelled = {
+        ...current,
+        status: 'CANCELLED' as const,
+        version: current.version + 1n,
+      };
+      this.#orders.set(id, cancelled);
+      return cancelled;
+    });
+  }
+
+  /** Clears process-local matcher state after the durable boundary is drained. */
+  async reset(): Promise<void> {
+    await this.#serialize(async () => {
+      this.#orders.clear();
+      this.#books.clear();
+      this.#trades.clear();
+      this.#conditional.clear();
+      this.#latest.clear();
+    });
   }
 
   registerConditionalOrder(order: ConditionalPaperOrder): void {
@@ -248,6 +299,7 @@ export class PaperEngine {
     market: Market,
     symbol: string,
     envelope: MarketEnvelope<OrderBookSnapshot>,
+    source: 'WEBSOCKET' | 'RECOVERY_REST',
   ): Promise<void> {
     const now = this.#options.now?.() ?? new Date();
     if (
@@ -266,7 +318,7 @@ export class PaperEngine {
       )
         continue;
       const pricing = createPricingContext({
-        source: 'WEBSOCKET',
+        source,
         recoveryEpoch: envelope.recoveryEpoch,
         marketDataVersion: envelope.marketDataVersion,
         leaderFencingToken: envelope.leaderFencingToken,
@@ -275,6 +327,7 @@ export class PaperEngine {
         book,
         pricingModelVersion: this.#options.pricingModelVersion ?? 'default',
         feeModelVersion: this.#options.feeModel.version,
+        recoveryFill: source === 'RECOVERY_REST',
       });
       const match = matchOrder(order, book, pricing, this.#options.feeModel);
       if (

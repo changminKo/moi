@@ -22,7 +22,7 @@ async function submitOrder(page: import('@playwright/test').Page) {
   expect((await responsePromise).ok()).toBe(true);
 }
 
-test('reconciles a KR market order after partial and complete fills', async ({
+test('reconciles a KR limit order after partial and complete fills', async ({
   page,
   paperSystem,
 }) => {
@@ -34,7 +34,9 @@ test('reconciles a KR market order after partial and complete fills', async ({
   });
   await page.goto('/trade');
   await selectInstrument(page, '005930');
+  await page.getByLabel('Type').selectOption('LIMIT');
   await page.getByLabel('Quantity').fill('3');
+  await page.getByLabel('Price').fill('70000');
   await submitOrder(page);
   await page.getByRole('link', { name: '포트폴리오' }).click();
   await expect(page.getByText('PARTIALLY_FILLED')).toBeVisible();
@@ -73,9 +75,17 @@ test('cancels the OCO sibling and releases its reservation', async ({
   page,
   paperSystem,
 }) => {
-  await paperSystem.seedPosition({ symbol: 'AAPL', quantity: '2' });
   await page.goto('/trade');
   await selectInstrument(page, 'AAPL');
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Price').fill('200');
+  await submitOrder(page);
+  await paperSystem.fill({
+    orderId: await paperSystem.latestOrderId(),
+    quantity: '2',
+    price: '200',
+  });
   await page.getByLabel('Sell').check();
   await page.getByLabel('Type').selectOption('OCO');
   await page.getByLabel('Quantity').fill('2');
@@ -86,7 +96,7 @@ test('cancels the OCO sibling and releases its reservation', async ({
   await page.getByRole('link', { name: '포트폴리오' }).click();
   await expect(page.getByRole('row', { name: /AAPL 0 2 2/ })).toBeVisible();
   await paperSystem.triggerOco({ orderId, price: '210' });
-  await expect(page.getByText('AAPL FILLED')).toBeVisible();
+  await expect(page.getByText('AAPL FILLED')).toHaveCount(2);
   await expect(page.getByText('AAPL CANCELLED')).toBeVisible();
   await expect(page.getByRole('row', { name: /AAPL 0 0 0/ })).toBeVisible();
 });

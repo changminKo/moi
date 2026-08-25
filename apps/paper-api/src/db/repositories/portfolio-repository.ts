@@ -1,3 +1,4 @@
+import { decimal } from '@skipjack/trading-core';
 import { sql } from 'kysely';
 import type {
   HistoricalOrdersPage,
@@ -11,6 +12,9 @@ type Row = Record<string, unknown>;
 const text = (value: unknown): string => String(value);
 const nullable = (value: unknown): string | null =>
   value === null || value === undefined ? null : String(value);
+const numeric = (value: unknown): string => decimal(String(value)).toString();
+const nullableNumeric = (value: unknown): string | null =>
+  value === null || value === undefined ? null : numeric(value);
 const encodeCursor = (createdAt: unknown, id: unknown): string =>
   Buffer.from(`${text(createdAt)}\n${text(id)}`, 'utf8').toString('base64url');
 const decodeCursor = (cursor: string): readonly [string, string] => {
@@ -28,11 +32,11 @@ function order(row: Row): Record<string, string | null> {
     symbol: text(row.symbol),
     type: text(row.order_type),
     side: text(row.side),
-    quantity: text(row.quantity),
-    filledQuantity: text(row.filled_quantity),
+    quantity: numeric(row.quantity),
+    filledQuantity: numeric(row.filled_quantity),
     status: text(row.status),
-    limitPrice: nullable(row.limit_price),
-    stopPrice: nullable(row.stop_price),
+    limitPrice: nullableNumeric(row.limit_price),
+    stopPrice: nullableNumeric(row.stop_price),
     terminalReason: nullable(row.terminal_reason),
   };
 }
@@ -51,6 +55,8 @@ export const createPortfolioRepository = (
       sequence,
       markets,
       recovery,
+      fills,
+      ocoSiblings,
     ] = await Promise.all([
       sql<Row>`select currency, total, available, reserved from wallets where session_id = ${sessionId} order by currency`.execute(
         connection.executor,
@@ -61,7 +67,7 @@ export const createPortfolioRepository = (
       sql<Row>`select id, order_id, oco_group_id, kind, currency, market_code, symbol, amount, released from reservations where session_id = ${sessionId} and not released order by id`.execute(
         connection.executor,
       ),
-      sql<Row>`select id, market_code, symbol, order_type, side, quantity, filled_quantity, status, limit_price, stop_price, terminal_reason from orders where session_id = ${sessionId} and status in ('RECEIVED','PENDING_TRIGGER','TRIGGERED','OPEN','PARTIALLY_FILLED') order by created_at, id`.execute(
+      sql<Row>`select id, market_code, symbol, order_type, side, quantity, filled_quantity, status, limit_price, stop_price, terminal_reason from orders where session_id = ${sessionId} order by created_at, id`.execute(
         connection.executor,
       ),
       sql<Row>`select coalesce(max(account_sequence), 0) as account_sequence from account_sequences where session_id = ${sessionId}`.execute(
@@ -71,6 +77,12 @@ export const createPortfolioRepository = (
         connection.executor,
       ),
       sql<Row>`select distinct on (o.market_code) o.market_code, f.is_recovery_fill from orders o join fills f on f.order_id = o.id where o.session_id = ${sessionId} order by o.market_code, f.occurred_at desc`.execute(
+        connection.executor,
+      ),
+      sql<Row>`select f.id, f.order_id, o.symbol, f.quantity, f.price, f.is_recovery_fill from fills f join orders o on o.id = f.order_id where o.session_id = ${sessionId} order by f.occurred_at, f.id`.execute(
+        connection.executor,
+      ),
+      sql<Row>`select a.id as order_id, b.id as sibling_id from orders a join orders b on b.oco_group_id = a.oco_group_id and b.id <> a.id where a.session_id = ${sessionId}`.execute(
         connection.executor,
       ),
     ]);
@@ -86,17 +98,17 @@ export const createPortfolioRepository = (
     return {
       wallets: wallets.rows.map((row) => ({
         currency: text(row.currency),
-        total: text(row.total),
-        available: text(row.available),
-        reserved: text(row.reserved),
+        total: numeric(row.total),
+        available: numeric(row.available),
+        reserved: numeric(row.reserved),
       })),
       positions: positions.rows.map((row) => ({
         market: text(row.market_code),
         symbol: text(row.symbol),
-        total: text(row.total_quantity),
-        available: text(row.available_quantity),
-        reserved: text(row.reserved_quantity),
-        averageCost: text(row.average_cost),
+        total: numeric(row.total_quantity),
+        available: numeric(row.available_quantity),
+        reserved: numeric(row.reserved_quantity),
+        averageCost: numeric(row.average_cost),
       })),
       reservations: reservations.rows.map((row) => ({
         id: text(row.id),
@@ -106,10 +118,24 @@ export const createPortfolioRepository = (
         currency: nullable(row.currency),
         market: nullable(row.market_code),
         symbol: nullable(row.symbol),
-        amount: text(row.amount),
+        amount: numeric(row.amount),
         released: row.released === true,
       })),
-      activeOrders: activeOrders.rows.map(order),
+      activeOrders: activeOrders.rows.map((row) => ({
+        ...order(row),
+        fills: fills.rows
+          .filter((fill) => text(fill.order_id) === text(row.id))
+          .map((fill) => ({
+            id: text(fill.id),
+            symbol: text(fill.symbol),
+            quantity: numeric(fill.quantity),
+            price: numeric(fill.price),
+            recoveryFill: fill.is_recovery_fill === true,
+          })),
+        siblingOrderIds: ocoSiblings.rows
+          .filter((sibling) => text(sibling.order_id) === text(row.id))
+          .map((sibling) => text(sibling.sibling_id)),
+      })),
       accountSequence: text(sequence.rows[0]?.account_sequence ?? '0'),
       market: { health, recoveryFill },
     } satisfies PortfolioSnapshot;

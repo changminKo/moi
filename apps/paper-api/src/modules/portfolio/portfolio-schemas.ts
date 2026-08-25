@@ -12,7 +12,7 @@ export interface PortfolioSnapshot {
   readonly wallets: readonly Record<string, string>[];
   readonly positions: readonly Record<string, string>[];
   readonly reservations: readonly Record<string, string | boolean | null>[];
-  readonly activeOrders: readonly Record<string, string | null>[];
+  readonly activeOrders: readonly Record<string, unknown>[];
   readonly accountSequence: string;
   readonly market: {
     readonly health: Readonly<Record<string, string>>;

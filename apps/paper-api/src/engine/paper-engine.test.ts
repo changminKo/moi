@@ -26,6 +26,29 @@ const book = {
 };
 
 describe('PaperEngine', () => {
+  it('derives recovery-fill provenance from a REST recovery book', async () => {
+    const pricingSources: string[] = [];
+    const engine = new PaperEngine({
+      feeModel,
+      onFill: (_order, _match, pricing) => {
+        pricingSources.push(`${pricing.source}:${pricing.recoveryFill}`);
+      },
+    });
+    await engine.placeImmediateOrder({
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'LIMIT',
+      limitPrice: '100',
+      quantity: '1',
+    });
+
+    await engine.onRecoveryOrderBook(envelope(book));
+
+    expect(pricingSources).toEqual(['RECOVERY_REST:true']);
+  });
   it('IOC partially fills and cancels the remainder', async () => {
     const engine = new PaperEngine({ feeModel });
     await engine.onOrderBook(envelope(book));
@@ -57,5 +80,61 @@ describe('PaperEngine', () => {
       quantity: '1',
     });
     expect(order.status).toBe('OPEN');
+  });
+
+  it('removes a cancelled order from subsequent matching', async () => {
+    const fills: string[] = [];
+    const engine = new PaperEngine({
+      feeModel,
+      onFill: (order) => {
+        fills.push(order.id);
+      },
+    });
+    await engine.placeImmediateOrder({
+      id: 'cancelled',
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'LIMIT',
+      limitPrice: '100',
+      quantity: '1',
+    });
+
+    await engine.cancelOrder('cancelled');
+    await engine.onOrderBook(envelope(book));
+
+    expect(fills).toEqual([]);
+    expect(engine.getOrder('cancelled')?.status).toBe('CANCELLED');
+  });
+
+  it('clears volatile orders and books when the runtime resets', async () => {
+    const engine = new PaperEngine({ feeModel });
+    await engine.onOrderBook(envelope(book));
+    await engine.placeImmediateOrder({
+      id: 'before-reset',
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      quantity: '1',
+    });
+
+    await engine.reset();
+    const after = await engine.placeImmediateOrder({
+      id: 'after-reset',
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      quantity: '1',
+    });
+
+    expect(engine.getOrder('before-reset')).toBeUndefined();
+    expect(after.status).toBe('OPEN');
+    expect(after.filledQuantity).toBe('0');
   });
 });

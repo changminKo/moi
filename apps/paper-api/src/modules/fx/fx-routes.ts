@@ -4,6 +4,10 @@ import type { FxService } from './fx-service.js';
 export async function registerFxRoutes(
   app: FastifyInstance,
   service: FxService,
+  dependencies: {
+    readonly principal?: (request: unknown) => Promise<{ id: string }>;
+    readonly canFx?: () => boolean;
+  } = {},
 ): Promise<void> {
   app.post('/api/v1/fx/quotes', async (request, reply) => {
     const parsed = fxQuoteSchema.safeParse(request.body);
@@ -15,8 +19,23 @@ export async function registerFxRoutes(
         requestId: request.id,
       });
     }
-    const sessionId = String(request.headers['x-session-id'] ?? 'anonymous');
-    return service.quote(sessionId, parsed.data);
+    if (dependencies.canFx?.() === false)
+      throw Object.assign(new Error('FX is disabled'), {
+        code: 'CANCEL_ONLY',
+        statusCode: 409,
+      });
+    const sessionId = dependencies.principal
+      ? (await dependencies.principal(request)).id
+      : String(request.headers['x-session-id'] ?? 'anonymous');
+    const quote = await service.quote(sessionId, parsed.data);
+    return {
+      quoteId: quote.id,
+      rate: quote.rate,
+      fee: quote.fee,
+      sourceAmount: quote.sourceAmount,
+      destinationAmount: quote.targetAmount,
+      expiresAt: quote.expiresAt,
+    };
   });
   app.post('/api/v1/fx/conversions', async (request, reply) => {
     const body = request.body as { quoteId?: string };
@@ -28,7 +47,14 @@ export async function registerFxRoutes(
         requestId: request.id,
       });
     }
-    const sessionId = String(request.headers['x-session-id'] ?? 'anonymous');
+    if (dependencies.canFx?.() === false)
+      throw Object.assign(new Error('FX is disabled'), {
+        code: 'CANCEL_ONLY',
+        statusCode: 409,
+      });
+    const sessionId = dependencies.principal
+      ? (await dependencies.principal(request)).id
+      : String(request.headers['x-session-id'] ?? 'anonymous');
     const key = String(request.headers['idempotency-key'] ?? '');
     if (!key) {
       return reply.code(400).send({

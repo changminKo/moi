@@ -60,8 +60,16 @@ test('rejects placement while degraded, permits cancel, then labels a recovery f
   paperSystem,
 }) => {
   await placeOpenOrder(page);
-  const orderId = await paperSystem.latestOrderId();
+  const cancelOrderId = await paperSystem.latestOrderId();
+  await placeOpenOrder(page);
+  const recoveryOrderId = await paperSystem.latestOrderId();
   await paperSystem.setMode('DEGRADED');
+  await paperSystem.setBook({
+    market: 'US',
+    symbol: 'AAPL',
+    bids: [{ price: '189', size: '1' }],
+    asks: [{ price: '190', size: '1' }],
+  });
   await page.reload();
   await expect(page.getByText('Market data delayed').first()).toBeVisible();
   await expect(
@@ -70,20 +78,17 @@ test('rejects placement while degraded, permits cancel, then labels a recovery f
   expect(await bypassOrderStatus(page, await mutationToken(page))).toBe(409);
 
   await page.getByRole('link', { name: '포트폴리오' }).click();
-  await page.getByRole('button', { name: 'Cancel' }).click();
-  await expect.poll(() => paperSystem.orderStatus(orderId)).toBe('CANCELLED');
+  await page.getByRole('button', { name: 'Cancel' }).first().click();
+  await expect
+    .poll(() => paperSystem.orderStatus(cancelOrderId))
+    .toBe('CANCELLED');
 
   await paperSystem.recover();
-  await placeOpenOrder(page);
-  const recoveryOrderId = await paperSystem.latestOrderId();
-  await paperSystem.fill({
-    orderId: recoveryOrderId,
-    quantity: '1',
-    price: '190',
-    recoveryFill: true,
-  });
   await page.getByRole('link', { name: '포트폴리오' }).click();
   await page.reload();
+  await expect
+    .poll(() => paperSystem.orderStatus(recoveryOrderId))
+    .toBe('FILLED');
   await expect(page.getByText('Recovery fill')).toBeVisible();
 });
 
@@ -128,11 +133,26 @@ test('requests exactly one REST snapshot for an account-sequence gap', async ({
 }) => {
   await page.goto('/portfolio');
   await paperSystem.waitForStream();
-  let snapshots = 0;
-  page.on('request', (request) => {
-    if (new URL(request.url()).pathname === '/api/v1/portfolio') snapshots += 1;
-  });
-  await paperSystem.emitSequenceGap();
-  await expect.poll(() => snapshots).toBe(1);
-  await expect.poll(() => paperSystem.snapshotRequests()).toBeGreaterThan(1);
+  const baseline = await paperSystem.snapshotStats();
+  await paperSystem.snapshotBarrier('hold');
+  try {
+    await paperSystem.emitSequenceGap({ count: 3, resync: true });
+    await expect
+      .poll(async () => (await paperSystem.snapshotStats()).inFlight)
+      .toBe(1);
+    await paperSystem.emitSequenceGap({ count: 2, resync: true });
+    const held = await paperSystem.snapshotStats();
+    expect(held.count - baseline.count).toBe(1);
+    expect(held.maxConcurrency).toBe(1);
+    expect(held.inFlight).toBe(1);
+  } finally {
+    await paperSystem.snapshotBarrier('release');
+  }
+  await expect
+    .poll(async () => (await paperSystem.snapshotStats()).completed)
+    .toBe(baseline.completed + 1);
+  const completed = await paperSystem.snapshotStats();
+  expect(completed.count - baseline.count).toBe(1);
+  expect(completed.inFlight).toBe(0);
+  expect(completed.maxConcurrency).toBe(1);
 });

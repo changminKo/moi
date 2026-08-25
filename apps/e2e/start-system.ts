@@ -10,6 +10,8 @@ import {
 import type { Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { FakeMarketData } from '@skipjack/market-data';
+import { createFeeModel, decimal } from '@skipjack/trading-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Pool } from 'pg';
 import {
@@ -19,6 +21,37 @@ import {
 } from 'testcontainers';
 import { buildApp } from '../paper-api/src/app.js';
 import type { AppConfig } from '../paper-api/src/config.js';
+import { createDatabase, type Database } from '../paper-api/src/db/database.js';
+import {
+  commitTradingMutation,
+  UnitOfWork,
+} from '../paper-api/src/db/unit-of-work.js';
+import type { OrderMatch } from '../paper-api/src/engine/match-orders.js';
+import {
+  type ConditionalPaperOrder,
+  PaperEngine,
+  type PaperOrder,
+} from '../paper-api/src/engine/paper-engine.js';
+import type { PricingContext } from '../paper-api/src/engine/pricing-context.js';
+import type { LeaderLease } from '../paper-api/src/market-data/leader-lease.js';
+import { MarketStateStore } from '../paper-api/src/market-data/market-state-store.js';
+import { RecoveryCoordinator } from '../paper-api/src/market-data/recovery-coordinator.js';
+import { registerFxRoutes } from '../paper-api/src/modules/fx/fx-routes.js';
+import { FxService } from '../paper-api/src/modules/fx/fx-service.js';
+import { registerHealthRoutes } from '../paper-api/src/modules/health/health-routes.js';
+import { registerInstrumentRoutes } from '../paper-api/src/modules/instruments/instrument-routes.js';
+import { InstrumentService } from '../paper-api/src/modules/instruments/instrument-service.js';
+import { canonicalRequestHash } from '../paper-api/src/modules/orders/canonical-request.js';
+import { registerOrderRoutes } from '../paper-api/src/modules/orders/order-routes.js';
+import { registerPortfolioRoutes } from '../paper-api/src/modules/portfolio/portfolio-routes.js';
+import { registerSessionRoutes } from '../paper-api/src/modules/session/session-routes.js';
+import {
+  createUnitOfWorkSessionStore,
+  SessionService,
+  verifyCsrfToken,
+} from '../paper-api/src/modules/session/session-service.js';
+import { SESSION_COOKIE } from '../paper-api/src/modules/session/session-token.js';
+import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
 import { stateFilePath } from './state-file.js';
 
 const API_PORT = 3100;
@@ -38,23 +71,28 @@ type Mode = 'NORMAL' | 'DEGRADED' | 'RECOVERING' | 'CANCEL_ONLY';
 type JsonObject = Record<string, unknown>;
 
 const books = new Map<string, Book>();
-const csrfTokens = new Map<string, string>();
-const fxQuotes = new Map<
-  string,
-  { sessionId: string; amount: string; destinationAmount: string }
->();
 const idempotencyKeys = new Set<string>();
 const streamSockets = new Map<string, Set<Socket>>();
-const pendingPositions: { symbol: string; quantity: string }[] = [];
 let mode: Mode = 'NORMAL';
 let snapshotRequestCount = 0;
+let snapshotCompletedCount = 0;
+let snapshotInFlight = 0;
+let snapshotMaxConcurrency = 0;
+let snapshotBarrier: Promise<void> | undefined;
+let releaseSnapshotBarrier: (() => void) | undefined;
 let pool: Pool;
 let postgres: StartedTestContainer;
 let redis: StartedTestContainer;
 let apiApp: FastifyInstance;
 let controlServer: Server;
 let webProcess: ChildProcess | undefined;
-let stopping = false;
+let database: Database | undefined;
+let unitOfWork: UnitOfWork | undefined;
+let sessionService: SessionService | undefined;
+const engines = new Map<Market, PaperEngine>();
+const recoveryCoordinators = new Map<Market, RecoveryCoordinator>();
+let fakeMarketData: FakeMarketData | undefined;
+let cleanupPromise: Promise<void> | undefined;
 
 type PublicRequest = IncomingMessage | FastifyRequest;
 type JsonResponse = ServerResponse | FastifyReply;
@@ -92,43 +130,6 @@ function cookies(request: PublicRequest): Map<string, string> {
       .map((part) => part.trim().split('='))
       .filter((pair): pair is [string, string] => pair.length === 2),
   );
-}
-
-function sessionId(request: PublicRequest): string | undefined {
-  return cookies(request).get('skipjack_e2e_session');
-}
-
-function requireSession(
-  request: PublicRequest,
-  response: JsonResponse,
-): string | undefined {
-  const id = sessionId(request);
-  if (!id) {
-    json(response, 401, {
-      code: 'SESSION_EXPIRED',
-      message: 'Session is required',
-      retryable: false,
-      requestId: randomUUID(),
-    });
-  }
-  return id;
-}
-
-function requireWrite(
-  request: PublicRequest,
-  response: JsonResponse,
-  id: string,
-): boolean {
-  if (request.headers['x-csrf-token'] !== csrfTokens.get(id)) {
-    json(response, 403, {
-      code: 'FORBIDDEN',
-      message: 'CSRF token is invalid',
-      retryable: false,
-      requestId: randomUUID(),
-    });
-    return false;
-  }
-  return true;
 }
 
 function encodeFrame(value: unknown): Buffer {
@@ -172,88 +173,18 @@ async function currentSequence(session: string): Promise<string> {
 }
 
 async function portfolio(session: string): Promise<JsonObject> {
-  const wallets = await pool.query<{
-    currency: 'KRW' | 'USD';
-    available: string;
-    reserved: string;
-    total: string;
-  }>(
-    'select currency, available::text, reserved::text, total::text from wallets where session_id = $1 order by currency',
-    [session],
-  );
-  const positions = await pool.query<{
-    market: Market;
-    symbol: string;
-    available: string;
-    reserved: string;
-    total: string;
-  }>(
-    `select market_code as market, symbol, available_quantity::text as available,
-            reserved_quantity::text as reserved, total_quantity::text as total
-       from positions where session_id = $1 order by market_code, symbol`,
-    [session],
-  );
-  const orders = await pool.query<{
-    id: string;
-    market: Market;
-    symbol: string;
-    type: string;
-    side: string;
-    quantity: string;
-    filledQuantity: string;
-    status: string;
-    groupId: string | null;
-  }>(
-    `select id::text, market_code as market, symbol, order_type as type, side,
-            quantity::text, filled_quantity::text as "filledQuantity", status,
-            oco_group_id::text as "groupId"
-       from orders where session_id = $1 order by created_at, id`,
-    [session],
-  );
-  const activeOrders = await Promise.all(
-    orders.rows.map(async (order) => {
-      const fills = await pool.query<{
-        id: string;
-        quantity: string;
-        price: string;
-        recoveryFill: boolean;
-      }>(
-        `select id::text, quantity::text, price::text,
-                is_recovery_fill as "recoveryFill"
-           from fills where order_id = $1 order by occurred_at, id`,
-        [order.id],
-      );
-      const siblings = order.groupId
-        ? await pool.query<{ id: string }>(
-            'select id::text from orders where oco_group_id = $1 and id <> $2 order by id',
-            [order.groupId, order.id],
-          )
-        : undefined;
-      return {
-        ...order,
-        fills: fills.rows.map((fill) => ({ ...fill, symbol: order.symbol })),
-        ...(siblings
-          ? { siblingOrderIds: siblings.rows.map((row) => row.id) }
-          : {}),
-      };
-    }),
-  );
-  return {
-    wallets: wallets.rows,
-    positions: positions.rows,
-    reservations: [],
-    activeOrders,
-    accountSequence: await currentSequence(session),
-    market: { health: { KR: mode, US: mode }, recoveryFill: {} },
-  };
+  if (!unitOfWork) throw new Error('unit of work is not initialized');
+  return (await unitOfWork.run((tx) =>
+    tx.portfolio.snapshot(session),
+  )) as unknown as JsonObject;
 }
 
 async function publishSnapshot(
   session: string,
   kind: string,
-  options: { duplicate?: boolean; gap?: boolean } = {},
+  options: { duplicate?: boolean; gap?: boolean; sequence?: string } = {},
 ): Promise<void> {
-  let sequence = await nextSequence(session, kind);
+  let sequence = options.sequence ?? (await nextSequence(session, kind));
   if (options.gap) sequence = await nextSequence(session, `${kind}_GAP`);
   sendStream(
     session,
@@ -265,39 +196,6 @@ async function publishSnapshot(
       payload: await portfolio(session),
     },
     options.duplicate ? 2 : 1,
-  );
-}
-
-async function createSession(response: JsonResponse): Promise<void> {
-  const id = randomUUID();
-  const csrf = randomBytes(24).toString('base64url');
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-  await pool.query(
-    `insert into anonymous_sessions (id, token_hash, expires_at) values ($1, $2, $3)`,
-    [id, `e2e:${id}`, expiresAt],
-  );
-  await pool.query(
-    `insert into wallets (id, session_id, currency, total, available, reserved)
-     values ($1, $3, 'KRW', 10000000, 10000000, 0),
-            ($2, $3, 'USD', 0, 0, 0)`,
-    [randomUUID(), randomUUID(), id],
-  );
-  for (const seed of pendingPositions.splice(0)) {
-    await pool.query(
-      `insert into positions
-         (id, session_id, market_code, symbol, total_quantity, available_quantity, reserved_quantity, average_cost)
-       values ($1, $2, 'US', $3, $4, $4, 0, 200)`,
-      [randomUUID(), id, seed.symbol, seed.quantity],
-    );
-  }
-  csrfTokens.set(id, csrf);
-  json(
-    response,
-    201,
-    { session: { id, expiresAt: expiresAt.toISOString() }, csrfToken: csrf },
-    {
-      'set-cookie': `skipjack_e2e_session=${id}; Path=/; HttpOnly; SameSite=Lax`,
-    },
   );
 }
 
@@ -358,9 +256,11 @@ async function placeOrder(
     );
     const legs = input.legs as JsonObject[];
     const ids: string[] = [];
+    const conditionalLegs: { id: string; leg: JsonObject }[] = [];
     for (const leg of legs) {
       const id = randomUUID();
       ids.push(id);
+      conditionalLegs.push({ id, leg });
       await pool.query(
         `insert into orders
            (id, session_id, market_code, symbol, oco_group_id, order_type, side,
@@ -389,50 +289,86 @@ async function placeOrder(
         [session, symbol, quantity],
       );
     }
+    const marketEngine = engines.get(market);
+    if (!marketEngine) throw new Error(`missing ${market} paper engine`);
+    for (const { id: legId, leg } of conditionalLegs) {
+      const legType = String(leg.type);
+      marketEngine.registerConditionalOrder({
+        id: legId,
+        sessionId: session,
+        market,
+        symbol,
+        currency: market === 'KR' ? 'KRW' : 'USD',
+        side: side as 'BUY' | 'SELL',
+        type: legType === 'STOP' ? 'STOP' : 'TAKE_PROFIT',
+        quantity,
+        stopPrice: String(leg.stopPrice ?? leg.limitPrice),
+        status: 'PENDING_TRIGGER',
+        version: 0n,
+        filledQuantity: '0',
+      });
+    }
     await publishSnapshot(session, 'ORDER_PLACED');
     json(response, 201, { id: ids[0], status: 'PENDING_TRIGGER' });
     return;
   }
   const id = randomUUID();
-  const book = books.get(`${market}:${symbol}`);
-  const depth = type === 'MARKET' ? BigInt(book?.asks[0]?.size ?? '0') : 0n;
-  const requested = BigInt(quantity);
-  const filled = String(requested < depth ? requested : depth);
-  const status =
-    BigInt(filled) === 0n
-      ? 'OPEN'
-      : BigInt(filled) === requested
-        ? 'FILLED'
-        : 'PARTIALLY_FILLED';
-  await pool.query(
-    `insert into orders
-       (id, session_id, market_code, symbol, order_type, side, limit_price,
-        stop_price, quantity, filled_quantity, status)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-    [
+  if (!unitOfWork) throw new Error('unit of work is not initialized');
+  const sequence = BigInt(await nextSequence(session, 'ORDER_PLACED'));
+  const eventId = randomUUID();
+  await commitTradingMutation(unitOfWork, {
+    sessionId: session,
+    idempotencyKey: key,
+    requestHash: canonicalRequestHash(input),
+    order: {
       id,
-      session,
-      market,
+      marketCode: market,
       symbol,
-      type,
-      side,
-      input.limitPrice ?? null,
-      input.stopPrice ?? null,
+      orderType: type as 'MARKET' | 'LIMIT',
+      side: side as 'BUY' | 'SELL',
       quantity,
-      filled,
-      status,
-    ],
-  );
-  if (BigInt(filled) > 0n) {
-    const price = book?.asks[0]?.price ?? '1';
-    await pool.query(
-      `insert into fills (id, order_id, price, quantity, fee, slippage)
-       values ($1, $2, $3, $4, 0, 0)`,
-      [randomUUID(), id, price, filled],
-    );
-    await upsertPosition(session, market, symbol, filled);
-  }
-  await publishSnapshot(session, 'ORDER_PLACED');
+      status: 'OPEN',
+      ...(input.limitPrice === undefined
+        ? {}
+        : { limitPrice: String(input.limitPrice) }),
+    },
+    audit: {
+      id: randomUUID(),
+      eventType: 'ORDER_PLACED',
+      payload: input,
+      occurredAt: new Date(),
+      sessionReference: session,
+    },
+    outbox: {
+      id: randomUUID(),
+      eventId,
+      streamSequence: sequence,
+      eventType: 'ORDER_PLACED',
+      payload: { orderId: id },
+    },
+    response: {
+      statusCode: 201,
+      body: { id, status: 'OPEN', filledQuantity: '0', quantity },
+    },
+  });
+  const matched = await engines.get(market)?.placeImmediateOrder({
+    id,
+    sessionId: session,
+    market,
+    symbol,
+    currency: market === 'KR' ? 'KRW' : 'USD',
+    side: side as 'BUY' | 'SELL',
+    type: type as 'MARKET' | 'LIMIT',
+    quantity,
+    ...(input.limitPrice === undefined
+      ? {}
+      : { limitPrice: String(input.limitPrice) }),
+  });
+  const status = matched?.status ?? 'OPEN';
+  const filled = matched?.filledQuantity ?? '0';
+  await publishSnapshot(session, 'ORDER_PLACED', {
+    sequence: sequence.toString(),
+  });
   json(response, 201, { id, status, filledQuantity: filled, quantity });
 }
 
@@ -453,189 +389,199 @@ async function upsertPosition(
   );
 }
 
-async function publicApi(
-  request: FastifyRequest,
-  response: FastifyReply,
+async function persistEngineFill(
+  order: PaperOrder,
+  match: OrderMatch,
+  pricing: PricingContext,
 ): Promise<void> {
-  const url = new URL(request.url ?? '/', `http://127.0.0.1:${API_PORT}`);
-  if (request.method === 'GET' && url.pathname === '/health/ready') {
-    await pool.query('select 1');
-    json(response, 200, { status: 'ready' });
-    return;
-  }
-  if (
-    request.method === 'POST' &&
-    url.pathname === '/api/v1/sessions/anonymous'
-  ) {
-    const existing = sessionId(request);
-    if (existing) {
-      const expires = await pool.query<{ expiresAt: string }>(
-        'select expires_at::text as "expiresAt" from anonymous_sessions where id = $1',
-        [existing],
-      );
-      const csrf =
-        csrfTokens.get(existing) ?? randomBytes(24).toString('base64url');
-      csrfTokens.set(existing, csrf);
-      json(response, 200, {
-        session: { id: existing, expiresAt: expires.rows[0]?.expiresAt },
-        csrfToken: csrf,
-      });
-      return;
-    }
-    await createSession(response);
-    return;
-  }
-  if (request.method === 'GET' && url.pathname === '/api/v1/health/trading') {
-    json(response, 200, health());
-    return;
-  }
-  const session = requireSession(request, response);
-  if (!session) return;
-  if (request.method === 'GET' && url.pathname === '/api/v1/instruments') {
-    const query = (url.searchParams.get('q') ?? '').toUpperCase();
-    const instruments = [
-      {
-        market: 'KR',
-        symbol: '005930',
-        name: 'Samsung Electronics',
-        tradable: true,
-      },
-      { market: 'US', symbol: 'AAPL', name: 'Apple', tradable: true },
-    ].filter((item) =>
-      `${item.symbol} ${item.name}`.toUpperCase().includes(query),
-    );
-    json(response, 200, instruments);
-    return;
-  }
-  const quoteMatch = url.pathname.match(
-    /^\/api\/v1\/markets\/(KR|US)\/symbols\/([^/]+)\/quote$/,
+  await pool.query(
+    `update orders
+        set filled_quantity = $2, status = $3, terminal_reason = $4,
+            market_data_epoch = $5, updated_at = now(), version = version + 1
+      where id = $1`,
+    [
+      order.id,
+      match.filledQuantity,
+      match.nextStatus,
+      match.execution.terminalReason ?? null,
+      pricing.recoveryEpoch.toString(),
+    ],
   );
-  if (request.method === 'GET' && quoteMatch) {
-    const market = quoteMatch[1] as Market;
-    const symbol = decodeURIComponent(quoteMatch[2] ?? '');
-    const book = books.get(`${market}:${symbol}`) ?? {
-      bids: [{ price: market === 'KR' ? '69900' : '199', size: '10' }],
-      asks: [{ price: market === 'KR' ? '70000' : '200', size: '10' }],
-    };
-    json(response, 200, {
-      market,
-      symbol,
-      price: book.asks[0]?.price ?? null,
-      asOf: new Date().toISOString(),
-      health: mode === 'NORMAL' ? 'HEALTHY' : mode,
-      recoveryEpoch: '1',
-      marketDataVersion: '1',
-      ...book,
+  for (const fill of match.execution.fills) {
+    await pool.query(
+      `insert into fills (
+         id, order_id, price, quantity, fee, slippage, reference_trade_price,
+         recovery_epoch, market_data_version, leader_fencing_token,
+         is_recovery_fill
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        randomUUID(),
+        order.id,
+        fill.price,
+        fill.quantity,
+        fill.fee,
+        match.execution.slippageAmount,
+        pricing.referencePrice,
+        pricing.recoveryEpoch.toString(),
+        pricing.marketDataVersion.toString(),
+        pricing.leaderFencingToken.toString(),
+        pricing.recoveryFill === true,
+      ],
+    );
+    if (order.side === 'BUY')
+      await upsertPosition(
+        order.sessionId,
+        order.market,
+        order.symbol,
+        fill.quantity,
+      );
+  }
+}
+
+async function persistConditionalTrigger(
+  order: ConditionalPaperOrder,
+  pricing: PricingContext,
+): Promise<void> {
+  const group = await pool.query<{
+    groupId: string;
+    sessionId: string;
+    symbol: string;
+    quantity: string;
+  }>(
+    `select oco_group_id::text as "groupId", session_id::text as "sessionId",
+            symbol, quantity::text
+       from orders where id = $1 and oco_group_id is not null`,
+    [order.id],
+  );
+  const row = group.rows[0];
+  if (!row) throw new Error('conditional order has no OCO group');
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await client.query(
+      `update orders
+          set status = case when id = $1 then 'FILLED' else 'CANCELLED' end,
+              filled_quantity = case when id = $1 then quantity else filled_quantity end,
+              is_oco_winner = (id = $1), updated_at = now(), version = version + 1
+        where oco_group_id = $2`,
+      [order.id, row.groupId],
+    );
+    await client.query(
+      `insert into fills (
+         id, order_id, price, quantity, fee, slippage, reference_trade_price,
+         recovery_epoch, market_data_version, leader_fencing_token,
+         is_recovery_fill
+       ) values ($1, $2, $3, $4, 0, 0, $3, $5, $6, $7, $8)`,
+      [
+        randomUUID(),
+        order.id,
+        pricing.referencePrice,
+        row.quantity,
+        pricing.recoveryEpoch.toString(),
+        pricing.marketDataVersion.toString(),
+        pricing.leaderFencingToken.toString(),
+        pricing.recoveryFill === true,
+      ],
+    );
+    await client.query(
+      `update positions
+          set available_quantity = 0, reserved_quantity = 0,
+              total_quantity = 0, version = version + 1
+        where session_id = $1 and symbol = $2`,
+      [row.sessionId, row.symbol],
+    );
+    await client.query(
+      `update reservations set released = true, version = version + 1
+        where oco_group_id = $1 and not released`,
+      [row.groupId],
+    );
+    await client.query(
+      `update oco_groups
+          set status = 'RESOLVED', resolved_at = now(), version = version + 1
+        where id = $1 and status = 'ACTIVE'`,
+      [row.groupId],
+    );
+    await client.query('commit');
+  } catch (error) {
+    await client.query('rollback');
+    throw error;
+  } finally {
+    client.release();
+  }
+  await publishSnapshot(row.sessionId, 'OCO_RESOLVED');
+}
+
+let marketVersion = 0n;
+async function injectBook(
+  input: {
+    market: Market;
+    symbol: string;
+    bids: Book['bids'];
+    asks: Book['asks'];
+  },
+  recovery = false,
+): Promise<void> {
+  const book = {
+    market: input.market,
+    symbol: input.symbol,
+    currency: input.market === 'KR' ? ('KRW' as const) : ('USD' as const),
+    bids: input.bids.map((level) => ({
+      price: level.price,
+      volume: level.size,
+    })),
+    asks: input.asks.map((level) => ({
+      price: level.price,
+      volume: level.size,
+    })),
+  };
+  if (!recovery) {
+    fakeMarketData?.emitOrderBook({
+      market: input.market,
+      symbol: input.symbol,
+      book,
+      sourceTimestamp: null,
     });
-    return;
+    const event = await fakeMarketData?.next();
+    if (event?.kind !== 'orderBook')
+      throw new Error('fake market-data barrier expected an order book');
   }
-  if (request.method === 'GET' && url.pathname === '/api/v1/portfolio') {
-    snapshotRequestCount += 1;
-    json(response, 200, await portfolio(session));
-    return;
-  }
-  if (!requireWrite(request, response, session)) return;
-  if (request.method === 'POST' && url.pathname === '/api/v1/fx/quotes') {
-    if (mode === 'CANCEL_ONLY') {
-      json(response, 409, {
-        code: 'CANCEL_ONLY',
-        message: 'FX is disabled in cancellation-only mode',
-        retryable: false,
-        requestId: randomUUID(),
-      });
-      return;
-    }
-    const input = await body(request);
-    const amount = String(input.amount);
-    const conversion = await pool.query<{ destinationAmount: string }>(
-      'select ($1::numeric * 0.0007)::text as "destinationAmount"',
-      [amount],
-    );
-    const destinationAmount = conversion.rows[0]?.destinationAmount;
-    if (!destinationAmount) throw new Error('FX quote calculation failed');
-    const quoteId = randomUUID();
-    fxQuotes.set(quoteId, { sessionId: session, amount, destinationAmount });
-    json(response, 200, {
-      quoteId,
-      rate: '0.0007',
-      fee: '0',
-      sourceAmount: amount,
-      destinationAmount,
-      expiresAt: new Date(Date.now() + 10_000).toISOString(),
-    });
-    return;
-  }
-  if (request.method === 'POST' && url.pathname === '/api/v1/fx/conversions') {
-    if (mode === 'CANCEL_ONLY') {
-      json(response, 409, {
-        code: 'CANCEL_ONLY',
-        message: 'FX is disabled in cancellation-only mode',
-        retryable: false,
-        requestId: randomUUID(),
-      });
-      return;
-    }
-    const input = await body(request);
-    const quote = fxQuotes.get(String(input.quoteId));
-    if (!quote || quote.sessionId !== session) {
-      json(response, 409, {
-        code: 'QUOTE_EXPIRED',
-        message: 'Quote expired',
-        retryable: false,
-        requestId: randomUUID(),
-      });
-      return;
-    }
-    await pool.query(
-      `update wallets set total = total - $2::numeric, available = available - $2::numeric
-       where session_id = $1 and currency = 'KRW'`,
-      [session, quote.amount],
-    );
-    await pool.query(
-      `update wallets set total = total + $2::numeric, available = available + $2::numeric
-       where session_id = $1 and currency = 'USD'`,
-      [session, quote.destinationAmount],
-    );
-    fxQuotes.delete(String(input.quoteId));
-    await publishSnapshot(session, 'FX_CONVERTED');
-    json(response, 200, { converted: true });
-    return;
-  }
-  if (request.method === 'POST' && url.pathname === '/api/v1/orders') {
-    await placeOrder(request, response, session);
-    return;
-  }
-  const orderMatch = url.pathname.match(/^\/api\/v1\/orders\/([^/]+)$/);
-  if (request.method === 'DELETE' && orderMatch) {
-    const orderId = decodeURIComponent(orderMatch[1] ?? '');
-    await pool.query(
-      `update orders set status = 'CANCELLED', updated_at = now()
-       where id = $1 and session_id = $2 and status not in ('FILLED','CANCELLED','EXPIRED','REJECTED')`,
-      [orderId, session],
-    );
-    await publishSnapshot(session, 'ORDER_CANCELLED');
-    json(response, 200, { id: orderId, status: 'CANCELLED' });
-    return;
-  }
-  json(response, 404, {
-    code: 'NOT_FOUND',
-    message: 'Not found',
-    retryable: false,
-    requestId: randomUUID(),
-  });
+  marketVersion += 1n;
+  const envelope = {
+    recoveryEpoch: recovery ? 2n : 1n,
+    leaderFencingToken: 1n,
+    marketDataVersion: marketVersion,
+    payload: book,
+  };
+  const marketEngine = engines.get(input.market);
+  if (!marketEngine) throw new Error(`missing ${input.market} paper engine`);
+  if (recovery) await marketEngine.onRecoveryOrderBook(envelope);
+  else await marketEngine.onOrderBook(envelope);
 }
 
 async function resetState(): Promise<void> {
   for (const sockets of streamSockets.values())
     for (const socket of sockets) socket.destroy();
   streamSockets.clear();
-  csrfTokens.clear();
-  fxQuotes.clear();
+  await Promise.all(
+    [...engines.values()].map((marketEngine) => marketEngine.reset()),
+  );
+  marketVersion = 0n;
+  await fakeMarketData?.connect(new AbortController().signal);
+  await fakeMarketData?.declare([
+    { channel: 'orderBook', market: 'KR', symbols: ['005930'] },
+    { channel: 'orderBook', market: 'US', symbols: ['AAPL'] },
+    { channel: 'trade', market: 'US', symbols: ['AAPL'] },
+  ]);
   idempotencyKeys.clear();
-  pendingPositions.splice(0);
   books.clear();
   mode = 'NORMAL';
   snapshotRequestCount = 0;
+  snapshotCompletedCount = 0;
+  snapshotInFlight = 0;
+  snapshotMaxConcurrency = 0;
+  releaseSnapshotBarrier?.();
+  snapshotBarrier = undefined;
+  releaseSnapshotBarrier = undefined;
   await pool.query('truncate anonymous_sessions cascade');
 }
 
@@ -655,10 +601,14 @@ async function controlApi(
     return;
   }
   if (request.method === 'POST' && url.pathname === '/book') {
-    books.set(`${input.market}:${input.symbol}`, {
+    const injected = {
+      market: input.market as Market,
+      symbol: String(input.symbol),
       bids: input.bids as Book['bids'],
       asks: input.asks as Book['asks'],
-    });
+    };
+    books.set(`${input.market}:${input.symbol}`, injected);
+    await injectBook(injected);
     json(response, 200, { updated: true });
     return;
   }
@@ -668,16 +618,29 @@ async function controlApi(
     return;
   }
   if (request.method === 'POST' && url.pathname === '/recover') {
+    mode = 'RECOVERING';
+    const snapshot = [...books.entries()][0];
+    if (!snapshot) {
+      json(response, 409, { error: 'recovery snapshot is missing' });
+      return;
+    }
+    const [key, recoveredBook] = snapshot;
+    const [market, symbol] = key.split(':') as [Market, string];
+    const outcome = await recoveryCoordinators
+      .get(market)
+      ?.recover(market, new AbortController().signal);
+    if (!outcome || outcome.blockedSymbols.length > 0) {
+      mode = 'DEGRADED';
+      json(response, 503, { error: 'REST recovery snapshot failed' });
+      return;
+    }
+    await injectBook({ market, symbol, ...recoveredBook }, true);
     mode = 'NORMAL';
-    json(response, 200, { mode });
-    return;
-  }
-  if (request.method === 'POST' && url.pathname === '/position') {
-    pendingPositions.push({
-      symbol: String(input.symbol),
-      quantity: String(input.quantity),
+    json(response, 200, {
+      mode,
+      recoveredSymbols: outcome.recoveredSymbols,
+      transitions: ['DEGRADED', 'RECOVERING', 'NORMAL'],
     });
-    json(response, 200, { seeded: true });
     return;
   }
   if (request.method === 'GET' && url.pathname === '/latest-order') {
@@ -718,82 +681,102 @@ async function controlApi(
       json(response, 409, { error: 'order is terminal or missing' });
       return;
     }
-    const nextFilled = String(
-      BigInt(row.filled) + BigInt(String(input.quantity)),
-    );
-    const nextStatus =
-      BigInt(nextFilled) >= BigInt(row.quantity)
-        ? 'FILLED'
-        : 'PARTIALLY_FILLED';
-    await pool.query(
-      'update orders set filled_quantity = $2, status = $3, updated_at = now() where id = $1',
-      [input.orderId, nextFilled, nextStatus],
-    );
-    await pool.query(
-      `insert into fills (id, order_id, price, quantity, fee, slippage, is_recovery_fill)
-       values ($1, $2, $3, $4, 0, 0, $5)`,
-      [
-        randomUUID(),
-        input.orderId,
-        input.price,
-        input.quantity,
-        input.recoveryFill === true,
+    await injectBook({
+      market: row.market,
+      symbol: row.symbol,
+      bids: [
+        {
+          price:
+            row.side === 'SELL'
+              ? String(input.price)
+              : decimal(String(input.price)).minus('1').toString(),
+          size: String(input.quantity),
+        },
       ],
+      asks: [
+        {
+          price:
+            row.side === 'BUY'
+              ? String(input.price)
+              : decimal(String(input.price)).plus('1').toString(),
+          size: String(input.quantity),
+        },
+      ],
+    });
+    const status = await pool.query<{ status: string }>(
+      'select status from orders where id = $1',
+      [input.orderId],
     );
-    if (row.side === 'BUY')
-      await upsertPosition(
-        row.sessionId,
-        row.market,
-        row.symbol,
-        String(input.quantity),
-      );
     await publishSnapshot(row.sessionId, 'FILL_CREATED', {
       duplicate: input.duplicate === true,
     });
-    json(response, 200, { status: nextStatus });
+    json(response, 200, { status: status.rows[0]?.status });
     return;
   }
   if (request.method === 'POST' && url.pathname === '/trigger-oco') {
-    const winner = await pool.query<{
-      sessionId: string;
-      groupId: string;
+    const target = await pool.query<{
+      market: Market;
       symbol: string;
-      quantity: string;
-    }>(
-      `select session_id::text as "sessionId", oco_group_id::text as "groupId", symbol, quantity::text
-       from orders where id = $1`,
-      [input.orderId],
-    );
-    const row = winner.rows[0];
+    }>('select market_code as market, symbol from orders where id = $1', [
+      input.orderId,
+    ]);
+    const row = target.rows[0];
     if (!row) {
       json(response, 404, { error: 'order missing' });
       return;
     }
-    await pool.query(
-      `update orders set status = case when id = $1 then 'FILLED' else 'CANCELLED' end,
-                         filled_quantity = case when id = $1 then quantity else filled_quantity end,
-                         is_oco_winner = (id = $1), updated_at = now()
-       where oco_group_id = $2`,
-      [input.orderId, row.groupId],
-    );
-    await pool.query(
-      `insert into fills (id, order_id, price, quantity, fee, slippage)
-       values ($1, $2, $3, $4, 0, 0)`,
-      [randomUUID(), input.orderId, input.price, row.quantity],
-    );
-    await pool.query(
-      `update positions set available_quantity = 0, reserved_quantity = 0, total_quantity = 0
-       where session_id = $1 and symbol = $2`,
-      [row.sessionId, row.symbol],
-    );
-    await publishSnapshot(row.sessionId, 'OCO_RESOLVED');
+    fakeMarketData?.emitTrade({
+      market: row.market,
+      symbol: row.symbol,
+      price: String(input.price),
+      volume: '1',
+      sourceTimestamp: null,
+    });
+    const event = await fakeMarketData?.next();
+    if (event?.kind !== 'trade')
+      throw new Error('fake market-data barrier expected a trade');
+    marketVersion += 1n;
+    await engines.get(row.market)?.onTrade({
+      recoveryEpoch: 1n,
+      leaderFencingToken: 1n,
+      marketDataVersion: marketVersion,
+      payload: {
+        market: event.market,
+        symbol: event.symbol,
+        price: event.price,
+        sourceTimestamp: event.sourceTimestamp,
+        source: 'WEBSOCKET',
+      },
+    });
     json(response, 200, { resolved: true });
     return;
   }
   if (request.method === 'POST' && url.pathname === '/sequence-gap') {
     const session = [...streamSockets.keys()][0];
-    if (session) await publishSnapshot(session, 'SEQUENCE_GAP', { gap: true });
+    const count = Number(input.count ?? 1);
+    if (session) {
+      for (let index = 0; index < count; index += 1)
+        await publishSnapshot(session, `SEQUENCE_GAP_${index}`, { gap: true });
+      if (input.resync === true)
+        sendStream(session, {
+          type: 'resync-required',
+          reason: 'OUTBOX_GAP',
+        });
+    }
     json(response, 200, { emitted: Boolean(session) });
+    return;
+  }
+  if (request.method === 'POST' && url.pathname === '/snapshot-barrier') {
+    if (input.action === 'hold' && !snapshotBarrier)
+      snapshotBarrier = new Promise<void>((resolveBarrier) => {
+        releaseSnapshotBarrier = resolveBarrier;
+      });
+    if (input.action === 'release') {
+      releaseSnapshotBarrier?.();
+      snapshotBarrier = undefined;
+      releaseSnapshotBarrier = undefined;
+    }
+    json(response, 200, { held: snapshotBarrier !== undefined });
     return;
   }
   if (request.method === 'GET' && url.pathname === '/stream-count') {
@@ -805,15 +788,33 @@ async function controlApi(
     return;
   }
   if (request.method === 'GET' && url.pathname === '/snapshot-count') {
-    json(response, 200, { count: snapshotRequestCount });
+    json(response, 200, {
+      count: snapshotRequestCount,
+      completed: snapshotCompletedCount,
+      inFlight: snapshotInFlight,
+      maxConcurrency: snapshotMaxConcurrency,
+    });
     return;
   }
   json(response, 404, { error: 'control not found' });
 }
 
 function websocketUpgrade(request: IncomingMessage, socket: Socket): void {
+  void authenticateWebsocketUpgrade(request, socket).catch(() =>
+    socket.destroy(),
+  );
+}
+
+async function authenticateWebsocketUpgrade(
+  request: IncomingMessage,
+  socket: Socket,
+): Promise<void> {
   const url = new URL(request.url ?? '/', `http://127.0.0.1:${API_PORT}`);
-  const session = sessionId(request);
+  const token = cookies(request).get(SESSION_COOKIE);
+  const session =
+    token && sessionService
+      ? (await sessionService.authenticate(token)).session.id
+      : undefined;
   const key = request.headers['sec-websocket-key'];
   if (
     url.pathname !== '/api/v1/stream' ||
@@ -900,20 +901,130 @@ async function waitForWeb(): Promise<void> {
   throw new Error('web preview did not become ready');
 }
 
-async function cleanup(): Promise<void> {
-  if (stopping) return;
-  stopping = true;
-  webProcess?.kill('SIGTERM');
-  await Promise.allSettled([
-    apiApp?.close(),
-    new Promise<void>((resolveClose) =>
-      controlServer?.close(() => resolveClose()),
-    ),
-    pool?.end(),
-    postgres?.stop(),
-    redis?.stop(),
-    rm(stateFilePath, { force: true }),
+async function stopChild(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolveExit) =>
+    child.once('exit', () => resolveExit()),
+  );
+  child.kill('SIGTERM');
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const graceful = await Promise.race([
+    exited.then(() => true),
+    new Promise<false>((resolveTimeout) => {
+      timeout = setTimeout(() => resolveTimeout(false), 5_000);
+    }),
   ]);
+  if (timeout) clearTimeout(timeout);
+  if (!graceful) {
+    child.kill('SIGKILL');
+    await exited;
+  }
+}
+
+async function settle(
+  work: (() => Promise<unknown>) | undefined,
+): Promise<void> {
+  if (!work) return;
+  try {
+    await work();
+  } catch (error) {
+    console.error('E2E teardown step failed', error);
+  }
+}
+
+function cleanup(): Promise<void> {
+  cleanupPromise ??= (async () => {
+    await settle(
+      controlServer
+        ? () =>
+            new Promise<void>((resolveClose) =>
+              controlServer.close(() => resolveClose()),
+            )
+        : undefined,
+    );
+    await settle(apiApp ? () => apiApp.close() : undefined);
+    await settle(() => stopChild(webProcess));
+    const feed = fakeMarketData;
+    const ledger = database;
+    await settle(feed ? () => feed.close() : undefined);
+    await settle(ledger ? () => ledger.destroy() : undefined);
+    await settle(pool ? () => pool.end() : undefined);
+    await settle(redis ? () => redis.stop() : undefined);
+    await settle(postgres ? () => postgres.stop() : undefined);
+    await settle(() => rm(stateFilePath, { force: true }));
+  })();
+  return cleanupPromise;
+}
+
+async function principal(
+  request: unknown,
+): Promise<{ id: string; status: string }> {
+  if (!sessionService) throw new Error('session service is not initialized');
+  const token = cookieValue(request as FastifyRequest, SESSION_COOKIE);
+  if (!token)
+    throw Object.assign(new Error('session is required'), {
+      code: 'SESSION_EXPIRED',
+      statusCode: 401,
+    });
+  const authenticated = await sessionService.authenticate(token);
+  return authenticated.session;
+}
+
+async function executeOrder(command: {
+  action: 'place' | 'amend' | 'cancel';
+  sessionId: string;
+  orderId?: string;
+  input?: unknown;
+}): Promise<unknown> {
+  if (command.action === 'cancel') {
+    const target = await pool.query<{ market: Market }>(
+      'select market_code as market from orders where id = $1 and session_id = $2',
+      [command.orderId, command.sessionId],
+    );
+    const market = target.rows[0]?.market;
+    if (market) await engines.get(market)?.cancelOrder(String(command.orderId));
+    await pool.query(
+      `update orders set status = 'CANCELLED', updated_at = now(), version = version + 1
+        where id = $1 and session_id = $2
+          and status not in ('FILLED','CANCELLED','EXPIRED','REJECTED')`,
+      [command.orderId, command.sessionId],
+    );
+    await publishSnapshot(command.sessionId, 'ORDER_CANCELLED');
+    return { id: command.orderId, status: 'CANCELLED' };
+  }
+  if (command.action === 'amend')
+    throw Object.assign(new Error('amendment is unavailable in E2E'), {
+      code: 'ORDER_STATE_CONFLICT',
+      statusCode: 409,
+    });
+  let result: unknown;
+  let statusCode = 200;
+  const reply = {
+    raw: {},
+    code(code: number) {
+      statusCode = code;
+      return this;
+    },
+    headers() {
+      return this;
+    },
+    send(value: unknown) {
+      result = value;
+      return value;
+    },
+  } as unknown as FastifyReply;
+  await placeOrder(
+    {
+      raw: {},
+      body: command.input,
+      headers: { 'idempotency-key': randomUUID() },
+    } as unknown as FastifyRequest,
+    reply,
+    command.sessionId,
+  );
+  if (statusCode >= 400)
+    throw Object.assign(new Error('order rejected'), result);
+  return result;
 }
 
 async function main(): Promise<void> {
@@ -959,13 +1070,219 @@ async function main(): Promise<void> {
     csrfSecret: randomBytes(32).toString('base64url'),
     adminApiKey: controlCredential,
   };
+  database = createDatabase(config.databaseUrl);
+  unitOfWork = new UnitOfWork(database, { backoff: async () => undefined });
+  sessionService = new SessionService({
+    keys: config.sessionHashKeys,
+    csrfSecret: config.csrfSecret,
+    store: createUnitOfWorkSessionStore(unitOfWork),
+    secureCookie: false,
+  });
+  fakeMarketData = new FakeMarketData();
+  await fakeMarketData.connect(new AbortController().signal);
+  await fakeMarketData.declare([
+    { channel: 'orderBook', market: 'KR', symbols: ['005930'] },
+    { channel: 'orderBook', market: 'US', symbols: ['AAPL'] },
+    { channel: 'trade', market: 'US', symbols: ['AAPL'] },
+  ]);
+  for (const [market, currency] of [
+    ['KR', 'KRW'],
+    ['US', 'USD'],
+  ] as const) {
+    engines.set(
+      market,
+      new PaperEngine({
+        feeModel: createFeeModel({
+          version: `e2e-${market}`,
+          market,
+          currency,
+          commissionRate: '0',
+          sellTaxRate: '0',
+          roundingDecimals: 2,
+          roundingMode: 'HALF_UP',
+        }),
+        isGateExclusive: () => mode === 'DEGRADED' || mode === 'CANCEL_ONLY',
+        onFill: persistEngineFill,
+        onConditionalTrigger: persistConditionalTrigger,
+      }),
+    );
+    const symbols = market === 'KR' ? ['005930'] : ['AAPL'];
+    recoveryCoordinators.set(
+      market,
+      new RecoveryCoordinator({
+        stream: fakeMarketData,
+        stateStore: new MarketStateStore(),
+        symbols,
+        subscriptions: [
+          { channel: 'orderBook', market, symbols },
+          { channel: 'trade', market, symbols },
+        ],
+        acquireLease: async () =>
+          ({ epoch: 2n, fencingToken: 1n }) as LeaderLease,
+        snapshots: {
+          getRecoverySnapshot: async (_market, symbol) => {
+            const current = books.get(`${market}:${symbol}`);
+            if (!current) throw new Error('recovery book is not seeded');
+            return {
+              market,
+              symbol,
+              price: current.asks[0]?.price ?? current.bids[0]?.price ?? '0',
+              book: {
+                market,
+                symbol,
+                currency,
+                bids: current.bids.map((level) => ({
+                  price: level.price,
+                  volume: level.size,
+                })),
+                asks: current.asks.map((level) => ({
+                  price: level.price,
+                  volume: level.size,
+                })),
+              },
+              fetchedAt: new Date().toISOString(),
+            };
+          },
+        },
+        stabilityMs: 0,
+      }),
+    );
+  }
+  const fxService = new FxService({
+    loadWallets: async (sessionId) => {
+      const rows = await pool.query<{
+        currency: 'KRW' | 'USD';
+        available: string;
+      }>(
+        'select currency, available::text from wallets where session_id = $1',
+        [sessionId],
+      );
+      return new Map(rows.rows.map((row) => [row.currency, row.available]));
+    },
+    onExchange: async (quote) => {
+      await pool.query(
+        `update wallets
+            set total = total - $2::numeric, available = available - $2::numeric,
+                version = version + 1
+          where session_id = $1 and currency = $3`,
+        [quote.sessionId, quote.sourceAmount, quote.from],
+      );
+      await pool.query(
+        `update wallets
+            set total = total + $2::numeric, available = available + $2::numeric,
+                version = version + 1
+          where session_id = $1 and currency = $3`,
+        [quote.sessionId, quote.targetAmount, quote.to],
+      );
+      await publishSnapshot(quote.sessionId, 'FX_CONVERTED');
+    },
+  });
   apiApp = await buildApp(config, {
     clock: { now: () => Date.now() },
-    registerRoutes: (app) => {
-      app.route({
-        method: ['GET', 'POST', 'DELETE'],
-        url: '/*',
-        handler: publicApi,
+    registerRoutes: async (app) => {
+      app.addHook('preHandler', async (request) => {
+        if (
+          request.method === 'GET' &&
+          request.url.startsWith('/api/v1/portfolio')
+        ) {
+          snapshotRequestCount += 1;
+          snapshotInFlight += 1;
+          snapshotMaxConcurrency = Math.max(
+            snapshotMaxConcurrency,
+            snapshotInFlight,
+          );
+          await snapshotBarrier;
+        }
+        if (
+          request.method === 'POST' &&
+          request.url.startsWith('/api/v1/sessions/anonymous')
+        )
+          return;
+        if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
+          return;
+        const authenticated = await principal(request);
+        const csrf = request.headers['x-csrf-token'];
+        if (
+          request.headers.origin !== publicOrigin ||
+          typeof csrf !== 'string' ||
+          !verifyCsrfToken(config.csrfSecret, authenticated.id, csrf)
+        )
+          throw Object.assign(new Error('CSRF validation failed'), {
+            code: 'FORBIDDEN',
+            statusCode: 403,
+          });
+      });
+      app.addHook('onResponse', async (request) => {
+        if (
+          request.method === 'GET' &&
+          request.url.startsWith('/api/v1/portfolio')
+        ) {
+          snapshotInFlight -= 1;
+          snapshotCompletedCount += 1;
+        }
+      });
+      await registerSessionRoutes(app, sessionService as SessionService);
+      await registerHealthRoutes(app, {
+        db: async () => {
+          await pool.query('select 1');
+          return true;
+        },
+        audit: () => true,
+        marketData: () => ({ mode }),
+        trading: () => health(),
+      });
+      await registerInstrumentRoutes(
+        app,
+        new InstrumentService({
+          catalog: [
+            {
+              market: 'KR',
+              symbol: '005930',
+              name: 'Samsung Electronics',
+              tradable: true,
+              currency: 'KRW',
+            },
+            {
+              market: 'US',
+              symbol: 'AAPL',
+              name: 'Apple',
+              tradable: true,
+              currency: 'USD',
+            },
+          ],
+        }),
+        (market, symbol) => {
+          const current = books.get(`${market}:${symbol}`) ?? {
+            bids: [{ price: market === 'KR' ? '69900' : '199', size: '10' }],
+            asks: [{ price: market === 'KR' ? '70000' : '200', size: '10' }],
+          };
+          return {
+            market,
+            symbol,
+            price: current.asks[0]?.price ?? null,
+            asOf: new Date().toISOString(),
+            health: mode === 'NORMAL' ? 'HEALTHY' : mode,
+            recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
+            marketDataVersion: marketVersion.toString(),
+            ...current,
+          };
+        },
+      );
+      await registerPortfolioRoutes(app, {
+        principal,
+        unitOfWork: unitOfWork as UnitOfWork,
+      });
+      await registerFxRoutes(app, fxService, {
+        principal,
+        canFx: () => mode !== 'CANCEL_ONLY',
+      });
+      await registerOrderRoutes(app, {
+        principal,
+        execute: executeOrder,
+        capabilities: () =>
+          mode === 'NORMAL'
+            ? new Set(['PLACE', 'AMEND', 'CANCEL'])
+            : new Set(['CANCEL']),
       });
     },
   });

@@ -13,7 +13,6 @@ type FillInput = Readonly<{
   quantity: string;
   price: string;
   duplicate?: boolean;
-  recoveryFill?: boolean;
 }>;
 
 class PaperSystem {
@@ -57,10 +56,6 @@ class PaperSystem {
     return this.#call('/recover');
   }
 
-  seedPosition(input: { symbol: string; quantity: string }): Promise<unknown> {
-    return this.#call('/position', { data: input });
-  }
-
   async latestOrderId(): Promise<string> {
     const result = await this.#call<{ id?: string }>('/latest-order', {
       method: 'GET',
@@ -85,15 +80,25 @@ class PaperSystem {
     return this.#call('/trigger-oco', { data: input });
   }
 
-  emitSequenceGap(): Promise<unknown> {
-    return this.#call('/sequence-gap');
+  emitSequenceGap(
+    input: { count?: number; resync?: boolean } = {},
+  ): Promise<unknown> {
+    return this.#call('/sequence-gap', { data: input });
   }
 
-  async snapshotRequests(): Promise<number> {
-    const result = await this.#call<{ count: number }>('/snapshot-count', {
+  snapshotBarrier(action: 'hold' | 'release'): Promise<unknown> {
+    return this.#call('/snapshot-barrier', { data: { action } });
+  }
+
+  async snapshotStats(): Promise<{
+    count: number;
+    completed: number;
+    inFlight: number;
+    maxConcurrency: number;
+  }> {
+    return this.#call('/snapshot-count', {
       method: 'GET',
     });
-    return result.count;
   }
 
   async waitForStream(): Promise<void> {

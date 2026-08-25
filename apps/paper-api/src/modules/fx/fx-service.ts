@@ -39,6 +39,9 @@ export interface FxServiceOptions {
     receipt: ExchangeReceipt,
   ) => Promise<void>;
   readonly wallets?: Map<string, Map<Currency, DecimalString>>;
+  readonly loadWallets?: (
+    sessionId: string,
+  ) => Promise<Map<Currency, DecimalString>>;
 }
 const currencyOrder: Record<Currency, number> = { KRW: 0, USD: 1 };
 function error(code: string, message: string, retryable = false): Error {
@@ -57,12 +60,14 @@ export class FxService {
   readonly #responses = new Map<string, ExchangeReceipt>();
   readonly #wallets: Map<string, Map<Currency, DecimalString>>;
   readonly #onExchange?: FxServiceOptions['onExchange'];
+  readonly #loadWallets?: FxServiceOptions['loadWallets'];
   constructor(options: FxServiceOptions = {}) {
     this.#clock = options.clock ?? (() => new Date());
     this.#rate = options.rate ?? '0.0007';
     this.#ttl = options.quoteTtlMs ?? 10_000;
     this.#onExchange = options.onExchange;
     this.#wallets = options.wallets ?? new Map();
+    this.#loadWallets = options.loadWallets;
   }
   async quote(sessionId: string, input: FxQuoteInput): Promise<FxQuote> {
     if (input.from === input.to)
@@ -111,7 +116,9 @@ export class FxService {
       (a, b) => currencyOrder[a] - currencyOrder[b],
     );
     const wallet =
-      this.#wallets.get(sessionId) ?? new Map<Currency, DecimalString>();
+      this.#wallets.get(sessionId) ??
+      (await this.#loadWallets?.(sessionId)) ??
+      new Map<Currency, DecimalString>();
     this.#wallets.set(sessionId, wallet);
     for (const currency of locks) {
       if (!wallet.has(currency)) wallet.set(currency, '0');
