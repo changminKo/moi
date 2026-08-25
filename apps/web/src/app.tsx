@@ -1,20 +1,6 @@
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom';
+import { PortfolioPage } from './pages/portfolio-page';
 import { TradePage } from './pages/trade-page';
-
-function PortfolioPlaceholder() {
-  return (
-    <section className="page-intro" aria-labelledby="portfolio-title">
-      <p className="eyebrow">ACCOUNT / 02</p>
-      <h1 id="portfolio-title">Know your position.</h1>
-      <p className="lede">
-        Your paper balance, open risk, and performance will live here.
-      </p>
-      <div className="empty-state">
-        No positions yet. The next good trade starts with a plan.
-      </div>
-    </section>
-  );
-}
 
 export function App() {
   return (
@@ -49,7 +35,7 @@ export function App() {
       <main id="main-content">
         <Routes>
           <Route path="/trade" element={<TradePage />} />
-          <Route path="/portfolio" element={<PortfolioPlaceholder />} />
+          <Route path="/portfolio" element={<PortfolioPage />} />
           <Route path="*" element={<Navigate replace to="/trade" />} />
         </Routes>
       </main>
