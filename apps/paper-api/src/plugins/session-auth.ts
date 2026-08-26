@@ -1,11 +1,19 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type {
+  SessionPrincipal,
+  SessionService,
+} from '../modules/session/session-service.js';
 import { SESSION_COOKIE } from '../modules/session/session-token.js';
-import type { SessionPrincipal, SessionService } from '../modules/session/session-service.js';
 
 declare module 'fastify' {
-  interface FastifyRequest { session?: SessionPrincipal; }
+  interface FastifyRequest {
+    session?: SessionPrincipal;
+  }
 }
-export function cookieValue(request: FastifyRequest, name: string): string | undefined {
+export function cookieValue(
+  request: FastifyRequest,
+  name: string,
+): string | undefined {
   const raw = request.headers.cookie;
   if (!raw) return undefined;
   for (const pair of raw.split(';')) {
@@ -14,12 +22,21 @@ export function cookieValue(request: FastifyRequest, name: string): string | und
   }
   return undefined;
 }
-export function registerSessionAuth(app: FastifyInstance, service: SessionService): void {
+export function registerSessionAuth(
+  app: FastifyInstance,
+  service: SessionService,
+): void {
   app.decorateRequest('session');
-  app.decorate('authenticateSession', async function authenticateSession(request: FastifyRequest) {
-    const token = cookieValue(request, SESSION_COOKIE);
-    if (!token) throw Object.assign(new Error('session is required'), { statusCode: 401 });
-    const result = await service.authenticate(token);
-    request.session = result.session;
-  });
+  app.decorate(
+    'authenticateSession',
+    async function authenticateSession(request: FastifyRequest) {
+      const token = cookieValue(request, SESSION_COOKIE);
+      if (!token)
+        throw Object.assign(new Error('session is required'), {
+          statusCode: 401,
+        });
+      const result = await service.authenticate(token);
+      request.session = result.session;
+    },
+  );
 }

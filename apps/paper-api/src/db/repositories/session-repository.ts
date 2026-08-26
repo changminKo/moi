@@ -1,6 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { DomainError } from '@skipjack/trading-core';
 import { sql } from 'kysely';
-import { randomUUID } from 'node:crypto';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
@@ -25,7 +25,12 @@ export interface SessionRepository {
   findByTokenHash(tokenHash: string): Promise<SessionRecord | undefined>;
   lock(sessionId: string): Promise<SessionRecord | undefined>;
   touch(input: TouchSessionInput): Promise<bigint>;
-  bootstrap(input: { id: string; tokenHash: string; now: Date; expiresAt: Date }): Promise<SessionRecord>;
+  bootstrap(input: {
+    id: string;
+    tokenHash: string;
+    now: Date;
+    expiresAt: Date;
+  }): Promise<SessionRecord>;
   expire(sessionId: string, now: Date): Promise<void>;
 }
 
@@ -70,12 +75,23 @@ export async function findSession(
   return row === undefined ? undefined : toSessionRecord(row);
 }
 
-export async function findSessionByTokenHash(connection: LedgerConnection, tokenHash: string): Promise<SessionRecord | undefined> {
-  const result = await sql<SessionRow>`select id, status, expires_at, last_seen_at, version from anonymous_sessions where token_hash = ${tokenHash}`.execute(connection.executor);
-  return result.rows[0] === undefined ? undefined : toSessionRecord(result.rows[0]);
+export async function findSessionByTokenHash(
+  connection: LedgerConnection,
+  tokenHash: string,
+): Promise<SessionRecord | undefined> {
+  const result =
+    await sql<SessionRow>`select id, status, expires_at, last_seen_at, version from anonymous_sessions where token_hash = ${tokenHash}`.execute(
+      connection.executor,
+    );
+  return result.rows[0] === undefined
+    ? undefined
+    : toSessionRecord(result.rows[0]);
 }
 
-export async function bootstrapSession(connection: LedgerConnection, input: { id: string; tokenHash: string; now: Date; expiresAt: Date }): Promise<SessionRecord> {
+export async function bootstrapSession(
+  connection: LedgerConnection,
+  input: { id: string; tokenHash: string; now: Date; expiresAt: Date },
+): Promise<SessionRecord> {
   const result = await sql<SessionRow>`
     insert into anonymous_sessions (id, token_hash, created_at, expires_at, last_seen_at)
     values (${input.id}, ${input.tokenHash}, ${input.now}, ${input.expiresAt}, ${input.now})
@@ -93,9 +109,19 @@ export async function bootstrapSession(connection: LedgerConnection, input: { id
   return toSessionRecord(row);
 }
 
-export async function expireSession(connection: LedgerConnection, sessionId: string, now: Date): Promise<void> {
-  connection.acquireLock({ table: 'anonymous_sessions', key: sessionId, strength: 'NO_KEY_UPDATE' });
-  await sql`update anonymous_sessions set status = 'EXPIRED', expires_at = ${now}, version = version + 1 where id = ${sessionId} and status = 'ACTIVE'`.execute(connection.executor);
+export async function expireSession(
+  connection: LedgerConnection,
+  sessionId: string,
+  now: Date,
+): Promise<void> {
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: sessionId,
+    strength: 'NO_KEY_UPDATE',
+  });
+  await sql`update anonymous_sessions set status = 'EXPIRED', expires_at = ${now}, version = version + 1 where id = ${sessionId} and status = 'ACTIVE'`.execute(
+    connection.executor,
+  );
 }
 
 /**
@@ -161,10 +187,17 @@ export function createSessionRepository(
 ): SessionRepository {
   return Object.freeze({
     find: (sessionId: string) => findSession(connection, sessionId),
-    findByTokenHash: (tokenHash: string) => findSessionByTokenHash(connection, tokenHash),
+    findByTokenHash: (tokenHash: string) =>
+      findSessionByTokenHash(connection, tokenHash),
     lock: (sessionId: string) => lockSession(connection, sessionId),
     touch: (input: TouchSessionInput) => touchSession(connection, input),
-    bootstrap: (input: { id: string; tokenHash: string; now: Date; expiresAt: Date }) => bootstrapSession(connection, input),
-    expire: (sessionId: string, now: Date) => expireSession(connection, sessionId, now),
+    bootstrap: (input: {
+      id: string;
+      tokenHash: string;
+      now: Date;
+      expiresAt: Date;
+    }) => bootstrapSession(connection, input),
+    expire: (sessionId: string, now: Date) =>
+      expireSession(connection, sessionId, now),
   });
 }

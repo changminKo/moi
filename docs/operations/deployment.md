@@ -11,13 +11,19 @@ against the committed files.
 | Role | Image / service | Public | Replicas | Owns |
 |------|-----------------|--------|----------|------|
 | `web` | `apps/web/Dockerfile` → `node apps/web/server.mjs` | yes (HTTPS) | any | static bundle, `/runtime-config.js` |
-| `paper-api` | `apps/paper-api/Dockerfile` → `node apps/paper-api/dist/server.js` | yes (HTTPS) | **exactly one** | public HTTP, one fenced leader lease per market, both Toss connections, outbox publisher |
+| `paper-api` | `apps/paper-api/Dockerfile` → `node apps/paper-api/dist/main.js` | yes (HTTPS) | **exactly one** | public HTTP, PostgreSQL paper ledger, health and safety administration |
 | `postgres` | PostgreSQL 17 | no | 1 (+ managed replica) | the ledger; authoritative |
 | `redis` | Redis 7 | no | 1 | leader lease, quote fan-out |
 
 Only `web` and `paper-api` publish ports. PostgreSQL and Redis are reachable
 solely from `paper-api` on the private network and use health checks plus
 persistent volumes.
+
+> **Release blocker:** the current `main.js` composition does not yet own the
+> live provider adapter, fenced market-leader lifecycle, or outbox publisher.
+> Without the explicitly test-only `MARKET_DATA_ADAPTER=fake`, it starts in
+> `CANCEL_ONLY`. The topology and handoff rules below are the required target,
+> not evidence that this candidate is approved for public deployment.
 
 Run exactly one `paper-api` replica (one leader replica). The single `paper-api` process both serves HTTP and owns exactly one leader
 per market (`skipjack.leader-markets` label). Running more than one

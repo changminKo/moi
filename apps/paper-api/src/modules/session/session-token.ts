@@ -22,7 +22,8 @@ export function createSessionTokenCodec(
   return Object.freeze({
     issue: () => {
       const token = random().toString('base64url');
-      if (token.length !== 43) throw new Error('session random source must provide 32 bytes');
+      if (token.length !== 43)
+        throw new Error('session random source must provide 32 bytes');
       return { token, tokenHash: hash(token) };
     },
     hash,

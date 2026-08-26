@@ -15,14 +15,36 @@ const MIGRATIONS_DIRECTORY = join(
   dirname(fileURLToPath(import.meta.url)),
   'migrations',
 );
+const SOURCE_MIGRATIONS_DIRECTORY = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'src',
+  'db',
+  'migrations',
+);
+
+async function readMigration(name: string): Promise<string> {
+  try {
+    return await readFile(join(MIGRATIONS_DIRECTORY, `${name}.sql`), 'utf8');
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      (error as NodeJS.ErrnoException).code !== 'ENOENT'
+    ) {
+      throw error;
+    }
+    return await readFile(
+      join(SOURCE_MIGRATIONS_DIRECTORY, `${name}.sql`),
+      'utf8',
+    );
+  }
+}
 
 function sqlFileMigration(name: string): Migration {
   return {
     async up(db: Kysely<unknown>): Promise<void> {
-      const statements = await readFile(
-        join(MIGRATIONS_DIRECTORY, `${name}.sql`),
-        'utf8',
-      );
+      const statements = await readMigration(name);
       await sql.raw(statements).execute(db);
     },
   };

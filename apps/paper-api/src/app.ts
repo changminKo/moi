@@ -65,6 +65,15 @@ export async function buildApp(
     }
   });
   await registerRequestContext(app, dependencies.clock);
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.context === undefined) return payload;
+    const duration = Math.max(
+      0,
+      request.context.clock.now() - request.context.startedAt,
+    );
+    reply.header('Server-Timing', `app;dur=${duration.toFixed(3)}`);
+    return payload;
+  });
   await registerErrorHandler(app);
   await dependencies.registerRoutes?.(app, dependencies);
   return app;

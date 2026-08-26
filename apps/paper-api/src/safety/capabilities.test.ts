@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ALL_CAPABILITIES,
+  type ALL_CAPABILITIES,
   intersectCapabilities,
   type SafetyIncident,
 } from './capabilities.js';
 
-const incident = (denied: readonly (typeof ALL_CAPABILITIES[number])[], causeCode: string): SafetyIncident => ({
+const incident = (
+  denied: readonly (typeof ALL_CAPABILITIES)[number][],
+  causeCode: string,
+): SafetyIncident => ({
   incidentId: causeCode,
   scope: { type: 'MARKET', id: 'KR' },
   denied: new Set(denied),
@@ -26,10 +29,14 @@ describe('capability intersection', () => {
   });
 
   it('keeps cancellation available in CANCEL_ONLY and blocks read mutations', () => {
-    const cancelOnly = intersectCapabilities([incident(['PLACE', 'AMEND', 'MATCH', 'TRIGGER'], 'FEED')]);
+    const cancelOnly = intersectCapabilities([
+      incident(['PLACE', 'AMEND', 'MATCH', 'TRIGGER'], 'FEED'),
+    ]);
     expect(cancelOnly.allowed).toContain('CANCEL');
     expect(cancelOnly.allowed).not.toContain('MATCH');
-    const readOnly = intersectCapabilities([incident(['PLACE', 'AMEND', 'CANCEL', 'MATCH', 'TRIGGER'], 'ACCOUNT')]);
+    const readOnly = intersectCapabilities([
+      incident(['PLACE', 'AMEND', 'CANCEL', 'MATCH', 'TRIGGER'], 'ACCOUNT'),
+    ]);
     expect(readOnly.allowed).not.toContain('PLACE');
     expect(readOnly.allowed).not.toContain('CANCEL');
   });

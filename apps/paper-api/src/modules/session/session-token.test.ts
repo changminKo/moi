@@ -3,7 +3,9 @@ import { createSessionTokenCodec } from './session-token.js';
 
 describe('session token codec', () => {
   it('issues 256 random bits and stores only a keyed digest', () => {
-    const codec = createSessionTokenCodec(['active'], () => Buffer.alloc(32, 7));
+    const codec = createSessionTokenCodec(['active'], () =>
+      Buffer.alloc(32, 7),
+    );
     const issued = codec.issue();
     expect(issued.token).toHaveLength(43);
     expect(issued.tokenHash).not.toContain(issued.token);

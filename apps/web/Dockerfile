@@ -3,7 +3,7 @@
 # built Vite bundle plus the dependency-free Node static server; no package
 # manager, no node_modules, no secrets.
 
-FROM node:24.19.0-bookworm-slim AS base
+FROM node:24.19.0-alpine3.23 AS base
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     CI=true
@@ -22,11 +22,15 @@ COPY apps/web ./apps/web
 RUN pnpm install --offline --frozen-lockfile --filter @skipjack/web...
 RUN pnpm turbo run build --filter=@skipjack/web...
 
-FROM node:24.19.0-bookworm-slim AS runtime
+FROM node:24.19.0-alpine3.23 AS runtime
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080
 WORKDIR /app
+RUN rm -rf /usr/local/lib/node_modules \
+    /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/pnpm /usr/local/bin/pnpx /usr/local/bin/yarn \
+    /usr/local/bin/yarnpkg /opt/yarn*
 COPY --from=builder --chown=node:node /workspace/apps/web/dist /app/apps/web/dist
 COPY --from=builder --chown=node:node /workspace/apps/web/server.mjs /app/apps/web/server.mjs
 USER node

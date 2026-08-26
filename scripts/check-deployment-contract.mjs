@@ -159,7 +159,7 @@ check('api image', () => {
   const instructions = checkDockerfile('apps/paper-api/Dockerfile');
   const cmd = instructions.filter((i) => i.instruction === 'CMD').at(-1);
   assert.ok(cmd, 'api Dockerfile needs CMD');
-  assert.match(cmd.args, /apps\/paper-api\/dist\/server\.js/);
+  assert.match(cmd.args, /apps\/paper-api\/dist\/main\.js/);
   assert.match(cmd.args, /"node"/, 'api CMD must use exec form with node');
 });
 

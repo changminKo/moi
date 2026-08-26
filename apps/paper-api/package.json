@@ -20,6 +20,7 @@
   "devDependencies": {
     "@testcontainers/postgresql": "12.1.0",
     "@types/pg": "8.23.1",
+    "testcontainers": "12.1.0",
     "vitest": "4.1.11"
   }
 }

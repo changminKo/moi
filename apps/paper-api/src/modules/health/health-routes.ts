@@ -10,6 +10,17 @@ export interface HealthDependencies {
 const headers = (reply: FastifyReply, request: FastifyRequest): void => {
   reply.header('Cache-Control', 'no-store').header('X-Request-Id', request.id);
 };
+
+async function dependencyAvailable(
+  probe: () => boolean | Promise<boolean>,
+): Promise<boolean> {
+  try {
+    return await probe();
+  } catch {
+    return false;
+  }
+}
+
 export async function registerHealthRoutes(
   app: FastifyInstance,
   deps: HealthDependencies,
@@ -20,7 +31,10 @@ export async function registerHealthRoutes(
   });
   app.get('/health/ready', async (request, reply) => {
     headers(reply, request);
-    const [db, audit] = await Promise.all([deps.db(), deps.audit()]);
+    const [db, audit] = await Promise.all([
+      dependencyAvailable(deps.db),
+      dependencyAvailable(deps.audit),
+    ]);
     const body = {
       status: db && audit ? 'ready' : 'not_ready',
       db,

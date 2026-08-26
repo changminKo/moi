@@ -3,7 +3,7 @@
 # market-data leader). The runtime stage carries only production dependencies
 # and compiled output, and runs as the unprivileged `node` user.
 
-FROM node:24.19.0-bookworm-slim AS base
+FROM node:24.19.0-alpine3.23 AS base
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     CI=true
@@ -24,12 +24,16 @@ RUN pnpm turbo run build --filter=@skipjack/paper-api...
 RUN pnpm --filter @skipjack/paper-api deploy --prod --legacy /out/paper-api \
     && rm -rf /out/paper-api/src /out/paper-api/Dockerfile /out/paper-api/tsconfig.json /out/paper-api/.turbo
 
-FROM node:24.19.0-bookworm-slim AS runtime
+FROM node:24.19.0-alpine3.23 AS runtime
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000
 WORKDIR /app
+RUN rm -rf /usr/local/lib/node_modules \
+    /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx \
+    /usr/local/bin/pnpm /usr/local/bin/pnpx /usr/local/bin/yarn \
+    /usr/local/bin/yarnpkg /opt/yarn*
 COPY --from=builder --chown=node:node /out/paper-api /app/apps/paper-api
 USER node
 EXPOSE 3000
-CMD ["node", "apps/paper-api/dist/server.js"]
+CMD ["node", "apps/paper-api/dist/main.js"]
