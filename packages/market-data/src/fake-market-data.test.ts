@@ -166,7 +166,7 @@ describe('published surface', () => {
   it('publishes the reusable conformance suite through a subpath export', () => {
     expect(manifest.exports).toMatchObject({
       '.': { default: './dist/index.js' },
-      './testing': { default: './dist/adapter-conformance.js' },
+      './testing': { default: './dist/testing.js' },
     });
   });
 

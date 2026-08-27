@@ -17,6 +17,8 @@ export interface AppDependencies {
   readonly logger?: FastifyServerOptions['logger'];
   readonly requestId?: (request: IncomingMessage) => string;
   readonly clock: RequestClock;
+  /** Registered before any other hook so an ingress fence sees every request first. */
+  readonly registerIngress?: (app: FastifyInstance) => void;
   readonly registerRoutes?: (
     app: FastifyInstance,
     dependencies: AppDependencies,
@@ -51,6 +53,7 @@ export async function buildApp(
     ajv: { customOptions: { removeAdditional: false } },
   }) as unknown as FastifyInstance;
   app.decorate('redactedLogPaths', redactedLogPaths);
+  dependencies.registerIngress?.(app);
   await app.register(helmet);
   await app.register(cors, { origin: config.publicOrigin, credentials: true });
   app.addHook('onRequest', async (request, reply) => {

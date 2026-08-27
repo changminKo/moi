@@ -44,10 +44,38 @@ export interface FakeOrderBookInput {
  */
 export type FakeInitialSnapshotMode = 'NONE' | 'ON_DECLARE';
 
+/**
+ * Counts concurrently open fake connections across every `FakeMarketData`
+ * that shares it, mirroring the provider's per-account connection limit.
+ */
+export class FakeConnectionLedger {
+  #open = 0;
+  #peak = 0;
+  #connects = 0;
+  get open(): number {
+    return this.#open;
+  }
+  get peak(): number {
+    return this.#peak;
+  }
+  get connects(): number {
+    return this.#connects;
+  }
+  opened(): void {
+    this.#open += 1;
+    this.#connects += 1;
+    this.#peak = Math.max(this.#peak, this.#open);
+  }
+  closed(): void {
+    this.#open = Math.max(0, this.#open - 1);
+  }
+}
+
 export interface FakeMarketDataOptions {
   readonly now?: () => string;
   readonly initialSnapshot?: FakeInitialSnapshotMode;
   readonly pingLatencyMs?: number;
+  readonly ledger?: FakeConnectionLedger;
 }
 
 type EventWaiter = (event: MarketEvent | undefined) => void;
@@ -58,6 +86,7 @@ export class FakeMarketData implements MarketDataStream {
   readonly #now: () => string;
   readonly #initialSnapshot: FakeInitialSnapshotMode;
   readonly #pingLatencyMs: number;
+  readonly #ledger: FakeConnectionLedger | undefined;
 
   readonly #log: MarketEvent[] = [];
   readonly #pending: MarketEvent[] = [];
@@ -75,6 +104,7 @@ export class FakeMarketData implements MarketDataStream {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#initialSnapshot = options.initialSnapshot ?? 'NONE';
     this.#pingLatencyMs = options.pingLatencyMs ?? DEFAULT_PING_LATENCY_MS;
+    this.#ledger = options.ledger;
   }
 
   // --- MarketDataStream -----------------------------------------------------
@@ -85,6 +115,7 @@ export class FakeMarketData implements MarketDataStream {
     // A reconnect starts from nothing declared: adapters replace the whole
     // subscription set on every connection rather than resuming one.
     this.#declared.clear();
+    if (!this.#connected) this.#ledger?.opened();
     this.#connected = true;
     this.#closed = false;
   }
@@ -165,6 +196,7 @@ export class FakeMarketData implements MarketDataStream {
   }
 
   async close(): Promise<void> {
+    if (this.#connected) this.#ledger?.closed();
     this.#connected = false;
     this.#closed = true;
     this.#releaseWaiters();
@@ -252,6 +284,7 @@ export class FakeMarketData implements MarketDataStream {
       receivedAt: this.#now(),
     };
 
+    if (this.#connected) this.#ledger?.closed();
     this.#connected = false;
     this.#closed = true;
     this.#log.push(event);

@@ -1,5 +1,21 @@
 import { z } from 'zod';
 
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+/** Defaults copied from the pinned contracts' `servers` blocks (§5.1). */
+export const TOSS_CONTRACT_SERVERS = Object.freeze({
+  rest: 'https://openapi.tossinvest.com',
+  ws: 'wss://openapi-ws.tossinvest.com/ws/v1',
+});
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
+const CLIENT_ID_PATTERN = /^c_[A-Za-z0-9]{8,}$/;
+
 const environmentSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
@@ -20,7 +36,33 @@ const environmentSchema = z.object({
     ),
   CSRF_SECRET: z.string().min(32),
   ADMIN_API_KEY: z.string().min(32).optional(),
+  MARKET_DATA_ADAPTER: z.string().optional(),
+  TOSS_CLIENT_ID: z.string().optional(),
+  TOSS_CLIENT_SECRET: z.string().optional(),
+  TOSS_REST_BASE_URL: z.url().default(TOSS_CONTRACT_SERVERS.rest),
+  TOSS_WS_URL: z.url().default(TOSS_CONTRACT_SERVERS.ws),
+  SHUTDOWN_DRAIN_DEADLINE_MS: z.coerce
+    .number()
+    .int()
+    .min(5_000)
+    .max(40_000)
+    .default(30_000),
+  RECOVERY_STABILITY_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(30_000)
+    .default(5_000),
 });
+
+export type MarketDataAdapter = 'toss' | 'fake';
+
+export interface TossConfig {
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly restBaseUrl: string;
+  readonly wsUrl: string;
+}
 
 export interface AppConfig {
   readonly nodeEnv: 'development' | 'test' | 'production';
@@ -32,6 +74,32 @@ export interface AppConfig {
   readonly sessionHashKeys: readonly [string, ...string[]];
   readonly csrfSecret: string;
   readonly adminApiKey?: string;
+  readonly marketDataAdapter: MarketDataAdapter;
+  readonly toss?: TossConfig;
+  readonly shutdownDrainDeadlineMs: number;
+  readonly recoveryStabilityMs: number;
+}
+
+function isLoopback(url: string): boolean {
+  return LOOPBACK_HOSTS.has(new URL(url).hostname);
+}
+
+function resolveAdapter(
+  nodeEnv: AppConfig['nodeEnv'],
+  raw: string | undefined,
+): MarketDataAdapter {
+  const value = raw?.trim() ?? '';
+  if (nodeEnv === 'production') {
+    if (value === '')
+      throw new ConfigError(
+        'MARKET_DATA_ADAPTER must be set explicitly in production',
+      );
+    if (value === 'fake')
+      throw new ConfigError('fake adapter is forbidden in production');
+  }
+  if (value === '') return 'fake';
+  if (value === 'toss' || value === 'fake') return value;
+  throw new ConfigError('MARKET_DATA_ADAPTER must be "toss" or "fake"');
 }
 
 export function loadConfig(
@@ -39,10 +107,51 @@ export function loadConfig(
 ): AppConfig {
   const parsed = environmentSchema.parse(environment);
   if (parsed.SESSION_HASH_KEYS.length === 0) {
-    throw new Error('SESSION_HASH_KEYS must contain at least one key');
+    throw new ConfigError('SESSION_HASH_KEYS must contain at least one key');
   }
   if (parsed.NODE_ENV === 'production' && !parsed.ADMIN_API_KEY) {
-    throw new Error('ADMIN_API_KEY is required in production');
+    throw new ConfigError('ADMIN_API_KEY is required in production');
+  }
+  const marketDataAdapter = resolveAdapter(
+    parsed.NODE_ENV,
+    parsed.MARKET_DATA_ADAPTER,
+  );
+  let toss: TossConfig | undefined;
+  if (marketDataAdapter === 'toss') {
+    if (
+      !parsed.TOSS_CLIENT_ID ||
+      !CLIENT_ID_PATTERN.test(parsed.TOSS_CLIENT_ID)
+    )
+      throw new ConfigError(
+        'TOSS_CLIENT_ID is required for the toss adapter and must look like c_<id>',
+      );
+    if (!parsed.TOSS_CLIENT_SECRET || parsed.TOSS_CLIENT_SECRET.length < 16)
+      throw new ConfigError(
+        'TOSS_CLIENT_SECRET is required for the toss adapter (>= 16 characters)',
+      );
+    for (const [name, value, fallback] of [
+      [
+        'TOSS_REST_BASE_URL',
+        parsed.TOSS_REST_BASE_URL,
+        TOSS_CONTRACT_SERVERS.rest,
+      ],
+      ['TOSS_WS_URL', parsed.TOSS_WS_URL, TOSS_CONTRACT_SERVERS.ws],
+    ] as const) {
+      if (
+        parsed.NODE_ENV === 'production' &&
+        value !== fallback &&
+        !isLoopback(value)
+      )
+        throw new ConfigError(
+          `${name} may only be overridden in production with a loopback host`,
+        );
+    }
+    toss = {
+      clientId: parsed.TOSS_CLIENT_ID,
+      clientSecret: parsed.TOSS_CLIENT_SECRET,
+      restBaseUrl: parsed.TOSS_REST_BASE_URL,
+      wsUrl: parsed.TOSS_WS_URL,
+    };
   }
   return {
     nodeEnv: parsed.NODE_ENV,
@@ -54,5 +163,9 @@ export function loadConfig(
     sessionHashKeys: parsed.SESSION_HASH_KEYS as [string, ...string[]],
     csrfSecret: parsed.CSRF_SECRET,
     ...(parsed.ADMIN_API_KEY ? { adminApiKey: parsed.ADMIN_API_KEY } : {}),
+    marketDataAdapter,
+    ...(toss ? { toss } : {}),
+    shutdownDrainDeadlineMs: parsed.SHUTDOWN_DRAIN_DEADLINE_MS,
+    recoveryStabilityMs: parsed.RECOVERY_STABILITY_MS,
   };
 }

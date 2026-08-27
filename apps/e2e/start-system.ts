@@ -883,6 +883,9 @@ async function main(): Promise<void> {
     sessionHashKeys: [randomBytes(32).toString('base64url')],
     csrfSecret: randomBytes(32).toString('base64url'),
     adminApiKey: controlCredential,
+    marketDataAdapter: 'fake',
+    shutdownDrainDeadlineMs: 30_000,
+    recoveryStabilityMs: 0,
   };
   database = createDatabase(config.databaseUrl);
   unitOfWork = new UnitOfWork(database, { backoff: async () => undefined });

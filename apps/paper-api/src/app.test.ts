@@ -11,6 +11,9 @@ const testConfig = (): AppConfig => ({
   redisUrl: 'redis://127.0.0.1:6379',
   sessionHashKeys: ['test-session-hash-key'],
   csrfSecret: 'test-csrf-secret',
+  marketDataAdapter: 'fake',
+  shutdownDrainDeadlineMs: 30_000,
+  recoveryStabilityMs: 0,
 });
 
 const fakeDependencies = (): AppDependencies => ({

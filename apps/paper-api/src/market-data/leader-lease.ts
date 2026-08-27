@@ -142,7 +142,7 @@ export class LeaderLease {
     const pollMs = options.pollIntervalMs ?? LEASE_POLL_INTERVAL_MS;
     const audit = options.audit ?? noopAudit;
     if (signal?.aborted) throw new AbortError();
-    const connection = await openConnection(options);
+    const connection = await openConnection(market, options);
     const startedAt = Date.now();
     let polls = 0;
     let lastWaitingLog = 0;
@@ -321,12 +321,13 @@ export class LeaderLease {
 }
 
 async function openConnection(
+  market: Market,
   options: LeaderLeaseOptions,
 ): Promise<LeaseConnection> {
   if (options.clientFactory !== undefined) return options.clientFactory();
   const client = new Client({
     connectionString: options.connectionString ?? process.env.DATABASE_URL,
-    application_name: `skipjack-lease-${options.leaderId ?? 'unknown'}`,
+    application_name: `skipjack-lease-${market}-${options.leaderId ?? 'unknown'}`,
   });
   await client.connect();
   return client as unknown as LeaseConnection;

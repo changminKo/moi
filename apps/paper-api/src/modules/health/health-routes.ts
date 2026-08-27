@@ -6,6 +6,8 @@ export interface HealthDependencies {
   marketData: () => unknown;
   metrics?: MetricsRegistry;
   trading?: (request: FastifyRequest) => unknown | Promise<unknown>;
+  /** While draining, readiness answers 503 `{draining:true}` (§6.6-1). */
+  draining?: () => boolean;
 }
 const headers = (reply: FastifyReply, request: FastifyRequest): void => {
   reply.header('Cache-Control', 'no-store').header('X-Request-Id', request.id);

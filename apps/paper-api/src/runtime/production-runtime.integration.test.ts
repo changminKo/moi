@@ -1,0 +1,622 @@
+import { randomUUID } from 'node:crypto';
+import {
+  PostgreSqlContainer,
+  type StartedPostgreSqlContainer,
+} from '@testcontainers/postgresql';
+import { Client } from 'pg';
+import {
+  GenericContainer,
+  type StartedTestContainer,
+  Wait,
+} from 'testcontainers';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import WebSocket from 'ws';
+import type { AppConfig } from '../config.js';
+import { OutboxPublisherLoop } from '../modules/stream/outbox-publisher-loop.js';
+import {
+  ProductionRuntime,
+  type RuntimePhaseSpy,
+} from './production-runtime.js';
+import {
+  createFakeProviderBundle,
+  type FakeProviderBundle,
+} from './provider-bundle.js';
+
+const OutboxPublisherLoopPrototype = OutboxPublisherLoop.prototype;
+
+const CONTAINER_TIMEOUT_MS = 300_000;
+const TEST_TIMEOUT_MS = 90_000;
+
+let postgres: StartedPostgreSqlContainer;
+let redis: StartedTestContainer;
+let observer: Client;
+let databaseUrl: string;
+const running: ProductionRuntime[] = [];
+
+class Deferred<T = void> {
+  readonly promise: Promise<T>;
+  resolve!: (value: T) => void;
+  constructor() {
+    this.promise = new Promise<T>((resolve) => {
+      this.resolve = resolve;
+    });
+  }
+}
+
+function config(overrides: Partial<AppConfig> = {}): AppConfig {
+  return {
+    nodeEnv: 'test',
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1:0',
+    databaseUrl,
+    redisUrl: `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`,
+    sessionHashKeys: ['runtime-session-hash-key-32-bytes!'],
+    csrfSecret: 'runtime-csrf-secret-at-least-32-bytes',
+    adminApiKey: 'runtime-admin-key-at-least-32-bytes!',
+    marketDataAdapter: 'fake',
+    shutdownDrainDeadlineMs: 5_000,
+    recoveryStabilityMs: 0,
+    ...overrides,
+  };
+}
+
+interface Started {
+  runtime: ProductionRuntime;
+  bundle: FakeProviderBundle;
+  origin: string;
+  phases: string[];
+  logs: { event: string; fields: Record<string, unknown> }[];
+  deferSnapshots?: Deferred;
+}
+
+async function start(
+  options: {
+    deferSnapshots?: boolean;
+    bundle?: FakeProviderBundle;
+    awaitServing?: boolean;
+    verifyInvariants?: () => Promise<void>;
+  } = {},
+): Promise<Started> {
+  const phases: string[] = [];
+  const logs: Started['logs'] = [];
+  const bundle = options.bundle ?? createFakeProviderBundle();
+  const deferSnapshots = options.deferSnapshots ? new Deferred() : undefined;
+  if (deferSnapshots) bundle.snapshots.gate = deferSnapshots.promise;
+  const spy: RuntimePhaseSpy = (phase) => phases.push(phase);
+  const runtime = new ProductionRuntime({
+    config: config(),
+    bundle,
+    signals: false,
+    log: (event, fields) => logs.push({ event, fields }),
+    phaseSpy: spy,
+    ...(options.verifyInvariants
+      ? { verifyInvariants: options.verifyInvariants }
+      : {}),
+  });
+  running.push(runtime);
+  const started = runtime.start();
+  if (options.awaitServing === false) {
+    await runtime.listening;
+  } else {
+    await started;
+  }
+  const origin = `http://127.0.0.1:${runtime.port}`;
+  return {
+    runtime,
+    bundle,
+    origin,
+    phases,
+    logs,
+    ...(deferSnapshots ? { deferSnapshots } : {}),
+  };
+}
+
+const json = async (url: string, init?: RequestInit) => {
+  const response = await fetch(url, init);
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+  };
+};
+const auditRows = async (like: string) =>
+  (
+    await observer.query(
+      'select event_type, payload from audit_events where event_type like $1 order by occurred_at, id',
+      [like],
+    )
+  ).rows as { event_type: string; payload: Record<string, unknown> }[];
+const epochs = async () =>
+  Object.fromEntries(
+    (
+      await observer.query(
+        'select market_code, epoch::text, leader_id, released_at from leader_epochs order by market_code',
+      )
+    ).rows.map((r) => [r.market_code, r]),
+  );
+const leaseBackendPid = async (leaderId: string, market: string) =>
+  Number(
+    (
+      await observer.query(
+        'select pid from pg_stat_activity where application_name = $1',
+        [`skipjack-lease-${market}-${leaderId}`],
+      )
+    ).rows[0]?.pid,
+  );
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function anonymousSession(origin: string) {
+  const response = await fetch(`${origin}/api/v1/sessions/anonymous`, {
+    method: 'POST',
+    headers: { origin: 'http://127.0.0.1:0' },
+  });
+  const cookie = response.headers.get('set-cookie')?.split(';')[0] as string;
+  const body = (await response.json()) as {
+    csrfToken: string;
+    session: { id: string };
+  };
+  return { cookie, csrf: body.csrfToken, id: body.session.id };
+}
+
+beforeAll(async () => {
+  postgres = await new PostgreSqlContainer('postgres:17.5-alpine').start();
+  redis = await new GenericContainer('redis:7-alpine')
+    .withExposedPorts(6379)
+    .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
+    .start();
+  databaseUrl = postgres.getConnectionUri();
+  observer = new Client({ connectionString: databaseUrl });
+  await observer.connect();
+}, CONTAINER_TIMEOUT_MS);
+
+afterEach(async () => {
+  for (const runtime of running.splice(0))
+    await runtime.stop().catch(() => undefined);
+  await observer.query('select pg_advisory_unlock_all()');
+  await observer.query('delete from safety_incidents');
+  await observer.query('delete from leader_epochs');
+  await observer.query(
+    "delete from audit_events where event_type like 'LEADER_%' or event_type like 'RUNTIME_%' or event_type like 'RECOVERY_%'",
+  );
+});
+
+afterAll(async () => {
+  await observer?.end();
+  await redis?.stop();
+  await postgres?.stop();
+});
+
+describe('ProductionRuntime', () => {
+  it(
+    'A1: boots to SERVING with both markets NORMAL, two leases, and placement enabled',
+    async () => {
+      const { runtime, origin, bundle, phases } = await start();
+      expect(runtime.state.current).toBe('SERVING');
+      expect(phases).toEqual([
+        'BOOTING',
+        'RESTORING',
+        'ACQUIRING_LEASES',
+        'RECOVERING',
+        'SERVING',
+      ]);
+      const ready = await json(`${origin}/health/ready`);
+      expect(ready.status).toBe(200);
+      const market = await json(`${origin}/health/market-data`);
+      expect(market.body).toMatchObject({
+        KR: { state: 'NORMAL' },
+        US: { state: 'NORMAL' },
+      });
+      const trading = await json(`${origin}/api/v1/health/trading`);
+      expect(trading.body).toMatchObject({
+        placement: true,
+        cancellation: true,
+        fx: true,
+        reasons: [],
+      });
+      const rows = await epochs();
+      expect(rows.KR?.epoch).toBe('1');
+      expect(rows.US?.epoch).toBe('1');
+      expect(rows.KR?.released_at).toBeNull();
+      expect(bundle.connectionsOpen()).toBe(2);
+      expect(
+        (await auditRows('RUNTIME_STATE_CHANGED')).some(
+          (a) => a.payload.to === 'SERVING',
+        ),
+      ).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A2: a transport close degrades one market only and recovers automatically',
+    async () => {
+      const { origin, bundle } = await start();
+      bundle.streamFor('KR').emitTransportClosed('provider closed');
+      await vi.waitFor(async () => {
+        const market = await json(`${origin}/health/market-data`);
+        expect(market.body.KR).toMatchObject({
+          state: expect.stringMatching(/DEGRADED|RECOVERING/),
+        });
+        expect(market.body.US).toMatchObject({ state: 'NORMAL' });
+      });
+      await vi.waitFor(async () => {
+        const during = await json(`${origin}/api/v1/health/trading`);
+        expect(during.body.placement).toBe(true);
+        expect(during.body.reasons).toContain('MARKET_DEGRADED:KR');
+      });
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await json(`${origin}/health/market-data`)).body.KR,
+          ).toMatchObject({ state: 'NORMAL' });
+        },
+        { timeout: 10_000 },
+      );
+      expect((await json(`${origin}/metrics`)).status).toBe(200);
+      const metrics = await (await fetch(`${origin}/metrics`)).text();
+      expect(metrics).toContain('feed_reconnect_total{market="KR"} 1');
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A4: losing the KR lease re-elects globally, tears down both markets, and comes back SERVING',
+    async () => {
+      const { runtime, origin, bundle, phases, logs } = await start();
+      const pauseSpy = vi.spyOn(runtime.publisher, 'pauseScheduling');
+      const drainSpy = vi.spyOn(runtime.publisher, 'shutdownDrain');
+      const reelectSpy = vi.spyOn(runtime, 'reelect');
+      const closeKr = vi.spyOn(bundle.streamFor('KR'), 'close');
+      const closeUs = vi.spyOn(bundle.streamFor('US'), 'close');
+      const pid = await leaseBackendPid(runtime.leaderId, 'KR');
+      expect(pid).toBeGreaterThan(0);
+      // Hold the re-acquired bundle in RECOVERING so the closed gate is observable.
+      const gate = new Deferred();
+      bundle.snapshots.gate = gate.promise;
+      let runningAtPause: boolean | undefined;
+      pauseSpy.mockImplementation(function (this: unknown) {
+        const result = OutboxPublisherLoopPrototype.pauseScheduling.call(
+          runtime.publisher,
+        );
+        runningAtPause = runtime.publisher.isRunning();
+        return result;
+      });
+      await observer.query('select pg_terminate_backend($1)', [pid]);
+      await vi.waitFor(() => expect(phases).toContain('RE_ELECTING'), {
+        timeout: 2_000,
+      });
+      await vi.waitFor(() => {
+        expect(closeKr).toHaveBeenCalled();
+        expect(closeUs).toHaveBeenCalled();
+      });
+      expect(pauseSpy).toHaveBeenCalledTimes(1);
+      expect(runningAtPause).toBe(false);
+      await vi.waitFor(() => expect(runtime.state.current).toBe('RECOVERING'), {
+        timeout: 10_000,
+      });
+      expect(runtime.publisher.isRunning()).toBe(false);
+      const upgrade = new WebSocket(
+        `ws://127.0.0.1:${runtime.port}/api/v1/stream`,
+        { headers: { origin: 'http://127.0.0.1:0' } },
+      );
+      const status = await new Promise<number>((resolve) => {
+        upgrade.on('unexpected-response', (_r, res) =>
+          resolve(res.statusCode ?? 0),
+        );
+        upgrade.on('error', () => undefined);
+      });
+      expect(status).toBe(503);
+      gate.resolve();
+      await vi.waitFor(() => expect(runtime.state.current).toBe('SERVING'), {
+        timeout: 15_000,
+      });
+      expect(drainSpy).not.toHaveBeenCalled();
+      expect(reelectSpy).toHaveBeenCalledTimes(1);
+      const released = await auditRows('LEADER_RELEASED');
+      expect(released.filter((a) => a.payload.market === 'US')).toHaveLength(1);
+      expect(released.filter((a) => a.payload.market === 'KR')).toHaveLength(0);
+      const incidents = (
+        await observer.query(
+          'select cause_code, scope_id from safety_incidents order by activated_at',
+        )
+      ).rows;
+      expect(incidents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            cause_code: 'LEADER_LEASE_LOST',
+            scope_id: 'KR',
+          }),
+          expect.objectContaining({
+            cause_code: 'LEADER_BUNDLE_BROKEN',
+            scope_id: 'US',
+          }),
+        ]),
+      );
+      const rows = await epochs();
+      expect(Number(rows.KR?.epoch)).toBeGreaterThan(1);
+      expect(Number(rows.US?.epoch)).toBeGreaterThan(1);
+      expect(
+        (await auditRows('RUNTIME_STATE_CHANGED')).filter(
+          (a) => a.payload.to === 'SERVING',
+        ),
+      ).toHaveLength(2);
+      expect(logs.filter((l) => l.event === 'runtime.reelect')).toHaveLength(1);
+      const metrics = await (await fetch(`${origin}/metrics`)).text();
+      expect(metrics).toContain('leader_reelection_total{market="KR"} 1');
+      expect(runtime.publisher.isRunning()).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A5: stop() follows the §6.6 order, drains the outbox, releases leases, and exits cleanly',
+    async () => {
+      const { runtime, phases, logs, origin, bundle } = await start();
+      const order: string[] = [];
+      const record = (name: string) => () => {
+        order.push(name);
+      };
+      runtime.shutdownSpy = record;
+      const session = await anonymousSession(origin);
+      const stopped = await runtime.stop();
+      expect(stopped.forced).toBe(false);
+      expect(order).toEqual([
+        'cancelOnly',
+        'gate.close',
+        'gate.drain',
+        'uow.drain',
+        'pendingPoll',
+        'shutdownDrain',
+        'closeSockets',
+        'abortPending',
+        'releaseAll',
+      ]);
+      expect(phases.slice(-2)).toEqual(['DRAINING', 'STOPPED']);
+      expect(bundle.connectionsOpen()).toBe(0);
+      const audits = (await auditRows('RUNTIME_%')).map((a) => a.event_type);
+      expect(audits).toContain('RUNTIME_DRAINING');
+      expect(audits.at(-1)).toBe('RUNTIME_STOPPED');
+      expect(await auditRows('LEADER_RELEASED')).toHaveLength(2);
+      expect(logs.filter((l) => l.event === 'outbox.drain')).toHaveLength(1);
+      expect(
+        logs.find((l) => l.event === 'outbox.drain')?.fields,
+      ).toMatchObject({ skipped: false });
+      expect(
+        Object.values(await epochs()).every(
+          (r) => (r as { released_at: unknown }).released_at !== null,
+        ),
+      ).toBe(true);
+      expect(session.id).toBeTypeOf('string');
+      expect(
+        (
+          await observer.query(
+            'select count(*)::int as n from outbox_events where published_at is null',
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A5b/A15: stopping while waiting for leases makes zero provider calls and exits within 2 s',
+    async () => {
+      await observer.query("select pg_try_advisory_lock(hashtext('KR'))");
+      const { runtime, bundle, logs, origin } = await start({
+        awaitServing: false,
+      });
+      await vi.waitFor(() =>
+        expect(runtime.state.current).toBe('ACQUIRING_LEASES'),
+      );
+      await vi.waitFor(() =>
+        expect(
+          logs.some(
+            (l) => l.event === 'lease.waiting' && l.fields.market === 'KR',
+          ),
+        ).toBe(true),
+      );
+      const trading = await json(`${origin}/api/v1/health/trading`);
+      expect(trading.body).toMatchObject({
+        placement: false,
+        cancellation: true,
+        fx: false,
+        reasons: ['CANCEL_ONLY', 'ACQUIRING_LEASES'],
+      });
+      expect((await json(`${origin}/health/ready`)).status).toBe(200);
+      expect((await json(`${origin}/health/market-data`)).body).toMatchObject({
+        KR: { state: 'RECOVERING', reasons: ['LEADER_LEASE_PENDING'] },
+      });
+      const startSpy = vi.spyOn(runtime.publisher, 'start');
+      const drainSpy = vi.spyOn(runtime.publisher, 'shutdownDrain');
+      const startedAt = Date.now();
+      const result = await runtime.stop();
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(result.forced).toBe(false);
+      expect(bundle.connectCalls()).toBe(0);
+      expect(bundle.snapshotCalls()).toBe(0);
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(drainSpy).not.toHaveBeenCalled();
+      expect(
+        logs.find((l) => l.event === 'outbox.drain')?.fields,
+      ).toMatchObject({ skipped: true, leftFrom: 'ACQUIRING_LEASES' });
+      expect(await auditRows('LEADER_ACQUIRED')).toHaveLength(0);
+      expect((await auditRows('RUNTIME_%')).map((a) => a.event_type)).toEqual(
+        expect.arrayContaining(['RUNTIME_DRAINING', 'RUNTIME_STOPPED']),
+      );
+      await observer.query("select pg_advisory_unlock(hashtext('KR'))");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A17: the stream gate and publisher flip together; RECOVERING neither publishes nor accepts upgrades',
+    async () => {
+      const { runtime, origin, deferSnapshots, bundle } = await start({
+        deferSnapshots: true,
+        awaitServing: false,
+      });
+      await vi.waitFor(() => expect(runtime.state.current).toBe('RECOVERING'), {
+        timeout: 10_000,
+      });
+      expect(runtime.publisher.isRunning()).toBe(false);
+      const claimSpy = vi.spyOn(runtime, 'claimOutboxForTest');
+      const session = await anonymousSession(origin);
+      const rejected = new WebSocket(
+        `ws://127.0.0.1:${runtime.port}/api/v1/stream`,
+        { headers: { origin: 'http://127.0.0.1:0', cookie: session.cookie } },
+      );
+      const status = await new Promise<number>((resolve) => {
+        rejected.on('unexpected-response', (_r, res) =>
+          resolve(res.statusCode ?? 0),
+        );
+        rejected.on('error', () => undefined);
+      });
+      expect(status).toBe(503);
+      await sleep(300);
+      expect(claimSpy).not.toHaveBeenCalled();
+      let observedMismatch = 0;
+      const observe = () => {
+        if (runtime.state.gate().isOpen() !== runtime.publisher.isRunning())
+          observedMismatch += 1;
+      };
+      const interval = setInterval(observe, 1);
+      deferSnapshots?.resolve();
+      await vi.waitFor(() => expect(runtime.state.current).toBe('SERVING'), {
+        timeout: 10_000,
+      });
+      clearInterval(interval);
+      expect(observedMismatch).toBe(0);
+      expect(runtime.publisher.isRunning()).toBe(true);
+      const ws = new WebSocket(`ws://127.0.0.1:${runtime.port}/api/v1/stream`, {
+        headers: { origin: 'http://127.0.0.1:0', cookie: session.cookie },
+      });
+      const messages: Record<string, unknown>[] = [];
+      ws.on('message', (d) => messages.push(JSON.parse(String(d))));
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', resolve);
+        ws.once('error', reject);
+      });
+      await vi.waitFor(() =>
+        expect(messages.some((m) => m.type === 'ready')).toBe(true),
+      );
+      // A6: an outbox row appended in a transaction reaches the live socket
+      await observer.query(
+        `insert into account_sequences (id, session_id, account_sequence, mutation_kind) values ($1, $2, 1, 'TEST')`,
+        [randomUUID(), session.id],
+      );
+      await observer.query(
+        `insert into outbox_events (id, event_id, session_id, stream_sequence, event_type, payload) values ($1, $2, $3, 1, 'TEST_EVENT', '{"hello":true}')`,
+        [randomUUID(), randomUUID(), session.id],
+      );
+      await vi.waitFor(
+        () =>
+          expect(
+            messages.some(
+              (m) => m.type === 'event' && m.eventType === 'TEST_EVENT',
+            ),
+          ).toBe(true),
+        { timeout: 2_000 },
+      );
+      ws.send('{"afterSequence":"1"}');
+      const code = await new Promise<number>((resolve) =>
+        ws.once('close', (c) => resolve(c)),
+      );
+      expect(code).toBe(1003);
+      expect(bundle.connectionsOpen()).toBe(2);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A7: a failing invariant check records a manual GLOBAL incident and rejects startup',
+    async () => {
+      const runtime = new ProductionRuntime({
+        config: config(),
+        bundle: createFakeProviderBundle(),
+        signals: false,
+        verifyInvariants: async () => {
+          throw new Error('ledger broken');
+        },
+      });
+      running.push(runtime);
+      await expect(runtime.start()).rejects.toThrow('ledger broken');
+      expect(runtime.state.current).toBe('FAILED_CLOSED');
+      const incidents = (
+        await observer.query(
+          'select scope_type, source, cause_code, status from safety_incidents',
+        )
+      ).rows;
+      expect(incidents).toEqual([
+        expect.objectContaining({
+          scope_type: 'GLOBAL',
+          source: 'MANUAL',
+          cause_code: 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
+          status: 'ACTIVE',
+        }),
+      ]);
+      await runtime.stop();
+      // restart: the persisted incident keeps trading CANCEL_ONLY
+      const { origin } = await start();
+      const trading = await json(`${origin}/api/v1/health/trading`);
+      expect(trading.body.placement).toBe(false);
+      expect(trading.body.reasons).toContain(
+        'GLOBAL_INCIDENT:STARTUP_INVARIANT_OR_AUDIT_FAILURE',
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A16b: losing KR during a partial bundle aborts the generation without re-election and retries',
+    async () => {
+      await observer.query("select pg_try_advisory_lock(hashtext('US'))");
+      const { runtime, bundle, logs, phases } = await start({
+        awaitServing: false,
+      });
+      const reelectSpy = vi.spyOn(runtime, 'reelect');
+      await vi.waitFor(() => expect(runtime.leases.pending).toBe('US'), {
+        timeout: 5_000,
+      });
+      const pid = await leaseBackendPid(runtime.leaderId, 'KR');
+      await observer.query('select pg_terminate_backend($1)', [pid]);
+      await vi.waitFor(
+        () =>
+          expect(
+            logs.filter(
+              (l) => l.event === 'lease.acquired' && l.fields.market === 'KR',
+            ).length,
+          ).toBeGreaterThanOrEqual(2),
+        { timeout: 5_000 },
+      );
+      await vi.waitFor(() => expect(runtime.leases.pending).toBe('US'), {
+        timeout: 5_000,
+      });
+      expect(phases).not.toContain('RE_ELECTING');
+      expect(reelectSpy).not.toHaveBeenCalled();
+      expect(bundle.connectCalls()).toBe(0);
+      await observer.query("select pg_advisory_unlock(hashtext('US'))");
+      await vi.waitFor(() => expect(runtime.state.current).toBe('SERVING'), {
+        timeout: 15_000,
+      });
+      const rows = await epochs();
+      expect(rows.KR?.epoch).toBe('2');
+      expect(rows.US?.epoch).toBe('1');
+      const metrics = await (
+        await fetch(`http://127.0.0.1:${runtime.port}/metrics`)
+      ).text();
+      expect(metrics).toContain(
+        'lease_lost_total{market="KR",phase="ACQUIRING"} 1',
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+});

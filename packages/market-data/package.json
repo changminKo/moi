@@ -9,8 +9,8 @@
       "default": "./dist/index.js"
     },
     "./testing": {
-      "types": "./dist/adapter-conformance.d.ts",
-      "default": "./dist/adapter-conformance.js"
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "types": "./dist/index.d.ts",

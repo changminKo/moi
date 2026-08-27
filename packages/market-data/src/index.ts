@@ -1,10 +1,15 @@
 export {
+  FakeConnectionLedger,
   type FakeInitialSnapshotMode,
   FakeMarketData,
   type FakeMarketDataOptions,
   type FakeOrderBookInput,
   type FakeTradeInput,
 } from './fake-market-data.js';
+export {
+  FakeSnapshotSource,
+  type FakeSnapshotSourceOptions,
+} from './fake-snapshot-source.js';
 export type {
   FxRate,
   FxRateSource,
