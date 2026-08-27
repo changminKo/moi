@@ -98,9 +98,20 @@ const tradeAt = (
   sourceTimestamp,
 });
 
+export interface MarketDataConformanceOptions {
+  /**
+   * Whether the provider contract lets a trade omit its source timestamp.
+   * When false (e.g. Toss requires `timestamp`), the suite asserts that a
+   * timestamp-less trade is refused without an event instead of normalized.
+   */
+  readonly nullableTradeTimestamp?: boolean;
+}
+
 export function runMarketDataConformance(
   factory: MarketDataConformanceFactory,
+  options: MarketDataConformanceOptions = {},
 ): void {
+  const nullableTradeTimestamp = options.nullableTradeTimestamp ?? true;
   let harness: MarketDataConformanceHarness;
   let controller: AbortController;
   let events: AsyncIterator<MarketEvent>;
@@ -170,6 +181,17 @@ export function runMarketDataConformance(
   it('keeps a missing source timestamp null instead of substituting one', async () => {
     await harness.stream.declare(DECLARATION);
     await harness.deliverTrade(tradeAt('210.10', null));
+
+    if (!nullableTradeTimestamp) {
+      // The contract requires a trade timestamp, so the harness had to supply
+      // one; the adapter must still not manufacture a null of its own.
+      const supplied = await nextEvent();
+      expect(supplied).toMatchObject({ kind: 'trade', price: '210.10' });
+      expect(
+        supplied.kind === 'trade' && supplied.sourceTimestamp,
+      ).not.toBeNull();
+      return;
+    }
 
     const event = await nextEvent();
 

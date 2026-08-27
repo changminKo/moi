@@ -41,6 +41,7 @@ export {
 } from './toss/subscription-plan.js';
 export { TossRestClient, type TossRestOptions } from './toss/toss-rest.js';
 export {
+  createWsSocketFactory,
   reconnectDelayMs,
   type TossSocket,
   type TossSocketFactory,

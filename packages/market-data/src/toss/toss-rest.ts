@@ -16,7 +16,12 @@ import type {
   RecoverySnapshot,
   TokenProvider,
 } from '../ports.js';
-import { readDecimalString, readOptionalTimestamp } from '../types.js';
+import {
+  MarketDataError,
+  readDecimalString,
+  readOptionalTimestamp,
+} from '../types.js';
+import { parseRetryAfterMs } from './oauth-token-provider.js';
 import type { FetchLike } from './types-internal.js';
 
 export interface TossRestOptions {
@@ -243,6 +248,7 @@ export class TossRestClient
     signal: AbortSignal,
   ): Promise<JsonObject> {
     let last: unknown;
+    let invalidated = false;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       const timeout = new AbortController();
       const timer = setTimeout(() => timeout.abort(), this.timeoutMs);
@@ -254,6 +260,41 @@ export class TossRestClient
           signal: timeout.signal,
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (
+          response.status === 401 &&
+          !invalidated &&
+          this.options.tokenProvider.invalidate
+        ) {
+          // The provider invalidates the previous token on reissue (§5.5): refresh once.
+          invalidated = true;
+          this.options.tokenProvider.invalidate();
+          last = new MarketDataError(
+            'AUTH_FAILED',
+            'Toss REST rejected the access token',
+            { statusCode: 401 },
+          );
+          continue;
+        }
+        if (response.status === 401 || response.status === 403)
+          throw new MarketDataError(
+            'AUTH_FAILED',
+            response.status === 403
+              ? 'Toss REST rejected the client IP'
+              : 'Toss REST rejected the access token',
+            { statusCode: response.status },
+          );
+        if (response.status === 429) {
+          const retryAfterMs = parseRetryAfterMs(
+            response.headers.get('retry-after'),
+          );
+          last = new MarketDataError('RATE_LIMITED', 'Toss REST rate limited', {
+            statusCode: 429,
+            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          });
+          if (attempt === this.maxRetries) throw last;
+          await this.sleep(retryAfterMs ?? 2 ** attempt * 100, signal);
+          continue;
+        }
         if (!response.ok) throw new Error(`Toss REST HTTP ${response.status}`);
         const body = await response.json();
         if (!body || typeof body !== 'object' || body.success === false)
@@ -262,6 +303,7 @@ export class TossRestClient
       } catch (e) {
         last = e;
         if (signal.aborted) throw e;
+        if (e instanceof MarketDataError && e.code === 'AUTH_FAILED') throw e;
         if (attempt === this.maxRetries) throw e;
         await this.sleep(2 ** attempt * 100, signal);
       } finally {
