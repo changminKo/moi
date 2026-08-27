@@ -21,10 +21,12 @@
   },
   "dependencies": {
     "@skipjack/trading-core": "workspace:*",
+    "ws": "8.18.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "@types/ws": "8.18.1",
     "vitest": "4.1.11"
   }
 }
