@@ -17,8 +17,10 @@ describe('StartupCoordinator', () => {
       matching: latch,
       restore: async () => ({}),
       verifyInvariants: () => undefined,
-      acquireLease: async (m) =>
-        ({ epoch: 1n, fencingToken: 1n, market: m }) as never,
+      acquireLeases: async () => {
+        order.push('acquireLeases');
+        return {} as never;
+      },
       recover: async (m) => {
         order.push(`recover:${m}`);
       },
@@ -28,6 +30,7 @@ describe('StartupCoordinator', () => {
     expect(order).toEqual([
       'closed',
       'closed',
+      'acquireLeases',
       'recover:KR',
       'recover:US',
       'open',
@@ -45,7 +48,7 @@ describe('StartupCoordinator', () => {
         verifyInvariants: () => {
           throw new Error('bad');
         },
-        acquireLease: vi.fn(),
+        acquireLeases: vi.fn(),
         recover: vi.fn(),
         incidents: { activate },
       }).open(),
@@ -54,5 +57,22 @@ describe('StartupCoordinator', () => {
     expect(activate).toHaveBeenCalledWith(
       expect.objectContaining({ manual: true }),
     );
+  });
+  it('propagates an aborted lease wait without recording an invariant incident', async () => {
+    const activate = vi.fn(async () => undefined);
+    const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    await expect(
+      new StartupCoordinator({
+        admission: { close: vi.fn(), open: vi.fn() },
+        restore: async () => ({}),
+        verifyInvariants: () => undefined,
+        acquireLeases: async () => {
+          throw abort;
+        },
+        recover: vi.fn(),
+        incidents: { activate },
+      }).open(),
+    ).rejects.toBe(abort);
+    expect(activate).not.toHaveBeenCalled();
   });
 });

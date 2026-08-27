@@ -1,5 +1,4 @@
 import type { Market } from '@skipjack/trading-core';
-import type { LeaderLease } from '../market-data/leader-lease.js';
 
 export interface StartupLatch {
   close(): void | Promise<void>;
@@ -19,7 +18,8 @@ export interface StartupCoordinatorOptions {
   readonly matching?: StartupLatch;
   readonly restore: () => Promise<unknown>;
   readonly verifyInvariants: (state: unknown) => Promise<void> | void;
-  readonly acquireLease: (market: Market) => Promise<LeaderLease>;
+  /** Acquires the whole KR→US lease bundle (§5.4); cancellable through `signal`. */
+  readonly acquireLeases: (signal: AbortSignal) => Promise<unknown>;
   readonly recover: (market: Market, signal: AbortSignal) => Promise<unknown>;
   readonly incidents: StartupIncident;
   readonly signal?: AbortSignal;
@@ -38,13 +38,16 @@ export class StartupCoordinator {
       const state = await this.#o.restore();
       await this.#o.verifyInvariants(state);
       const markets = this.#o.markets ?? ['KR', 'US'];
-      await Promise.all(markets.map((market) => this.#o.acquireLease(market)));
+      await this.#o.acquireLeases(signal);
       await Promise.all(
         markets.map((market) => this.#o.recover(market, signal)),
       );
       await this.#o.matching?.open();
       await this.#o.admission.open();
     } catch (error) {
+      // A cancelled lease wait (SIGTERM while ACQUIRING_LEASES) is not an
+      // invariant failure and must not latch a manual incident.
+      if ((error as { name?: string })?.name === 'AbortError') throw error;
       await this.#o.incidents.activate({
         causeCode: 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
         manual: true,
