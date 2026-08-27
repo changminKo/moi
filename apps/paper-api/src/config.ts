@@ -1,3 +1,4 @@
+import { TOSS_CONTRACT_SERVERS } from '@skipjack/market-data';
 import { z } from 'zod';
 
 export class ConfigError extends Error {
@@ -7,11 +8,7 @@ export class ConfigError extends Error {
   }
 }
 
-/** Defaults copied from the pinned contracts' `servers` blocks (§5.1). */
-export const TOSS_CONTRACT_SERVERS = Object.freeze({
-  rest: 'https://openapi.tossinvest.com',
-  ws: 'wss://openapi-ws.tossinvest.com/ws/v1',
-});
+export { TOSS_CONTRACT_SERVERS };
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
 const CLIENT_ID_PATTERN = /^c_[A-Za-z0-9]{8,}$/;
