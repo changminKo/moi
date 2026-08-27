@@ -23,8 +23,12 @@ function toIncident(row: Row): SafetyIncident {
     },
     denied: new Set(row.blocked_capabilities as Capability[]),
     causeCode: row.cause_code,
+    // The column is `not null default 0`; epoch 0 never names a real lease
+    // epoch, so it round-trips the service's `null` ("no epoch bound").
     recoveryEpoch:
-      row.recovery_epoch === null ? null : BigInt(row.recovery_epoch),
+      row.recovery_epoch === null || row.recovery_epoch === '0'
+        ? null
+        : BigInt(row.recovery_epoch),
     version: BigInt(row.version),
     status: row.status,
   };

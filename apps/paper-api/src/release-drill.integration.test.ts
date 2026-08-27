@@ -70,6 +70,28 @@ async function runProcess(
   return { exitCode: child.exitCode, output };
 }
 
+async function waitForServing(
+  origin: string,
+  child: ChildProcess,
+  output: () => string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`paper-api exited before SERVING:\n${output()}`);
+    }
+    try {
+      const response = await fetch(`${origin}/api/v1/health/trading`);
+      const body = (await response.json()) as { placement?: boolean };
+      if (body.placement === true) return;
+    } catch {
+      // Startup readiness is polled; no fixed delay decides success.
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  throw new Error(`paper-api did not reach SERVING:\n${output()}`);
+}
+
 async function waitForLive(
   origin: string,
   child: ChildProcess,
@@ -93,7 +115,6 @@ async function waitForLive(
 
 async function startReleaseServer(
   databaseUrl = postgres.getConnectionUri(),
-  marketDataAdapter: 'fake' | 'unavailable' = 'fake',
 ): Promise<{
   readonly child: ChildProcess;
   readonly origin: string;
@@ -113,7 +134,9 @@ async function startReleaseServer(
       SESSION_HASH_KEYS: 'release-session-hash-key-32-bytes',
       CSRF_SECRET: 'release-csrf-secret-at-least-32-bytes',
       ADMIN_API_KEY: 'release-admin-key-at-least-32-bytes',
-      MARKET_DATA_ADAPTER: marketDataAdapter === 'fake' ? 'fake' : '',
+      MARKET_DATA_ADAPTER: 'fake',
+      RECOVERY_STABILITY_MS: '0',
+      SHUTDOWN_DRAIN_DEADLINE_MS: '5000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -125,6 +148,7 @@ async function startReleaseServer(
   });
   const origin = `http://127.0.0.1:${port}`;
   await waitForLive(origin, child, () => output);
+  await waitForServing(origin, child, () => output);
   return { child, origin };
 }
 
@@ -281,56 +305,31 @@ describe('public release drill', () => {
     }
   });
 
-  it('fails closed when the production market-data adapter is unavailable', async () => {
-    const server = await startReleaseServer(
-      postgres.getConnectionUri(),
-      'unavailable',
+  it('fails closed with a ConfigError when the toss adapter lacks credentials (§11.1)', async () => {
+    const port = await unusedPort();
+    const result = await runProcess(
+      process.execPath,
+      ['apps/paper-api/dist/main.js'],
+      {
+        ...process.env,
+        NODE_ENV: 'production',
+        HOST: '127.0.0.1',
+        PORT: String(port),
+        PUBLIC_ORIGIN: `http://127.0.0.1:${port}`,
+        DATABASE_URL: postgres.getConnectionUri(),
+        REDIS_URL: `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`,
+        SESSION_HASH_KEYS: 'release-session-hash-key-32-bytes',
+        CSRF_SECRET: 'release-csrf-secret-at-least-32-bytes',
+        ADMIN_API_KEY: 'release-admin-key-at-least-32-bytes',
+        MARKET_DATA_ADAPTER: 'toss',
+      },
     );
-    try {
-      const bootstrap = await fetch(
-        `${server.origin}/api/v1/sessions/anonymous`,
-        {
-          method: 'POST',
-          headers: { origin: server.origin },
-        },
-      );
-      const body = (await bootstrap.json()) as { csrfToken: string };
-      const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0];
-      expect(bootstrap.status).toBe(200);
-      expect(cookie).toMatch(/^skipjack_session=/);
-
-      const trading = await fetch(`${server.origin}/api/v1/health/trading`);
-      await expect(trading.json()).resolves.toMatchObject({
-        placement: false,
-        cancellation: true,
-        reasons: ['CANCEL_ONLY'],
-      });
-
-      const placement = await fetch(`${server.origin}/api/v1/orders`, {
-        method: 'POST',
-        headers: {
-          origin: server.origin,
-          cookie: cookie as string,
-          'x-csrf-token': body.csrfToken,
-          'idempotency-key': randomUUID(),
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          market: 'KR',
-          symbol: '005930',
-          side: 'BUY',
-          type: 'LIMIT',
-          quantity: '1',
-          limitPrice: '1',
-        }),
-      });
-      expect(placement.status).toBe(409);
-      await expect(placement.json()).resolves.toMatchObject({
-        code: 'CANCEL_ONLY',
-      });
-    } finally {
-      await stopChild(server.child);
-    }
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain('ConfigError');
+    expect(result.output).toContain('TOSS_CLIENT_ID');
+    await expect(
+      fetch(`http://127.0.0.1:${port}/health/live`),
+    ).rejects.toBeDefined();
   });
 
   it('runs the bounded load smoke and restores NORMAL with no open test orders', async () => {

@@ -76,7 +76,12 @@ export class ReconnectSupervisor {
     ) {
       this.#exhausted = true;
       this.cancel();
-      void this.#o.onExhausted();
+      try {
+        const outcome = this.#o.onExhausted();
+        if (outcome !== undefined) outcome.catch(() => undefined);
+      } catch {
+        /* an exhausted hold must never crash the process */
+      }
       return true;
     }
     return false;

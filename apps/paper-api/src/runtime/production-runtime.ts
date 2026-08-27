@@ -283,7 +283,11 @@ export class ProductionRuntime {
       leaderId: this.leaderId,
       audit: leaseAuditPort,
       onLostHeld: (market) => {
-        void this.reelect({ lostMarket: market });
+        void this.reelect({ lostMarket: market }).catch((error: unknown) => {
+          this.#log('runtime.reelect_failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       },
       phase: () =>
         this.state.current === 'SERVING'
@@ -297,12 +301,19 @@ export class ProductionRuntime {
     this.#processSupervisor = new ReconnectSupervisor({
       delayMs: () => 250,
       onExhausted: async () => {
-        await this.#incidents.activate({
-          scope: { type: 'GLOBAL', id: '*' },
-          denied: MARKET_DENIED,
-          causeCode: 'RECOVERY_RETRY_EXHAUSTED',
-        });
-        await this.#refreshIncidents();
+        try {
+          await this.#incidents.activate({
+            scope: { type: 'GLOBAL', id: '*' },
+            denied: MARKET_DENIED,
+            causeCode: 'RECOVERY_RETRY_EXHAUSTED',
+          });
+          await this.#refreshIncidents();
+        } catch (error) {
+          // The database may be what is down; stay alive in CANCEL_ONLY.
+          this.#log('runtime.incident_write_failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       },
     });
     for (const market of MARKETS) this.#buildMarket(market);
@@ -475,13 +486,27 @@ export class ProductionRuntime {
         .streamFor(market)
         .close()
         .catch(() => undefined);
-    await this.markets
-      .get(reason.lostMarket)
-      ?.health.onClose('LEADER_LEASE_LOST');
-    await this.markets.get(surviving)?.health.onClose('LEADER_BUNDLE_BROKEN');
-    await this.#refreshIncidents();
-    await this.leases.abortPending();
-    await this.leases.releaseAll();
+    // Each step runs regardless of the previous one failing (§6.5); the
+    // database itself may be unreachable while we tear down.
+    const safely = async (step: string, work: () => Promise<unknown>) => {
+      try {
+        await work();
+      } catch (error) {
+        this.#log('runtime.reelect_step_failed', {
+          step,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    await safely('lost_incident', async () =>
+      this.markets.get(reason.lostMarket)?.health.onClose('LEADER_LEASE_LOST'),
+    );
+    await safely('bundle_incident', async () =>
+      this.markets.get(surviving)?.health.onClose('LEADER_BUNDLE_BROKEN'),
+    );
+    await safely('refresh_incidents', () => this.#refreshIncidents());
+    await safely('abort_pending', () => this.leases.abortPending());
+    await safely('release_all', () => this.leases.releaseAll());
     if (this.#stopping) return;
     this.state.transition('ACQUIRING_LEASES');
     try {
