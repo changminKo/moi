@@ -22,8 +22,12 @@ type Options = Readonly<{
   random?: () => number;
 }>;
 
-function streamUrl(): string {
+const AFTER_SEQUENCE = /^(0|[1-9][0-9]{0,18})$/;
+
+function streamUrl(afterSequence?: string): string {
   const url = new URL('/api/v1/stream', readRuntimeConfig().wsOrigin);
+  if (afterSequence !== undefined && AFTER_SEQUENCE.test(afterSequence))
+    url.searchParams.set('afterSequence', afterSequence);
   return url.toString();
 }
 
@@ -90,12 +94,10 @@ export function usePortfolioStream(
       if (disposed) return;
       const socket = (
         options.webSocketFactory ?? ((url) => new WebSocket(url))
-      )(streamUrl());
+      )(streamUrl(stateRef.current?.snapshot.accountSequence));
       socketRef.current = socket;
       socket.onopen = () => {
         attempt.current = 0;
-        const after = stateRef.current?.snapshot.accountSequence;
-        if (after) socket.send(JSON.stringify({ afterSequence: after }));
       };
       socket.onmessage = (event) => {
         let message: UserStreamMessage;
