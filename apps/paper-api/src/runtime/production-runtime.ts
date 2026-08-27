@@ -53,7 +53,6 @@ import { LeaseRegistry } from './lease-registry.js';
 import { MarketRuntime } from './market-runtime.js';
 import { createOutboxEventSource } from './outbox-event-source.js';
 import type { FakeProviderBundle, ProviderBundle } from './provider-bundle.js';
-import { FAKE_SYMBOLS } from './provider-bundle.js';
 import { ReconnectSupervisor } from './reconnect-supervisor.js';
 import { RequestAdmissionGate } from './request-admission-gate.js';
 import { type RuntimeState, RuntimeStateMachine } from './runtime-state.js';
@@ -668,7 +667,7 @@ export class ProductionRuntime {
         },
       },
     });
-    const symbols = (this.#o.symbols ?? FAKE_SYMBOLS)[market];
+    const symbols = (this.#o.symbols ?? this.#o.bundle.symbols)[market];
     const runtime = new MarketRuntime({
       market,
       stream: this.#o.bundle.streamFor(market),
@@ -736,7 +735,7 @@ export class ProductionRuntime {
     const source = createOutboxEventSource(this.#db);
     const tradable = new Set(
       MARKETS.flatMap((m) =>
-        (this.#o.symbols ?? FAKE_SYMBOLS)[m].map((s) => `${m}:${s}`),
+        (this.#o.symbols ?? this.#o.bundle.symbols)[m].map((s) => `${m}:${s}`),
       ),
     );
     const app = await buildApp(config, {
@@ -882,6 +881,10 @@ export class ProductionRuntime {
       };
     }
     body.runtime = this.state.current;
+    this.metrics.gauge(
+      'provider_connections_open',
+      this.#o.bundle.connectionsOpen(),
+    );
     return body;
   }
 

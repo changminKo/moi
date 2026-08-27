@@ -128,6 +128,11 @@ export class TossWebSocketMarketData implements MarketDataStream {
     return this.options.market;
   }
 
+  /** True between a successful handshake and the transport closing. */
+  get isConnected(): boolean {
+    return this.connected;
+  }
+
   async connect(signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw abortError();
     try {

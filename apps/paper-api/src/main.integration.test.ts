@@ -90,7 +90,7 @@ describe('production entrypoint (A12)', () => {
   );
 
   it(
-    'fails closed with a ConfigError when the toss adapter is selected in this build',
+    'fails closed with a ConfigError when the toss adapter lacks credentials',
     async () => {
       await expect(
         startProductionServer(
@@ -105,8 +105,6 @@ describe('production entrypoint (A12)', () => {
             CSRF_SECRET: 'main-csrf-secret-at-least-32-bytes!!',
             ADMIN_API_KEY: 'main-admin-key-at-least-32-bytes!!!!',
             MARKET_DATA_ADAPTER: 'toss',
-            TOSS_CLIENT_ID: 'c_abcdefgh1234',
-            TOSS_CLIENT_SECRET: 's'.repeat(16),
           },
           { signals: false },
         ),
