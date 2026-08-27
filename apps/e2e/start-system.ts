@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import {
   createServer,
@@ -7,7 +7,6 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
-import type { Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FakeMarketData } from '@skipjack/market-data';
@@ -49,6 +48,17 @@ import {
   verifyCsrfToken,
 } from '../paper-api/src/modules/session/session-service.js';
 import { SESSION_COOKIE } from '../paper-api/src/modules/session/session-token.js';
+import { StreamHeartbeatLoop } from '../paper-api/src/modules/stream/stream-heartbeat-loop.js';
+import { StreamHub } from '../paper-api/src/modules/stream/stream-hub.js';
+import type {
+  DurableAccountEvent,
+  DurableEventSource,
+} from '../paper-api/src/modules/stream/stream-session.js';
+import {
+  createStreamUpgradeHandler,
+  type StreamUpgradeHandler,
+} from '../paper-api/src/modules/stream/stream-upgrade.js';
+import { LayeredRateLimiter } from '../paper-api/src/plugins/rate-limits.js';
 import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
 import { stateFilePath } from './state-file.js';
 
@@ -69,7 +79,11 @@ type Mode = 'NORMAL' | 'DEGRADED' | 'RECOVERING' | 'CANCEL_ONLY';
 type JsonObject = Record<string, unknown>;
 
 const books = new Map<string, Book>();
-const streamSockets = new Map<string, Set<Socket>>();
+const streamHub = new StreamHub();
+const streamEvents = new Map<string, DurableAccountEvent[]>();
+const streamSessions = new Set<string>();
+let streamBridge: StreamUpgradeHandler | undefined;
+let streamHeartbeat: StreamHeartbeatLoop | undefined;
 let mode: Mode = 'NORMAL';
 let snapshotRequestCount = 0;
 let snapshotCompletedCount = 0;
@@ -120,31 +134,43 @@ async function body(request: PublicRequest): Promise<JsonObject> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as JsonObject;
 }
 
-function cookies(request: PublicRequest): Map<string, string> {
-  return new Map(
-    String(request.headers.cookie ?? '')
-      .split(';')
-      .map((part) => part.trim().split('='))
-      .filter((pair): pair is [string, string] => pair.length === 2),
-  );
-}
-
-function encodeFrame(value: unknown): Buffer {
-  const payload = Buffer.from(JSON.stringify(value));
-  if (payload.length < 126)
-    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
-  const header = Buffer.alloc(4);
-  header[0] = 0x81;
-  header[1] = 126;
-  header.writeUInt16BE(payload.length, 2);
-  return Buffer.concat([header, payload]);
-}
+const streamSource: DurableEventSource = {
+  latest: (session) => currentSequence(session),
+  oldest: async (session) => streamEvents.get(session)?.[0]?.accountSequence,
+  replay: async (session, afterSequence) =>
+    (streamEvents.get(session) ?? []).filter(
+      (event) =>
+        afterSequence === undefined ||
+        BigInt(event.accountSequence) > BigInt(afterSequence),
+    ),
+};
 
 function sendStream(session: string, value: unknown, repeats = 1): void {
-  const frame = encodeFrame(value);
-  for (const socket of streamSockets.get(session) ?? []) {
-    for (let index = 0; index < repeats; index += 1) socket.write(frame);
+  const frame = value as {
+    type: string;
+    eventId?: string;
+    accountSequence?: string;
+    eventType?: string;
+    payload?: unknown;
+  };
+  if (frame.type !== 'event') {
+    streamHub.sendControl(session, value);
+    return;
   }
+  const event: DurableAccountEvent = {
+    id: randomUUID(),
+    eventId: frame.eventId ?? randomUUID(),
+    sessionId: session,
+    accountSequence: frame.accountSequence ?? '0',
+    eventType: frame.eventType ?? 'EVENT',
+    payload: frame.payload,
+    createdAt: new Date().toISOString(),
+  };
+  const log = streamEvents.get(session) ?? [];
+  log.push(event);
+  streamEvents.set(session, log);
+  for (let index = 0; index < repeats; index += 1)
+    void streamHub.deliver(session, event);
 }
 
 async function nextSequence(session: string, kind: string): Promise<string> {
@@ -401,9 +427,9 @@ async function injectBook(
 }
 
 async function resetState(): Promise<void> {
-  for (const sockets of streamSockets.values())
-    for (const socket of sockets) socket.destroy();
-  streamSockets.clear();
+  await streamHub.closeAll(1000, 'reset');
+  streamEvents.clear();
+  streamSessions.clear();
   await Promise.all(
     [...engines.values()].map((marketEngine) => marketEngine.reset()),
   );
@@ -593,7 +619,7 @@ async function controlApi(
     return;
   }
   if (request.method === 'POST' && url.pathname === '/sequence-gap') {
-    const session = [...streamSockets.keys()][0];
+    const session = [...streamSessions][0];
     const count = Number(input.count ?? 1);
     if (session) {
       for (let index = 0; index < count; index += 1)
@@ -621,11 +647,7 @@ async function controlApi(
     return;
   }
   if (request.method === 'GET' && url.pathname === '/stream-count') {
-    const count = [...streamSockets.values()].reduce(
-      (sum, sockets) => sum + sockets.size,
-      0,
-    );
-    json(response, 200, { count });
+    json(response, 200, { count: streamHub.size() });
     return;
   }
   if (request.method === 'GET' && url.pathname === '/snapshot-count') {
@@ -638,57 +660,6 @@ async function controlApi(
     return;
   }
   json(response, 404, { error: 'control not found' });
-}
-
-function websocketUpgrade(request: IncomingMessage, socket: Socket): void {
-  void authenticateWebsocketUpgrade(request, socket).catch(() =>
-    socket.destroy(),
-  );
-}
-
-async function authenticateWebsocketUpgrade(
-  request: IncomingMessage,
-  socket: Socket,
-): Promise<void> {
-  const url = new URL(request.url ?? '/', `http://127.0.0.1:${API_PORT}`);
-  const token = cookies(request).get(SESSION_COOKIE);
-  const session =
-    token && sessionService
-      ? (await sessionService.authenticate(token)).session.id
-      : undefined;
-  const key = request.headers['sec-websocket-key'];
-  if (
-    url.pathname !== '/api/v1/stream' ||
-    !session ||
-    typeof key !== 'string'
-  ) {
-    socket.destroy();
-    return;
-  }
-  const accept = createHash('sha1')
-    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-    .digest('base64');
-  socket.write(
-    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
-  );
-  const sockets = streamSockets.get(session) ?? new Set<Socket>();
-  sockets.add(socket);
-  streamSockets.set(session, sockets);
-  void currentSequence(session).then((sequence) =>
-    socket.write(
-      encodeFrame({
-        type: 'ready',
-        accountSequence: sequence,
-        heartbeatIntervalMs: 30_000,
-      }),
-    ),
-  );
-  const remove = () => {
-    sockets.delete(socket);
-    if (sockets.size === 0) streamSockets.delete(session);
-  };
-  socket.on('close', remove);
-  socket.on('error', remove);
 }
 
 async function listen(server: Server, port: number): Promise<void> {
@@ -783,6 +754,9 @@ function cleanup(): Promise<void> {
             )
         : undefined,
     );
+    streamHeartbeat?.stop();
+    streamBridge?.detach();
+    await settle(() => streamHub.closeAll(1012, 'SERVICE_RESTART'));
     await settle(apiApp ? () => apiApp.close() : undefined);
     await settle(() => stopChild(webProcess));
     const feed = fakeMarketData;
@@ -1115,7 +1089,27 @@ async function main(): Promise<void> {
       });
     },
   });
-  apiApp.server.on('upgrade', websocketUpgrade);
+  await apiApp.ready();
+  const streamSessionService = sessionService;
+  streamBridge = createStreamUpgradeHandler({
+    server: apiApp.server,
+    publicOrigin,
+    sessionService: {
+      authenticate: async (token) => {
+        const result = await streamSessionService.authenticate(token);
+        streamSessions.add(result.session.id);
+        return result;
+      },
+    },
+    limiter: new LayeredRateLimiter(),
+    hub: streamHub,
+    gate: { isOpen: () => true },
+    source: streamSource,
+    tradableSymbols: new Set(['KR:005930', 'US:AAPL']),
+  });
+  streamBridge.attach();
+  streamHeartbeat = new StreamHeartbeatLoop({ hub: streamHub });
+  streamHeartbeat.start();
   controlServer = createServer((request, response) => {
     void controlApi(request, response).catch((error: unknown) => {
       console.error(error);

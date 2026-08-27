@@ -8,8 +8,8 @@
  * parsed as YAML so the checks assert on values, not on substrings.
  */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
@@ -252,6 +252,11 @@ check('compose topology', () => {
     .filter(Boolean);
   assert.ok(markets.length > 0, 'paper-api must declare the markets it leads');
   assert.equal(new Set(markets).size, markets.length, 'one leader per market');
+  assert.deepEqual(
+    [...markets].sort(),
+    ['KR', 'US'],
+    'leader markets must be the code Market values KR and US',
+  );
   for (const [name, service] of Object.entries(services)) {
     if (name === 'paper-api') continue;
     assert.equal(
@@ -318,6 +323,8 @@ check('no committed secrets', () => {
     'CSRF_SECRET',
     'SESSION_HASH_KEYS',
     'ADMIN_API_KEY',
+    'TOSS_CLIENT_ID',
+    'TOSS_CLIENT_SECRET',
   ]) {
     assert.match(
       String(env[key] ?? ''),
@@ -325,6 +332,11 @@ check('no committed secrets', () => {
       `${key} must be injected via required interpolation`,
     );
   }
+  assert.strictEqual(
+    env.MARKET_DATA_ADAPTER,
+    'toss',
+    'paper-api MARKET_DATA_ADAPTER must be the literal toss (no interpolation, no fake)',
+  );
   assert.match(
     String(compose?.services?.postgres?.environment?.POSTGRES_PASSWORD ?? ''),
     /^\$\{[A-Z_]+:\?/,
@@ -338,6 +350,44 @@ check('no committed secrets', () => {
     forbidden,
     [],
     'web service must receive no backend secrets or endpoints',
+  );
+});
+
+check('no live provider hosts in tests', () => {
+  const roots = ['apps', 'packages', 'scripts'];
+  const allowed = new Set([
+    'packages/market-data/contracts/toss/openapi.json',
+    'packages/market-data/contracts/toss/asyncapi.json',
+    'packages/market-data/contracts/toss/provenance.json',
+    'packages/market-data/src/toss/contract-servers.ts',
+    'packages/market-data/src/toss/contract-servers.test.ts',
+    'apps/paper-api/src/config.ts',
+    'apps/paper-api/src/config.test.ts',
+  ]);
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (
+        entry.name === 'node_modules' ||
+        entry.name === 'dist' ||
+        entry.name.startsWith('.')
+      )
+        continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx|mjs|js|json|yaml|yml)$/.test(entry.name)) {
+        const rel = relative(root, full);
+        if (allowed.has(rel)) continue;
+        if (/tossinvest\.com/.test(readFileSync(full, 'utf8')))
+          offenders.push(rel);
+      }
+    }
+  };
+  for (const r of roots) if (existsSync(path(r))) walk(path(r));
+  assert.deepEqual(
+    offenders,
+    [],
+    'live provider hosts may appear only in the pinned contracts and server constants',
   );
 });
 
@@ -368,6 +418,16 @@ check('prometheus alerts', () => {
     'TransactionErrors',
     'DbLockWaitHigh',
     'OutboxLagHigh',
+    'ProviderConnectionsAboveLimit',
+    'LeaderLeaseWaitLong',
+    'ProviderAuthFailed',
+    'ShutdownForced',
+    'LeaderReelection',
+    'LeaderBundleSplit',
+    'HttpAdmissionRejectedOutsideDrain',
+    'OutboxClaimsOutsideServing',
+    'OutboxShutdownDrainOutsideDraining',
+    'StreamReplayOverflow',
   ]) {
     assert.ok(byName.get(name), `missing alert ${name}`);
   }

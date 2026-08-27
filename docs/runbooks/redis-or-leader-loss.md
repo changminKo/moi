@@ -31,13 +31,25 @@ If the API is dead, the process is trivially not accepting orders; preserve that
 
 ```bash
 redis-cli -u "$REDIS_URL" PING
-redis-cli -u "$REDIS_URL" --scan --pattern 'skipjack:leader:*' | xargs -r -n1 redis-cli -u "$REDIS_URL" TTL
 curl -sS "$API_ORIGIN/health/live"; curl -sS "$API_ORIGIN/health/ready"
+curl -sS "$API_ORIGIN/health/market-data" | jq
 ```
 
+The leader lease is a **PostgreSQL session advisory lock** (`pg_try_advisory_lock(hashtext(market))`) plus a `leader_epochs` row; Redis holds no lease state.
+
 ```sql
-select market, epoch, acquired_at, released_at from leader_epochs where released_at is null;
+select market_code, epoch, leader_id, acquired_at, released_at from leader_epochs order by market_code;
+select pid, application_name, state from pg_stat_activity where application_name like 'skipjack-lease-%';
+select l.pid, a.application_name from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = 'advisory';
 ```
+
+## The previous process did not exit (`LeaderLeaseWaitLong`)
+
+A new process logs `lease.waiting {market}` every 10 s while it polls `pg_try_advisory_lock` at 250 ms. If the wait exceeds 60 s and the old process has already been asked to stop, confirm it is gone (`docker ps` / platform UI), then look for a leftover backend in `pg_locks` above and terminate it with `select pg_terminate_backend(<pid>)`. The waiter acquires on its next poll; no restart is needed. Never start a third process to "help" — it would open a third provider connection.
+
+## One market lease lost means a global re-election (`LeaderReelection`)
+
+Losing either market's lease connection takes **both** markets to `CANCEL_ONLY`: the process enters `RE_ELECTING`, closes both provider sockets, releases the surviving lease, then re-acquires the KR→US bundle and recovers. This is the designed behaviour, not two incidents. If `runtime_state{state="RE_ELECTING"}` stays 1 for more than 60 s, another process probably holds one of the locks — check `pg_locks` as above.
 
 ## Recovery preconditions
 

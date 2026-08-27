@@ -129,6 +129,12 @@ export class StreamHub {
     }
   }
 
+  /** Sends a control frame (e.g. `resync-required`) to every LIVE entry of a session. */
+  sendControl(sessionId: string, frame: unknown): void {
+    for (const entry of this.#entries.get(sessionId) ?? [])
+      if (entry.state === 'LIVE') entry.ws.send(JSON.stringify(frame));
+  }
+
   publishQuote(event: QuoteEvent): void {
     for (const entry of this.#byHandle.values())
       if (entry.state === 'LIVE') entry.session?.publishQuote(event);

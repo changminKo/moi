@@ -115,6 +115,25 @@ describe('StreamHub registration', () => {
   });
 });
 
+describe('StreamHub.sendControl', () => {
+  it('reaches LIVE entries only', async () => {
+    const hub = new StreamHub();
+    const live = socket();
+    const opening = socket();
+    const handle = hub.registerOpening('sid', live);
+    hub.registerOpening('sid', opening);
+    const opened = await StreamSession.open({
+      sessionId: 'sid',
+      source: sourceWith([]),
+      socket: live,
+    });
+    expect(await hub.promoteToLive('sid', handle, opened)).toBe(true);
+    hub.sendControl('sid', { type: 'resync-required', reason: 'OUTBOX_GAP' });
+    expect(received(live)).toEqual(['resync-required']);
+    expect(received(opening)).toEqual([]);
+  });
+});
+
 describe('StreamHub replay→live barrier (U11)', () => {
   it('queues during OPENING, flushes in rounds, preserves total order, then goes LIVE on an observed empty queue', async () => {
     const hub = new StreamHub();

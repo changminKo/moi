@@ -48,6 +48,11 @@ tests, Git metadata, or developer control directories (`.dockerignore`).
 | `SESSION_HASH_KEYS` | yes | secret; comma-separated, newest first, rotate by prepending |
 | `CSRF_SECRET` | yes | secret, ≥ 32 bytes |
 | `ADMIN_API_KEY` | yes in production | secret, ≥ 32 bytes |
+| `MARKET_DATA_ADAPTER` | yes in production | `toss` literal in compose; `fake` is refused in production and there is no implicit default |
+| `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET` | with `toss` | secrets; the egress IP must be static and registered with the provider — record it next to the secret store |
+| `TOSS_REST_BASE_URL`, `TOSS_WS_URL` | no | contract defaults; production may override only with a loopback host |
+| `SHUTDOWN_DRAIN_DEADLINE_MS` | no | default 30000, must stay below `stop_grace_period` (45 s) |
+| `RECOVERY_STABILITY_MS` | no | default 5000 |
 
 `web` reads `PUBLIC_API_ORIGIN` (bare HTTPS origin) and `PORT`. The server
 validates the origin, serves it from `/runtime-config.js` with `no-store`, and
@@ -91,6 +96,12 @@ after `SESSION_MAX_AGE_SECONDS` has elapsed.
 
    `CANCEL_ONLY → old leader disconnect → new leader recover → NORMAL`
 
+   - **Precondition:** do not send `SIGTERM` to the old process (P1) until the
+     new process (P2) answers `/health/ready` with 200 and
+     `/api/v1/health/trading` lists `ACQUIRING_LEASES` in `reasons`. P1 closes
+     its HTTP ingress while draining, so P2 is what serves cancellations
+     during the handoff; while P2 waits for the lease bundle it makes no
+     provider calls, claims no outbox rows, and accepts no user WebSockets.
    - Send `SIGTERM` to the old `paper-api`. Its `ShutdownCoordinator` enters
      CANCEL_ONLY, closes admission, drains in-flight transactions and the
      outbox (30 s deadline), closes sockets, and releases the leases.

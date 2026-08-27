@@ -97,3 +97,79 @@ groups:
         annotations:
           summary: "Oldest pending outbox event older than 30s; user streams are stale"
           runbook: docs/runbooks/postgres-or-outbox-lag.md
+
+  - name: skipjack-runtime
+    rules:
+      - alert: ProviderConnectionsAboveLimit
+        expr: provider_connections_open > 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than two provider connections are open from this process"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: LeaderLeaseWaitLong
+        expr: leader_lease_wait_seconds > 60
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.market }} leader lease has been pending for over 60s (previous process still alive?)"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: ProviderAuthFailed
+        expr: increase(provider_token_refresh_total{result="auth_failed"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider token refresh failed authentication"
+          runbook: docs/runbooks/market-data-degraded.md
+      - alert: ShutdownForced
+        expr: increase(shutdown_forced_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A shutdown exceeded its drain deadline and forced progress"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: LeaderReelection
+        expr: increase(leader_reelection_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Leader lease for {{ $labels.market }} was lost; the process re-elected globally"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: LeaderBundleSplit
+        expr: count(count by (instance) (leader_lease_held == 1)) > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Two instances hold leader leases at once; restart the later one"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: HttpAdmissionRejectedOutsideDrain
+        expr: increase(http_admission_rejected_total[5m]) > 0 and on() (max(runtime_state{state="DRAINING"}) == 0)
+        labels:
+          severity: warning
+        annotations:
+          summary: "The HTTP admission gate rejected requests while not draining"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: OutboxClaimsOutsideServing
+        expr: increase(outbox_claims_total{mode="periodic"}[2m]) > 0 unless on() (max(runtime_state{state="SERVING"}) == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Periodic outbox claims observed while the process is not SERVING"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: OutboxShutdownDrainOutsideDraining
+        expr: increase(outbox_claims_total{mode="shutdown_drain"}[2m]) > 0 unless on() (max(runtime_state{state="DRAINING"}) == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Shutdown-drain claims observed outside DRAINING"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: StreamReplayOverflow
+        expr: increase(stream_replay_overflow_total[10m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "User-stream replay queues are overflowing; outbox or database latency is high"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md

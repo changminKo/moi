@@ -12,7 +12,8 @@
     "check:write": "biome check --write .",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "check:deployment": "node scripts/check-deployment-contract.mjs"
+    "check:deployment": "node scripts/check-deployment-contract.mjs",
+    "test:deployment": "node --test scripts/check-deployment-contract.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.9",

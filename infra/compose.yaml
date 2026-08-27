@@ -63,6 +63,11 @@ services:
       SESSION_HASH_KEYS: "${SESSION_HASH_KEYS:?comma-separated session hash keys, newest first}"
       CSRF_SECRET: "${CSRF_SECRET:?at least 32 random bytes}"
       ADMIN_API_KEY: "${ADMIN_API_KEY:?at least 32 random bytes; required in production}"
+      # The production market-data source is a committed literal, never an
+      # interpolation: there is no implicit default (§5.1).
+      MARKET_DATA_ADAPTER: toss
+      TOSS_CLIENT_ID: "${TOSS_CLIENT_ID:?Toss Open API client id (c_...)}"
+      TOSS_CLIENT_SECRET: "${TOSS_CLIENT_SECRET:?Toss Open API client secret}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +94,7 @@ services:
     restart: unless-stopped
     labels:
       skipjack.role: http+market-data-leader
-      skipjack.leader-markets: KRX,US
+      skipjack.leader-markets: KR,US
       skipjack.liveness-path: /health/live
       skipjack.readiness-path: /health/ready
 
