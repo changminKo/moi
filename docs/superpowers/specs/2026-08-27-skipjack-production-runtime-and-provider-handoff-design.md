@@ -73,7 +73,10 @@
 | 3.3 | 두 시장을 하나의 WebSocket으로 구독 | 기각 | 160 topic > 100 topic/연결(계약). 불가능. |
 | 3.4 | 시장별 프로세스 두 개(KR 프로세스, US 프로세스) | 기각 | 3.1과 같은 이유. 또 각 프로세스가 연결 1개씩 열면 인계 중 4개가 되어 계정 한도(2)를 넘는다. |
 | 3.5 | 롤링 배포(새 프로세스 먼저 기동, 준비되면 이전 종료) | 기각 | 새 프로세스가 연결을 열면 3번째·4번째 연결이 되고 provider가 가장 오래된 연결을 끊어 이전 leader가 비정상 종료된다. 배포 가이드가 이미 금지한다. stop-then-start만 허용. |
-| 3.6 | 인계 중 새 leader가 `lock_timeout`으로 대기 포기 후 종료 | 기각 | 대기 포기는 재시작 루프를 만들고, 그 사이 취소조차 불가능하다. 새 프로세스는 lease를 **무기한 대기**하되 그 동안 `CANCEL_ONLY`로 HTTP를 서비스한다(§6.3). 대기 시간은 메트릭·알림으로 관측한다. |
+| 3.6 | 인계 중 새 leader가 `lock_timeout`으로 대기 포기 후 종료 | 기각 | 대기 포기는 재시작 루프를 만들고, 그 사이 취소조차 불가능하다. 새 프로세스는 lease를 **논리적으로 무기한 대기**하되 그 동안 `CANCEL_ONLY`로 HTTP를 서비스한다(§6.3). 대기는 세션을 점유하는 `pg_advisory_lock` 블로킹이 아니라 `pg_try_advisory_lock`을 250 ms 고정 주기로 폴링하는 **취소 가능한** 루프다(§5.4): `SIGTERM`이 오면 `AbortSignal`로 즉시 중단하고 종료 코드 0으로 끝난다. 대기 시간은 메트릭·알림으로 관측한다. |
+| 3.11 | 시장별 lease를 독립적으로 획득·재획득(시장 로컬 재선출) | 기각 | 두 프로세스가 각각 한 시장의 lease만 쥐는 **부분 lease 교착**을 만든다: P1이 US, P2가 KR을 쥐면 둘 다 `ACQUIRING_LEASES`에서 상대를 기다리고 어느 쪽도 `SERVING`이 되지 못한다. lease는 KR+US **번들**로만 의미가 있으며, 어느 한 시장이라도 잃으면 전역 재선출로 번들 전체를 놓고 다시 얻는다(§5.4, §6.5). provider 전송 장애는 시장 로컬로 남는다. |
+| 3.12 | 여러 프로세스가 동시에 사용자 WS·outbox 발행을 수행 | 기각 | Redis fan-out은 비목표(§2.2)다. in-process `StreamHub`만 있으므로 outbox 이벤트를 발행한 프로세스에 그 사용자의 소켓이 없으면 이벤트는 유실 표시(`published_at`)만 남는다. 따라서 **두 lease를 모두 쥐고 `SERVING`인 프로세스 하나만** 사용자 WS upgrade를 받고 `OutboxPublisherLoop`를 돌린다(§6.3, §7.4). |
+| 3.13 | 종료 시 admission latch만 닫고 HTTP 요청은 계속 받으며 drain | 기각 | latch는 도메인 capability만 바꾸므로 `DRAINING` 중 도착한 요청이 새 `UnitOfWork`를 시작해 drain 카운터가 0으로 수렴하지 않을 수 있다. 종료는 먼저 **HTTP 인그레스를 울타리**(`RequestAdmissionGate`, §6.6)로 막아 새 비즈니스 요청을 503으로 거부하고, 이미 허용된 요청만 drain한다. 인계 중 취소 가용성은 이미 `ACQUIRING_LEASES`에서 준비된 P2가 제공한다(§10). |
 | 3.7 | 테스트에서 `fetch`/socket factory를 인메모리로 mock | 부분 채택 | 단위 테스트는 기존 방식(인메모리 `FetchLike`, `TossSocketFactory`) 유지. 그러나 어댑터 통합과 인계 드릴은 **실제 TCP를 듣는 로컬 가짜 서버**를 사용한다. 두 OS 프로세스가 같은 가짜 provider를 공유해야 연결 개수를 셀 수 있고, 실제 HTTP/WS 스택(헤더, 101 handshake, close frame)을 지나야 한다. |
 | 3.8 | 라이브 Toss에서 녹화한 replay 픽스처 | 기각 | 녹화 자체가 라이브 접속이다. 계약 예시(`examples`)와 기존 `fixtures/toss/*.json`만 사용한다. |
 | 3.9 | provider 실패 시 프로세스 종료(orchestrator 재시작) | 기각 | 종료하면 취소마저 불가능해진다. provider 실패는 시장 incident + 재시도로 흡수하고, 프로세스는 `CANCEL_ONLY`로 살아 있어야 한다. 종료는 설정·DB·불변식 실패에만 허용(§8). |
@@ -88,9 +91,9 @@
 │ ProductionRuntime (apps/paper-api/src/runtime/production-runtime.ts) │
 │                                                                      │
 │  RuntimeStateMachine ── AdmissionLatch ── TradingCapabilities        │
-│        │                                                             │
+│        │              └─ RequestAdmissionGate (HTTP ingress fence)   │
 │  StartupCoordinator ─┬─ restore/verifyInvariants (UnitOfWork)        │
-│                      ├─ LeaseRegistry.acquire(KR), acquire(US)       │
+│                      ├─ LeaseRegistry.acquireAll(signal) (KR→US 순차) │
 │                      └─ SupervisedRecovery(KR), (US)                 │
 │                              │                                       │
 │  MarketRuntime[KR]           │           MarketRuntime[US]           │
@@ -123,17 +126,18 @@
 | `ProductionRuntime` | `+ apps/paper-api/src/runtime/production-runtime.ts` | A | 위 도표의 모든 조립, 상태 기계, 타이머, AbortController |
 | `RuntimeStateMachine` | `+ apps/paper-api/src/runtime/runtime-state.ts` | A | §6.1 프로세스 상태, 전이 감사, `runtime_state` 메트릭 |
 | `AdmissionLatch` | `+ apps/paper-api/src/runtime/admission-latch.ts` | A | 프로세스 로컬 admission/matching 게이트 (`StartupLatch`/`ShutdownLatch` 구현) |
+| `RequestAdmissionGate` | `+ apps/paper-api/src/runtime/request-admission-gate.ts` | A | HTTP 인그레스 울타리(§6.6). Fastify `onRequest` 훅에서 **닫힘 검사와 비즈니스 요청 in-flight 증가를 하나의 동기 단계로** 수행하고 `onResponse`/`onError`에서 감소한다. 닫힌 뒤 도착한 비즈니스 요청은 503 `NOT_READY` + `Retry-After`로 거부되어 `UnitOfWork`를 시작할 수 없다. `/health/*`는 제외되어 항상 관측 가능하다. `drain(deadline)`은 허용된 요청 수가 0이 될 때까지 대기 |
 | `TradingCapabilities` | `+ apps/paper-api/src/runtime/trading-capabilities.ts` | A | `(market) → Set<Capability>` 계산 (§6.4) |
-| `LeaseRegistry` | `+ apps/paper-api/src/runtime/lease-registry.ts` | A | 시장별 `LeaderLease` 멱등 획득·보유·해제, lease 손실 감지, `LeaseAuditPort` 구현 주입(§5.4) |
+| `LeaseRegistry` | `+ apps/paper-api/src/runtime/lease-registry.ts` | A | KR+US **번들** 획득 `acquireAll(signal)`(KR→US 순차, 취소 가능, 세대(generation) 단위 in-flight promise 공유, 부분 획득 역순 해제), 시장별 `LeaderLease` 보유·해제, lease 손실 → 전역 재선출 트리거, `LeaseAuditPort` 구현 주입(§5.4, §6.5) |
 | `LeaseAuditPort` | `+ apps/paper-api/src/runtime/lease-audit.ts` | A | lease 연결의 **같은 트랜잭션** 위에 `LEADER_ACQUIRED`/`LEADER_RELEASED` 감사 행을 쓰는 포트(§5.4). `appendAuditEvent`와 같은 컬럼·JSON 규칙 |
 | `StreamHeartbeatLoop` | `+ apps/paper-api/src/modules/stream/stream-heartbeat-loop.ts` | A | 프로세스당 **하나**의 30 s 타이머가 `StreamHub.heartbeat(serverTime)`을 호출(§7.6). 소켓별 타이머 없음 |
 | 웹 스트림 훅 프로토콜 정렬 | `apps/web/src/features/portfolio/use-portfolio-stream.ts` (기존) | A | `streamUrl(afterSequence)` 쿼리 인코딩, `onopen` 프레임 전송 제거(§7.5 “프론트 정렬”, §2.2 예외) |
 | `MarketRuntime` | `+ apps/paper-api/src/runtime/market-runtime.ts` | A | 시장 하나의 stream/health/state/recovery/event loop/keepalive/reconnect |
 | `SupervisedRecovery` | `MarketRuntime` 내부 | A | `RecoveryCoordinator.recover`를 감싸 provider 오류를 incident로 변환(§8.2) |
-| `StreamHub` | `+ apps/paper-api/src/modules/stream/stream-hub.ts` | A | 접속 중 `StreamSession` 레지스트리, sessionId별 durable event 전달, 시세 fan-out, `heartbeat(serverTime)`, `closeAll`, `size` |
-| 스트림 upgrade 브리지 | `+ apps/paper-api/src/modules/stream/stream-upgrade.ts` | A | `ws` noServer 기반 `server.on('upgrade')` 핸들러: 경로·쿼리·Origin·세션 쿠키·인증·rate-limit 검사, closing latch·pending 소켓 추적, `handleUpgrade`, `StreamSession` 생성(§7.5) |
+| `StreamHub` | `+ apps/paper-api/src/modules/stream/stream-hub.ts` | A | 접속 중 세션 레지스트리(`OPENING`/`LIVE` 상태 항목), sessionId별 durable event 전달(`OPENING`이면 상한 있는 큐에 적재, `LIVE`면 즉시 전달), replay→live 장벽(`eventId`/`accountSequence` dedupe, 순서 flush, CAS `OPENING→LIVE`), 시세 fan-out, `heartbeat(serverTime)`, `closeAll`, `size`(§7.5) |
+| 스트림 upgrade 브리지 | `+ apps/paper-api/src/modules/stream/stream-upgrade.ts` | A | `ws` noServer 기반 `server.on('upgrade')` 핸들러: 스트림 게이트(`SERVING`만 허용, 그 외 503 `NOT_READY` + `Retry-After`)·경로·쿼리·Origin·세션 쿠키·인증·rate-limit 검사, closing latch·pending 소켓 추적, `handleUpgrade`, `OPENING` 등록 → `StreamSession` 생성 → `LIVE` 전환(§7.5) |
 | `cookieValueFromHeader` | `apps/paper-api/src/plugins/session-auth.ts` (기존 파일에 분리) | A | route와 upgrade 브리지가 공유하는 헤더 수준 쿠키 파서 |
-| `OutboxPublisherLoop` | `+ apps/paper-api/src/modules/stream/outbox-publisher-loop.ts` | A | `OutboxPublisher.pollOnce` 주기 실행, prune, drain |
+| `OutboxPublisherLoop` | `+ apps/paper-api/src/modules/stream/outbox-publisher-loop.ts` | A | `OutboxPublisher.pollOnce` 주기 실행, prune, drain. **KR+US 번들을 보유한 뒤에만 `start()`**, lease 해제·재선출 전에 `stop()`(claim 중단)하는 단일 소유자 발행기(§7.4) |
 | `ProviderBundle` 선택 | `+ apps/paper-api/src/runtime/provider-bundle.ts` | A (인터페이스) / B (toss 구현) | `MARKET_DATA_ADAPTER`에 따른 포트 구현 묶음 |
 | `OAuthTokenProvider` | `+ packages/market-data/src/toss/oauth-token-provider.ts` | B | `POST /oauth2/token` client credentials, 캐시, 갱신, 무효화 처리 |
 | `TossWebSocketMarketData` 수정 | `packages/market-data/src/toss/toss-websocket.ts` | B | §1.1 결함 1·2·3 해소, `ws` socket factory |
@@ -177,7 +181,7 @@
 
 - 프로세스는 시장당 **정확히 하나**의 provider WebSocket을 연다: `KR` 1개, `US` 1개. 각 연결은 해당 시장 40 종목 × {`trade`, `orderbook`} = 80 topic을 선언한다(`buildSubscriptionPlan`).
 - 연결은 오직 **해당 시장의 lease를 보유한 동안만** 열려 있을 수 있다. lease 손실 → 즉시 소켓 종료(§6.5).
-- REST 호출(스냅샷, FX, 캘린더, 종목)은 연결 수에 포함되지 않으나, **lease 보유 프로세스만** 수행한다. 새 프로세스는 lease를 얻기 전에 REST를 호출하지 않는다(토큰 발급 포함).
+- REST 호출(스냅샷, FX, 캘린더, 종목)은 연결 수에 포함되지 않으나, **KR+US lease 번들을 모두 보유한 프로세스만** 수행한다. 새 프로세스는 번들을 얻기 전에 REST를 호출하지 않는다(토큰 발급 포함). 한 시장 lease만 쥔 순간(§5.4 순차 획득의 중간)에도 provider 호출은 0건이다.
 - 따라서 정상 운영 시 provider 연결은 2개, 인계 중 최대 2개, 그 외 시각에는 0개다. 계정 한도(2)를 초과할 정상 경로는 존재하지 않는다.
 
 ### 5.3 provider URL loopback 규칙
@@ -191,22 +195,29 @@
 
 ### 5.4 리더 lease와 `LeaseRegistry`
 
-- `LeaseRegistry.acquire(market)`: 보유 중이고 `isHeld`인 lease가 있으면 그것을 반환한다. 없으면 `LeaderLease.acquire(market, { connectionString, leaderId })`를 호출한다. 동시에 두 호출자가 오면 같은 promise를 공유한다. 이로써 `StartupCoordinator`와 `RecoveryCoordinator`의 이중 획득(§1.1-4)이 epoch를 한 번만 올린다.
+- **번들 획득이 유일한 획득 API다.** `LeaseRegistry.acquireAll(signal): Promise<LeaseBundle>`은 **항상 `KR` 다음 `US` 순서로 순차** 획득한다. 두 시장을 동시에 시도하지 않는다 — 동시 시도는 두 프로세스가 각각 한 시장만 쥐는 부분 lease 교착(§3.11)을 만든다. 고정 순서는 두 프로세스가 같은 lock 순서로 경쟁하게 하여 “P1이 KR, P2가 US”가 구조적으로 불가능하게 한다. 시장별 `acquire(market)` 공개 API는 없다. `RecoveryCoordinator.recover`가 호출하는 `acquireLease(market)` 포트는 `LeaseRegistry.held(market)`로 구현되어 **보유 중 lease를 반환만** 하고, 없으면 `LeaseNotHeldError`를 던진다(§7.2 — recovery는 번들 보유 뒤에만 시작하므로 정상 경로에서는 항상 보유 중이다). 이로써 `StartupCoordinator`와 `RecoveryCoordinator`의 이중 획득(§1.1-4)은 epoch를 한 번만 올린다.
+- **세대(generation)와 in-flight 공유.** `acquireAll`은 진행 중 획득이 있으면 같은 promise를 반환한다. 각 획득 시도는 `generation`(단조 증가 정수)을 가지며 `{generation, controller: AbortController, pending: Market | null, held: LeaderLease[]}`를 레지스트리가 추적한다. 호출자 `signal`이 abort되면 레지스트리는 해당 세대의 `controller.abort()`를 호출한다. `abortPending()`은 진행 중 세대를 abort하고 그 promise가 정리를 마칠 때까지 기다린다(§6.5, §6.6). 완료된 세대의 promise는 재사용되지 않는다 — 번들을 잃으면 다음 `acquireAll`이 새 세대를 만든다.
 - `leaderId`는 프로세스 시작 시 생성한 UUID 하나를 전 시장에 공유한다. 로그·감사·메트릭 라벨에 그대로 사용한다.
-- `LeaderLease.acquire`는 `pg_advisory_lock(hashtext(market))`에서 **블로킹**한다. 이전 leader가 lock을 쥐고 있으면 새 프로세스는 여기서 대기한다. 이것이 stop-then-start 인계의 직렬화 지점이다. 대기 시간은 `leader_lease_wait_seconds{market}` 게이지로 노출한다.
-- lease 전용 연결의 `error`/`end` 이벤트 → `LeaseRegistry`가 `onLost(market)` 콜백을 호출한다(§6.5).
+- **취소 가능한 무기한 대기.** `LeaderLease.acquire(market, { connectionString, leaderId, signal, pollIntervalMs: LEASE_POLL_INTERVAL_MS })`는 시장당 **하나의 lease 전용 연결**을 열고 다음 루프를 돈다: `select pg_try_advisory_lock(hashtext($1))` → `true`면 탈출, `false`면 `signal.aborted` 검사 후 `LEASE_POLL_INTERVAL_MS = 250`(고정, 지터 없음) 대기 → 반복. 루프 앞뒤와 대기 중 `signal`이 abort되면 `AbortError`로 거부하고 연결을 닫는다. `pg_advisory_lock`(세션 블로킹)은 **쓰지 않는다** — 블로킹 호출은 대기 중 SIGTERM을 받아도 PostgreSQL 세션이 lock 대기열에 남아 취소가 연결 파괴에 의존하게 된다. 논리적으로 “무기한”이지만 매 250 ms `AbortSignal`을 검사하므로 종료는 항상 한 주기 안에 관측된다. 이것이 stop-then-start 인계의 직렬화 지점이다. 대기 시간은 `leader_lease_wait_seconds{market}` 게이지로 노출한다. `pg_try_advisory_lock`은 같은 세션에서 두 번 성공하면 lock 카운트가 2가 되므로 루프는 `true`를 받은 뒤 절대 다시 호출하지 않는다.
+- **abort/lock 경합.** `pg_try_advisory_lock`이 `true`를 반환한 **직후** `signal.aborted`를 다시 검사한다. abort되어 있으면 즉시 같은 연결에서 `pg_advisory_unlock(hashtext($1))`을 실행하고 연결을 닫은 뒤 `AbortError`로 거부한다 — `begin`·upsert·감사·provider 호출은 **하나도 실행하지 않는다**. 이 검사 뒤에 abort가 오면 획득은 성공으로 완료되고 `acquireAll`이 그 lease를 부분 획득으로 취급해 역순 해제한다(아래). 두 경로 모두 결과는 “lock 없음, epoch 불변, `LEADER_ACQUIRED` 없음”이다.
+- **부분 획득 해제.** `acquireAll`이 KR을 쥔 뒤 US 획득이 abort 또는 실패(연결 오류, 감사 insert 실패)하면 `held`의 lease를 **역순**(US가 있으면 US, 그 다음 KR)으로 `LeaderLease.release()`한다. 각 release는 §5.4 해제 규칙(`released_at` + `LEADER_RELEASED` 커밋 → unlock → 연결 종료)을 그대로 따른다. 부분 획득 상태에서는 `MarketRuntime.connect()`가 호출되지 않으므로 provider 호출·토큰 발급은 0건이다. 해제가 끝난 뒤 `acquireAll`은 원래 오류(`AbortError` 또는 실패 원인)로 거부된다.
+- lease 전용 연결의 `error`/`end` 이벤트 → `LeaseRegistry`가 `onLost(market)` 콜백을 호출한다. 콜백은 시장 로컬 재획득이 아니라 **전역 재선출**을 시작한다(§6.5).
 - `LeaderLease.acquire`의 upsert는 `on conflict (market_code) do update set …, released_at = null`로 **`released_at`을 반드시 null로 되돌린다**(§13 migration). 현재 행은 “지금 leader가 누구이고 아직 놓지 않았는가”만 뜻한다.
 - **lease 감사 포트.** `LeaderLeaseOptions.audit?: LeaseAuditPort`를 추가한다. `LeaseAuditPort = { recordAcquired(query, ctx), recordReleased(query, ctx) }`, 여기서 `query`는 **lease 연결 자신의 `query` 함수**이고 `ctx = {market, epoch, fencingToken, leaderId}`다. 구현(`+ runtime/lease-audit.ts`, `LeaseRegistry`가 주입)은 `audit_events`에 `appendAuditEvent`와 같은 컬럼(`id, session_reference=null, order_id=null, event_type, payload::jsonb, occurred_at=now()`)으로 `LEADER_ACQUIRED {market, epoch, fencingToken, leaderId}` / `LEADER_RELEASED {market, epoch, leaderId}` 행을 **한 줄 insert**한다. 포트가 lease 연결 위에서 실행되므로 감사 행과 `leader_epochs` 변경은 **하나의 PostgreSQL 트랜잭션**에 들어가고, 별도 UnitOfWork·별도 연결을 쓰지 않는다.
-- `LeaderLease.acquire`의 트랜잭션은 `begin` → `pg_advisory_lock(hashtext($1))` → upsert(`released_at = null` 포함) → `audit.recordAcquired(query, ctx)` → `commit` 순이다. **`acquire`는 `commit`이 성공한 뒤에만 반환**하므로, 반환 시점에 `LEADER_ACQUIRED`는 이미 내구성 있게 기록되어 있다. `MarketRuntime.connect()`는 그 반환 뒤에 토큰 발급·REST·WS를 시작하므로(§5.5) provider 호출 이전에 감사가 존재한다는 순서가 구조적으로 보장된다. 감사 insert 실패는 upsert와 함께 롤백되고 `acquire`는 예외로 실패하며(lock은 `rollback` 뒤 `pg_advisory_unlock`, 연결 종료), epoch는 증가하지 않는다.
+- `LeaderLease.acquire`의 순서는 [폴링 루프: `select pg_try_advisory_lock(hashtext($1))` × n, 마지막이 `true`] → abort 재검사 → `begin` → upsert(`released_at = null` 포함) → `audit.recordAcquired(query, ctx)` → `commit` 이다. advisory lock은 **세션 수준**이므로 트랜잭션 밖에서 얻고 `commit`/`rollback`에 영향받지 않는다. **`acquire`는 `commit`이 성공한 뒤에만 반환**하므로, 반환 시점에 `LEADER_ACQUIRED`는 이미 내구성 있게 기록되어 있다. `MarketRuntime.connect()`는 `acquireAll`이 **두 시장 모두** 반환한 뒤에 토큰 발급·REST·WS를 시작하므로(§5.5) provider 호출 이전에 두 감사가 존재한다는 순서가 구조적으로 보장된다. 감사 insert 실패는 upsert와 함께 롤백되고 `acquire`는 예외로 실패하며(`rollback` 뒤 `pg_advisory_unlock`, 연결 종료), epoch는 증가하지 않는다.
 - `LeaderLease.release()`는 **lock을 아직 쥔 lease 연결 위에서, `pg_advisory_unlock` 전에** 다음을 하나의 트랜잭션으로 실행한다: `begin` → `update leader_epochs set released_at = now() where market_code = $1 and leader_id = $2 and released_at is null` → `audit.recordReleased(query, ctx)` → `commit`. 그 다음 `pg_advisory_unlock(hashtext($1))`, 마지막에 연결을 닫는다. 순서가 이래야 하는 이유: unlock 뒤에 쓰면 다음 leader의 `acquire`가 먼저 lock을 얻어 upsert와 `LEADER_ACQUIRED`를 커밋할 수 있고, 그러면 `LEADER_RELEASED`가 `LEADER_ACQUIRED` **뒤**에 기록되어 §10.2-5·8의 순서 단언이 타이밍 의존이 된다. lock 아래에서 커밋하면 “P1 `LEADER_RELEASED` 커밋 → unlock → P2 lock 획득 → P2 `LEADER_ACQUIRED` 커밋”이 같은 lock의 직렬화 순서를 따르므로 두 감사 행의 `occurred_at`(각 트랜잭션 안의 `now()`)과 커밋 순서가 결정적이다. 트랜잭션이 실패하면 `rollback` 후 로그 `lease.release_mark_failed {market, epoch, leaderId, error}`만 남기고(이 경우 `released_at`도 감사 행도 남지 않는다 — 둘은 항상 함께 있거나 함께 없다), **`finally`에서 unlock과 연결 종료를 반드시 진행**한다 — lock 해제가 인계의 본질이고 감사·`released_at`은 증거다. 이미 `isHeld === false`(연결 사망)면 트랜잭션·unlock을 시도하지 않고 연결 종료만 한다.
-- `LeaseRegistry.release(market)`는 `LeaderLease.release()`를 호출하고 그 완료 후 로그 `lease.released {market, epoch, leaderId, auditPersisted}`만 남긴다(§12.4). **감사 행은 쓰지 않는다** — `LEADER_RELEASED`는 위 트랜잭션에서 이미 커밋되었거나(`auditPersisted:true`) 롤백되어 존재하지 않는다(`false`). unlock 이후에 두 번째 `LEADER_RELEASED`를 쓰는 경로는 없다(그러면 P2의 `LEADER_ACQUIRED` 뒤에 나타날 수 있다). 마찬가지로 `LeaseRegistry.acquire`는 실제로 `LeaderLease.acquire`를 호출한 경우에만 로그 `lease.acquired`를 남기고, 보유 중 lease를 반환하는 멱등 경로에서는 감사도 로그도 추가하지 않는다. `LEADER_RELEASED`가 인계 드릴이 P1의 해제를 증명하는 **내구성 있는 증거**다(§10.2-5). 현재 `leader_epochs` 행은 P2가 재획득하는 순간 `released_at = null`로 덮어써지므로 “해제됨”의 증거로 쓸 수 없다.
-- `leader-lease.integration.test.ts`(Testcontainers PG)에 다음 여섯 테스트를 둔다. 모두 `LeaseConnection` 래퍼로 lease 연결의 query 호출 순서를 기록하고, 기본 `LeaseAuditPort` 구현을 주입한다.
-  1. **first acquire**: 빈 테이블에서 `acquire('KR')` → 행 1개, `epoch=1`, `leader_id`=호출자, `released_at is null`; `audit_events`에 `LEADER_ACQUIRED {market:'KR', epoch:1, leaderId}` 1건; 기록된 순서가 `begin` → `pg_advisory_lock` → `insert … on conflict` → `insert into audit_events` → `commit`이며 `acquire` promise는 `commit` 뒤에 해결된다.
+- `LeaseRegistry.releaseAll()`은 보유 중 lease를 **역순(US → KR)** 으로 `LeaderLease.release()`하고 각 완료 후 로그 `lease.released {market, epoch, leaderId, auditPersisted}`만 남긴다(§12.4). **감사 행은 쓰지 않는다** — `LEADER_RELEASED`는 위 트랜잭션에서 이미 커밋되었거나(`auditPersisted:true`) 롤백되어 존재하지 않는다(`false`). unlock 이후에 두 번째 `LEADER_RELEASED`를 쓰는 경로는 없다(그러면 P2의 `LEADER_ACQUIRED` 뒤에 나타날 수 있다). 이미 잃은 lease(`isHeld === false`)는 연결 종료만 하고 건너뛴다. 마찬가지로 `LeaseRegistry.acquireAll`은 실제로 `LeaderLease.acquire`를 호출한 시장에만 로그 `lease.acquired`를 남기고, `held(market)`의 멱등 경로에서는 감사도 로그도 추가하지 않는다. `LEADER_RELEASED`가 인계 드릴이 P1의 해제를 증명하는 **내구성 있는 증거**다(§10.2-5). 현재 `leader_epochs` 행은 P2가 재획득하는 순간 `released_at = null`로 덮어써지므로 “해제됨”의 증거로 쓸 수 없다.
+- `leader-lease.integration.test.ts`(Testcontainers PG)에 다음 열 테스트를 둔다. 모두 `LeaseConnection` 래퍼로 lease 연결의 query 호출 순서를 기록하고, 기본 `LeaseAuditPort` 구현을 주입하며, 폴링 주기는 fake timer가 아닌 실제 250 ms로 둔다(PostgreSQL 왕복이 실제이므로).
+  1. **first acquire**: 빈 테이블에서 `acquire('KR')` → 행 1개, `epoch=1`, `leader_id`=호출자, `released_at is null`; `audit_events`에 `LEADER_ACQUIRED {market:'KR', epoch:1, leaderId}` 1건; 기록된 순서가 `select pg_try_advisory_lock`(1회, `true`) → `begin` → `insert … on conflict` → `insert into audit_events` → `commit`이며 `acquire` promise는 `commit` 뒤에 해결된다. `pg_advisory_lock`(블로킹형) 호출은 0회.
   2. **release**: 같은 lease `release()` → 같은 행 `released_at is not null`, `leader_id` 불변, `epoch` 불변; `audit_events`에 `LEADER_RELEASED {market:'KR', epoch:1, leaderId}` **정확히 1건**; 기록된 순서가 `begin` → `update leader_epochs … released_at` → `insert into audit_events` → `commit` → `pg_advisory_unlock` → `end`; `pg_locks`에 해당 advisory lock 없음; 연결 종료됨.
   3. **reacquire**: 다른 `leaderId`로 `acquire('KR')` → `epoch=2`, `leader_id`=새 값, **`released_at is null`**(null 리셋 증명), `LEADER_ACQUIRED{epoch:2}` 1건. 다시 `release()` → not null, `LEADER_RELEASED{epoch:2}` 1건.
-  4. **no race**: P1이 lease를 쥔 채 P2가 `acquire('KR')`를 시작(블로킹 확인: 500 ms 뒤에도 미해결). P1 `release()`. 단언: (a) P2 promise는 P1의 `pg_advisory_unlock` 이후에만 해결되고, 해결 직후 행은 `leader_id`=P2, `released_at is null`, `epoch=2`; (b) 제3의 관찰 연결에서 P1의 `LEADER_RELEASED`가 **P2 promise 해결 전에 이미 보인다**(P1 `commit` 직후 폴링); (c) `audit_events`를 `occurred_at, id` 순으로 읽으면 `LEADER_ACQUIRED(P1,1)` → `LEADER_RELEASED(P1,1)` → `LEADER_ACQUIRED(P2,2)`이고 각 종류가 정확히 1건; (d) P2 획득 전 임의 시점에 “`leader_id`=P2인데 `released_at`이 not null”인 행이 관측되지 않는다(P2 획득 후 100회 폴링).
+  4. **no race**: P1이 lease를 쥔 채 P2가 `acquire('KR')`를 시작(대기 확인: 1 s 뒤에도 미해결이고 그 사이 `pg_try_advisory_lock` `false` 반환이 ≥ 3회 기록됨). P1 `release()`. 단언: (a) P2 promise는 P1의 `pg_advisory_unlock` 이후에만 해결되고(다음 폴링 주기, 즉 unlock 후 ≤ 250 ms + 왕복), 해결 직후 행은 `leader_id`=P2, `released_at is null`, `epoch=2`; (b) 제3의 관찰 연결에서 P1의 `LEADER_RELEASED`가 **P2 promise 해결 전에 이미 보인다**(P1 `commit` 직후 폴링); (c) `audit_events`를 `occurred_at, id` 순으로 읽으면 `LEADER_ACQUIRED(P1,1)` → `LEADER_RELEASED(P1,1)` → `LEADER_ACQUIRED(P2,2)`이고 각 종류가 정확히 1건; (d) P2 획득 전 임의 시점에 “`leader_id`=P2인데 `released_at`이 not null”인 행이 관측되지 않는다(P2 획득 후 100회 폴링).
   5. **release audit failure**: `recordReleased`가 던지는 포트를 주입 → `release()`는 예외 없이 완료; 행 `released_at is null`(롤백), `LEADER_RELEASED` 0건, 로그 `lease.release_mark_failed` 1건; `pg_locks`에 lock 없음(finally unlock), 연결 종료됨; 이후 다른 `leaderId`의 `acquire`가 즉시 성공.
   6. **acquire audit failure**: `recordAcquired`가 던지는 포트를 주입 → `acquire()`가 거부됨; `leader_epochs` 행·epoch 불변(빈 테이블이면 여전히 없음), `LEADER_ACQUIRED` 0건, `pg_locks`에 lock 없음, 연결 종료됨.
+  7. **abort while waiting**: P1이 lease를 쥔 채 P2가 `acquire('KR', {signal})`로 대기 → 700 ms 뒤 `controller.abort()` → P2 promise가 `AbortError`로 거부되는 시점이 abort 후 ≤ 250 ms + 왕복; P2 연결 종료됨; `leader_epochs`·`audit_events` 불변(P2의 `LEADER_ACQUIRED` 0건); P1 lease는 그대로 `isHeld`; `pg_locks`에 P2 세션의 lock 없음.
+  8. **abort/lock race**: `pg_try_advisory_lock`이 `true`를 반환한 직후(`LeaseConnection` 래퍼가 그 query의 해결을 가로채는 훅)에 `controller.abort()` → 기록된 순서가 `select pg_try_advisory_lock`(`true`) → `select pg_advisory_unlock` → `end`이고 `begin`·upsert·`insert into audit_events` 호출 0회; promise는 `AbortError`로 거부; `pg_locks`에 lock 없음; `leader_epochs`·`audit_events` 불변; 이후 다른 `leaderId`의 `acquire`가 첫 폴링에서 성공.
+  9. **bundle partial release** (`lease-registry.integration.test.ts`): 관찰자가 US lock만 쥔 상태에서 `LeaseRegistry.acquireAll(signal)` → KR은 즉시 획득(`LEADER_ACQUIRED{KR,1}` 1건), US 대기 중(`pending === 'US'`) → `controller.abort()` → `acquireAll`이 `AbortError`로 거부; 그 전에 KR lease가 `release()`되어 `LEADER_RELEASED{KR,1}` 1건, `pg_locks`에 KR·US 모두 이 프로세스의 lock 없음, 두 lease 연결 모두 종료; `MarketRuntime.connect` spy 0회, `tokenProvider.getAccessToken` spy 0회. 같은 시나리오를 US 획득 중 `recordAcquired` 실패(테스트 6의 포트)로 반복 → KR 역순 해제 뒤 원래 오류로 거부.
+  10. **bundle order and sharing** (`lease-registry.integration.test.ts`): 빈 테이블에서 `acquireAll(signal)` 두 번 동시 호출 → 같은 promise 객체 반환, `LeaderLease.acquire` 호출 순서가 정확히 `['KR','US']`(동시 호출 0회, 두 번째 시장의 첫 `pg_try_advisory_lock`은 첫 시장의 `commit` 뒤에 기록됨), epoch가 시장별로 1만 증가; 이후 `releaseAll()`의 `release()` 순서가 `['US','KR']`.
 - Epoch/fencing token 의미는 기존과 같다: 새 leader는 항상 더 큰 값을 받고, `MarketStateStore.beginEpoch`와 `PaperEngine.currentFencingToken`이 이 값을 사용해 이전 epoch 이벤트와 fill을 거부한다.
 
 ### 5.5 OAuth 토큰 provider (B)
@@ -219,7 +230,7 @@
 - 속도: `AUTH` rate-limit 그룹 보호를 위해 재발급 간 최소 간격 `TOKEN_MIN_REISSUE_INTERVAL_MS = 10_000`. 그 안의 요청은 `MarketDataError('PONG_FAILED')`가 아니라 새 코드 `AUTH_THROTTLED`로 거부된다(`MarketDataErrorCode`에 `AUTH_FAILED`, `AUTH_THROTTLED` 추가).
 - `403 access_denied`(허용 IP 미등록)는 재시도하지 않고 `PROVIDER_IP_NOT_ALLOWED` incident가 된다. 이는 운영자 조치가 필요한 상태다.
 - 토큰 문자열은 `Authorization` 헤더 조립 외 어디에도 복사되지 않는다. 로거 redaction 규칙에 `access_token`, `client_secret`, `Authorization`을 추가한다(§12).
-- **토큰은 lease 획득 뒤에만 발급된다.** `MarketRuntime.connect()`가 `LeaseRegistry.acquire` 완료 뒤 처음 `tokenProvider.getAccessToken`을 호출한다. 이전 leader가 아직 살아 있을 때 새 프로세스가 토큰을 재발급해 이전 leader의 REST를 무효화하는 사고를 구조적으로 막는다.
+- **토큰은 KR+US lease 번들 획득 뒤에만 발급된다.** `MarketRuntime.connect()`가 `LeaseRegistry.acquireAll` 완료 뒤 처음 `tokenProvider.getAccessToken`을 호출한다. 번들 대기 중이거나 부분 획득 상태에서 abort되면 토큰 요청은 0건이다. 이전 leader가 아직 살아 있을 때 새 프로세스가 토큰을 재발급해 이전 leader의 REST를 무효화하는 사고를 구조적으로 막는다.
 
 ### 5.6 비밀 취급 원칙
 
@@ -237,27 +248,32 @@
 ### 6.1 프로세스 상태
 
 ```text
-BOOTING ──config/db ok──▶ RESTORING ──invariants ok──▶ ACQUIRING_LEASES
-   │                          │                               │ both leases held
-   │ config/db error          │ invariant/audit error         ▼
-   ▼                          ▼                          RECOVERING(all)
- EXIT(1)               FAILED_CLOSED ─▶ EXIT(1)               │
-                                                              ▼
-              ┌────────────────────────────────────── SERVING ◀────────────┐
-              │  (admission open; trading mode per market from §6.2)        │
-              │                                                             │
-              └── SIGTERM/SIGINT ──▶ DRAINING ──▶ STOPPED ──▶ EXIT(0)      │
-                                       │ deadline exceeded                  │
-                                       └──▶ STOPPED(forced) ──▶ EXIT(0)     │
+BOOTING ──config/db ok──▶ RESTORING ──invariants ok──▶ ACQUIRING_LEASES ◀──────────────┐
+   │                          │                               │ KR then US held          │
+   │ config/db error          │ invariant/audit error         ▼                          │
+   ▼                          ▼                          RECOVERING(all)                 │
+ EXIT(1)               FAILED_CLOSED ─▶ EXIT(1)               │                          │
+                                                              ▼                          │
+              ┌────────────────────────────────────── SERVING ──any lease lost──▶ RE_ELECTING
+              │  (admission open; stream gate open;              (tear down both markets,
+              │   outbox publisher running)                       release survivor, then
+              │                                                   acquireAll again)
+              └── SIGTERM/SIGINT ──▶ DRAINING ──▶ STOPPED ──▶ EXIT(0)
+                                       │ deadline exceeded
+                                       └──▶ STOPPED(forced) ──▶ EXIT(0)
+
+  SIGTERM/SIGINT in ACQUIRING_LEASES / RECOVERING / RE_ELECTING ──▶ DRAINING (abort pending
+  acquire generation, release partial leases, provider calls = 0) ──▶ STOPPED ──▶ EXIT(0)
 ```
 
-- `BOOTING`: `loadConfig`, `createDatabase`, `migrateToLatest`, Fastify 빌드, `app.listen`. **listen은 `RESTORING` 전에 수행**한다. 그래야 새 프로세스가 lease를 기다리는 동안 `/health/*`, 조회, 취소를 서비스할 수 있다.
+- `BOOTING`: `loadConfig`, `createDatabase`, `migrateToLatest`, Fastify 빌드, `RequestAdmissionGate.open()`, `app.listen`. **listen은 `RESTORING` 전에 수행**한다. 그래야 새 프로세스가 lease를 기다리는 동안 `/health/*`, 조회, 취소를 서비스할 수 있다.
 - `RESTORING`: `StartupCoordinator.restore` = 활성 incident 로드, `market_states` 로드, 열려 있는 주문·예약 로드; `verifyInvariants` = 기존 ledger 불변식 검사(예약 합계, 지갑 음수 금지, OCO 쌍 정합). 실패 → `FAILED_CLOSED`: 수동 incident `STARTUP_INVARIANT_OR_AUDIT_FAILURE`(GLOBAL, 모든 capability 차단, `source=MANUAL`) 기록 후 **프로세스 종료 코드 1**. 재시작 후에도 이 incident가 남아 `CANCEL_ONLY`를 강제하고, 운영자가 `/admin/incidents/:id/resolve`로 해제해야 한다.
-- `ACQUIRING_LEASES`: `LeaseRegistry.acquire('KR')`, `acquire('US')`를 병렬로 호출하고 **둘 다** 완료될 때까지 대기한다. 이 상태의 trading 응답은 `reasons: ['CANCEL_ONLY','ACQUIRING_LEASES']`.
-- `RECOVERING(all)`: 두 시장의 `SupervisedRecovery`가 병렬로 실행된다. provider 오류는 프로세스 상태를 바꾸지 않고 시장 incident가 된다(§8.2).
-- `SERVING`: admission latch 열림. 이 시점부터 각 시장의 거래 모드는 §6.2 시장 상태 기계가 결정한다. 프로세스는 두 시장이 모두 `DEGRADED`여도 `SERVING`이다(취소는 가능).
+- `ACQUIRING_LEASES`: `LeaseRegistry.acquireAll(runtimeSignal)`을 한 번 호출하고 **KR 다음 US가 순차로** 획득되어 번들이 완성될 때까지 대기한다(§5.4). 이 상태의 trading 응답은 `reasons: ['CANCEL_ONLY','ACQUIRING_LEASES']`. 스트림 게이트는 닫혀 있고(`SERVING`이 아니므로 WS upgrade는 503 `NOT_READY`, §6.3) `OutboxPublisherLoop`는 시작되지 않는다(outbox claim 0건). 이 상태에서 `SIGTERM`이 오면 §6.6의 순서로 `DRAINING`에 들어가며, `releaseLeases()` 단계가 `LeaseRegistry.abortPending()`으로 진행 중 세대를 abort하고 부분 lease를 역순 해제한다. 대기 중이던 프로세스는 다음 250 ms 폴링 경계 안에 lease 루프를 빠져나오고, 토큰·REST·WS 호출 0건으로 종료 코드 0을 낸다.
+- `RECOVERING(all)`: 번들이 완성된 뒤 `OutboxPublisherLoop.start()`를 먼저 호출하고(§7.4 — 두 lease를 쥔 순간부터 이 프로세스가 유일한 발행자다) 두 시장의 `SupervisedRecovery`가 병렬로 실행된다. provider 오류는 프로세스 상태를 바꾸지 않고 시장 incident가 된다(§8.2). 두 recovery가 반환하면 `SERVING`.
+- `SERVING`: admission latch 열림, 스트림 게이트 열림(사용자 WS upgrade 허용). 이 시점부터 각 시장의 거래 모드는 §6.2 시장 상태 기계가 결정한다. 프로세스는 두 시장이 모두 `DEGRADED`여도 `SERVING`이다(취소는 가능). **두 lease를 모두 쥐고 `SERVING`인 프로세스만** 사용자 WS를 받고 outbox를 발행한다(§3.12, §7.4). 어느 한 시장의 lease를 잃으면 `RE_ELECTING`.
+- `RE_ELECTING`: §6.5의 전역 재선출. 두 시장을 모두 내리고(스트림 게이트·admission·matching 닫기, outbox claim 중단, 두 provider 루프·소켓 abort/종료), 살아 있는 lease를 해제한 뒤 `ACQUIRING_LEASES`로 돌아가 번들을 다시 획득한다. trading 응답은 `reasons: ['CANCEL_ONLY','RE_ELECTING']`. `/health/ready`는 200을 유지한다(db+audit 기준, 취소는 계속 가능).
 - `DRAINING`: §6.6.
-- 모든 전이는 `audit_events`에 `RUNTIME_STATE_CHANGED {from, to, leaderId}`로 기록되고, `runtime_state{state}` 게이지를 갱신한다.
+- 모든 전이는 `audit_events`에 `RUNTIME_STATE_CHANGED {from, to, leaderId}`로 기록되고, `runtime_state{state}` 게이지를 갱신한다. `SERVING`에 도달할 때마다 `RUNTIME_STATE_CHANGED{to:'SERVING'}`이 새로 기록되므로 재선출 뒤에는 이 감사가 2건 이상일 수 있다.
 
 ### 6.2 시장 상태 (시장당 하나)
 
@@ -279,12 +295,14 @@ RECOVERING ───────────────────────
 
 ### 6.3 lease 대기 중 서비스 계약
 
-`ACQUIRING_LEASES` 동안:
+`ACQUIRING_LEASES`(그리고 `RE_ELECTING`) 동안:
 
-- `/health/live` 200, `/health/ready` 200 (db+audit 기준 유지). 즉 로드밸런서는 트래픽을 보내고, 사용자는 조회·취소를 할 수 있다.
-- `/api/v1/health/trading` → `{placement:false, cancellation:true, fx:false, reasons:['CANCEL_ONLY','ACQUIRING_LEASES']}`.
+- `/health/live` 200, `/health/ready` 200 (db+audit 기준 유지). 즉 로드밸런서는 트래픽을 보내고, 사용자는 조회·취소를 할 수 있다. 이것이 인계 중 취소 가용성의 출처다: P1이 `DRAINING`으로 HTTP 인그레스를 닫는 동안(§6.6) 이미 준비된 P2가 취소를 받는다(§10.2-4).
+- `/api/v1/health/trading` → `{placement:false, cancellation:true, fx:false, reasons:['CANCEL_ONLY','ACQUIRING_LEASES']}`(재선출 중이면 `'RE_ELECTING'`).
 - `/health/market-data` → 각 시장 `{state:'RECOVERING', reasons:['LEADER_LEASE_PENDING']}`.
 - 주문 생성/정정/FX 요청은 기존 `CANCEL_ONLY`(409) 도메인 오류로 거부된다.
+- **사용자 WS upgrade는 받지 않는다.** 스트림 게이트가 닫혀 있으므로 `/api/v1/stream` upgrade는 503 `{code:'NOT_READY', message, retryable:true}` + `Retry-After: 1`로 거부된다(§7.5 표 0b단계). Redis fan-out이 없으므로(§2.2) 이 프로세스에 소켓이 붙어 있어도 outbox 이벤트를 전달할 발행기가 없고, 그 소켓은 조용히 이벤트를 놓친다 — 그래서 아예 받지 않는다. 브라우저 훅은 기존 backoff로 재접속하며 `SERVING`이 된 뒤 `afterSequence`로 따라잡는다.
+- **outbox claim은 0건이다.** `OutboxPublisherLoop`는 시작되지 않았다. 사용자 이벤트는 `outbox_events`에 `published_at is null`로 쌓이고, 번들을 얻은 프로세스의 첫 poll이 발행한다(§7.4).
 
 ### 6.4 유효 capability 계산
 
@@ -301,12 +319,24 @@ else                                 → ALL_CAPABILITIES − ⋃ denied(active 
 
 ### 6.5 lease 손실
 
-`LeaseRegistry.onLost(market)`이 호출되면 `MarketRuntime[market]`은 **다음 순서를 동기적으로 시작**한다(각 단계는 이전 단계 실패와 무관하게 실행).
+**lease 손실은 시장 로컬 사건이 아니라 전역 사건이다.** 어느 한 시장의 lease 연결이 `error`/`end`를 내면 `LeaseRegistry.onLost(market)`이 `ProductionRuntime.reelect(reason)`을 호출하고, 프로세스는 `SERVING → RE_ELECTING`으로 전이한 뒤 **다음 순서를 동기적으로 시작**한다(각 단계는 이전 단계 실패와 무관하게 실행, 동시 호출은 첫 호출에 합류).
 
-1. 시장 AbortController abort → event loop, keepalive, 진행 중 recovery 취소.
-2. `stream.close()` — provider 연결 종료. 이 단계가 “세 번째 연결 금지”의 핵심이다: lease 없는 프로세스는 연결을 가질 수 없다.
-3. matching latch(해당 시장) 닫기, `MarketHealthMachine.onClose('LEASE_LOST')` → `DEGRADED` + incident `LEADER_LEASE_LOST`.
-4. `ReconnectSupervisor`가 `LeaseRegistry.acquire(market)`부터 다시 시작하는 recovery를 예약한다(§8.3 backoff). 재획득하면 새 epoch로 `RECOVERING → HEALTHY`.
+1. 스트림 게이트 닫기(새 WS upgrade 503 `NOT_READY`), admission latch 닫기(모든 시장 `{CANCEL}`), 두 시장 matching latch 닫기. `RequestAdmissionGate`는 **닫지 않는다** — HTTP 조회·취소는 계속 받는다(재선출은 종료가 아니다).
+2. `OutboxPublisherLoop.stop()` — 진행 중 `pollOnce`가 끝나기를 기다리고 새 claim을 중단한다. 이 프로세스는 이 순간부터 발행자가 아니다.
+3. **두 시장** `MarketRuntime`의 AbortController abort → event loop, keepalive, 진행 중 recovery 취소; 두 provider `stream.close()`. 잃지 않은 시장의 소켓도 닫는다 — 번들의 일부만 쥔 프로세스는 provider 연결을 가질 수 없다는 규칙(§5.2)이 “세 번째 연결 금지”의 핵심이다.
+4. `MarketHealthMachine[KR|US].onClose('LEASE_LOST')` → 두 시장 `DEGRADED` + incident `LEADER_LEASE_LOST{market}`(잃은 시장) / `LEADER_BUNDLE_BROKEN{market}`(살아 있던 시장).
+5. `LeaseRegistry.abortPending()` — 진행 중 획득 세대가 있으면(예: `RECOVERING` 중 손실) abort하고 부분 lease가 정리될 때까지 기다린다.
+6. `LeaseRegistry.releaseAll()` — 살아 있는 lease를 §5.4 규칙으로 해제한다(잃은 lease는 연결 종료만). 이 시점에 이 프로세스는 lock을 하나도 쥐지 않는다.
+7. `ReconnectSupervisor`(프로세스 단위 인스턴스)가 `ACQUIRING_LEASES`로의 전이를 예약한다(§8.3 backoff, 첫 시도 즉시). 전이 뒤 `LeaseRegistry.acquireAll(runtimeSignal)`이 KR→US 번들을 다시 획득하고 `RECOVERING(all)` → 두 시장 모두 새 epoch로 복구 → `SERVING`. 재획득 실패는 §8.3 창에 기록되고 3회 소진 시 `RECOVERY_RETRY_EXHAUSTED`(GLOBAL scope, `source=MANUAL`)로 자동 재시도가 멈춘다.
+
+시장 로컬 재획득이 없는 이유는 §3.11의 부분 lease 교착이다. 대신 **provider 전송 장애는 시장 로컬로 남는다**: `transportClosed`, 2 missed pong, 선언 거부, 스냅샷 실패는 해당 시장의 `MarketHealthMachine`·`ReconnectSupervisor`만 움직이고 lease·다른 시장·프로세스 상태는 건드리지 않는다(§6.2, §8.1).
+
+**epoch 간격.** 정상 인계는 시장별 epoch가 정확히 1 증가한다(§10.2-6). 실패 경로(재선출, 부분 획득 뒤 abort, `RECOVERING` 중 손실)에서는 한 프로세스가 같은 시장의 lease를 두 번 이상 획득할 수 있으므로 **epoch 간격이 1을 넘을 수 있다**. 불변식은 “새 leader의 epoch는 이전 어떤 epoch보다 크다”이며 “정확히 +1”은 정상 경로의 관측값이지 계약이 아니다. 테스트는 실패 경로에서 `epoch_after > epoch_before`만 단언한다.
+
+**P1이 US를 쥔 채 KR을 잃고, P2가 동시에 대기 중인 시나리오**(A16, §10.2-10). P1 `SERVING`, P2 `ACQUIRING_LEASES`에서 KR 폴링 중. P1의 KR lease 연결을 `pg_terminate_backend`로 죽인다.
+- P1: 300 ms 내 위 1~6 실행. US 소켓도 닫혀 P1의 provider 연결은 0개. US lease 해제(`LEADER_RELEASED{US}`), KR은 연결 종료만. 그 뒤 7에 따라 `acquireAll` 재시도 → KR 폴링 대기(P2가 먼저 KR을 잡았다면).
+- P2: KR lock이 풀리는 순간(P1의 KR 세션 종료) 다음 폴링에서 KR 획득, 이어 US 폴링 → P1의 US 해제 뒤 획득 → 번들 완성 → `RECOVERING(all)` → `SERVING`. P2의 provider 연결은 번들 완성 뒤에만 열리므로 P1 연결 0개인 시점 이후다.
+- 결과: 두 프로세스가 각각 한 시장만 쥐고 서로 기다리는 상태가 **존재하지 않는다**(P1은 잃은 즉시 US를 놓는다). 새 leader(P2)가 `SERVING`에 도달하는 시간은 P1 해제 시간(≤ 1 s) + 폴링 2주기(≤ 500 ms) + recovery 시간(`RECOVERY_STABILITY_MS` 포함)으로 **유계**다. `peakConcurrentConnections ≤ 2`, `evictions === 0`. P1은 `RE_ELECTING`에서 KR·US 폴링을 계속하며 P2가 살아 있는 동안 `CANCEL_ONLY`로 서비스한다. P1이 `SIGTERM`을 받으면 §6.6대로 `abortPending()`으로 빠져나온다. KR epoch는 P2 획득 시 이전보다 크기만 하면 된다(간격 > 1 허용).
 
 잔여 위험: PostgreSQL 연결 사망 감지까지의 지연 동안 이전 프로세스의 소켓이 살아 있고 새 leader가 연결을 열면 provider가 가장 오래된 연결(이전 프로세스)을 끊는다. 이 경우에도 (a) 새 leader의 연결은 유지되고, (b) 이전 프로세스의 fill은 fencing token 불일치로 DB에서 거부되며, (c) `provider_connections_open` 합계가 2를 넘는 순간이 알림으로 남는다. 이는 이중 leader가 아니라 감지 지연이며, 허용된 잔여 위험으로 기록한다.
 
@@ -317,13 +347,25 @@ else                                 → ALL_CAPABILITIES − ⋃ denied(active 
 | 순서 | 콜백 | `ProductionRuntime`이 주입하는 구현 |
 |---|---|---|
 | 1 | `cancelOnly()` | 상태 `DRAINING`; `/health/ready`가 503 `{code:'NOT_READY', details:{draining:true}}`를 반환하도록 플래그; trading `reasons`에 `DRAINING` 추가; 감사 `RUNTIME_DRAINING`. |
-| 2 | `admission.close()` | admission latch 닫기 → 모든 시장 `{CANCEL}`. 두 시장의 matching latch 닫기(새 fill 없음). |
-| 3 | `drainInflight(deadline)` | `UnitOfWork` in-flight 카운터가 0이 될 때까지 50 ms 폴링, deadline 초과 시 진행. |
-| 4 | `drainOutbox(deadline)` | `OutboxPublisherLoop.drain(deadline)`: `pollOnce`를 반복해 `claimed === 0`이 두 번 연속이면 종료. deadline 초과 시 남은 행 개수를 `outbox_drain_remaining` 게이지에 기록하고 진행(행은 DB에 남아 새 leader가 발행한다 — at-least-once). |
-| 5 | `closeSockets()` | 시장 AbortController abort; 두 provider `stream.close()`; `StreamHeartbeatLoop.stop()`; upgrade 브리지 `detach()`(closing latch + pending 핸드셰이크 파괴) → `closeAll(1012, 'SERVICE_RESTART')`(`STREAM_CLOSE_GRACE_MS = 2000` 상한, 잔여는 `terminate()`) → `wss.close()` 순으로 사용자 WebSocket 종료(§7.5 정리; 브라우저는 재접속 후 REST 스냅샷으로 조정). 이 단계의 상한은 `STREAM_CLOSE_GRACE_MS`이며 drain deadline과 무관하게 종료를 막을 수 없다. |
-| 6 | `releaseLeases()` | `LeaseRegistry.releaseAll()` — **모든 소켓이 닫힌 뒤에만** 실행. 그래야 새 leader가 lock을 얻는 순간 이전 연결이 0개다. 각 시장의 `LEADER_RELEASED`는 §5.4대로 unlock 전에 커밋된다. |
+| 2 | `admission.close()` | **인그레스 울타리.** 순서대로 (a) 스트림 게이트 닫기 — 새 WS upgrade는 503 `NOT_READY`; (b) `RequestAdmissionGate.close()` — 이후 도착하는 비즈니스 HTTP 요청은 `onRequest`에서 503 `NOT_READY` + `Retry-After: 1`로 거부되고 핸들러·`UnitOfWork`에 도달하지 않는다(`/health/*` 제외); (c) admission latch 닫기 → 모든 시장 `{CANCEL}`; (d) 두 시장의 matching latch 닫기(새 fill 없음). (b)가 (c) 앞인 이유: latch만 닫으면 이미 라우팅된 취소 요청이 계속 새 `UnitOfWork`를 시작해 3단계 카운터가 수렴하지 않을 수 있다. 취소 가용성은 이미 준비된 P2가 제공한다(§3.13, §6.3). |
+| 3 | `drainInflight(deadline)` | 먼저 `RequestAdmissionGate.drain(deadline)` — 2단계 전에 허용된 비즈니스 요청의 in-flight 수가 0이 될 때까지 50 ms 폴링. 그 다음 `UnitOfWork` in-flight 카운터가 0이 될 때까지 50 ms 폴링(허용된 요청이 시작한 트랜잭션과 엔진 fill 트랜잭션의 꼬리). 두 카운터 모두 deadline 초과 시 진행. 게이트가 닫힌 뒤에는 새 `UnitOfWork`를 시작할 HTTP 경로가 없으므로 두 카운터는 단조 감소한다. |
+| 4 | `drainOutbox(deadline)` | `OutboxPublisherLoop.drain(deadline)`: `pollOnce`를 반복해 `claimed === 0`이 두 번 연속이면 종료, 그 뒤 `stop()`으로 **claim을 완전히 중단**한다(이 프로세스는 6단계 전에 발행자 자격을 내려놓는다). deadline 초과 시 남은 행 개수를 `outbox_drain_remaining` 게이지에 기록하고 `stop()` 후 진행(행은 DB에 남아 새 leader가 발행한다 — at-least-once). `stop()`은 진행 중 `pollOnce`의 마지막 `markOutboxPublished`까지 기다리므로 “claim했지만 발행 안 함”으로 끝나는 행은 없다(claim tx는 짧고 row lock은 tx 종료 시 풀린다). |
+| 5 | `closeSockets()` | 시장 AbortController abort; 두 provider `stream.close()`; `StreamHeartbeatLoop.stop()`; upgrade 브리지 `detach()`(closing latch + pending 핸드셰이크 파괴) → `closeAll(1012, 'SERVICE_RESTART')`(`STREAM_CLOSE_GRACE_MS = 2000` 상한, 잔여는 `terminate()`) → `wss.close()` 순으로 사용자 WebSocket 종료(§7.5 정리; 브라우저는 재접속 후 REST 스냅샷으로 조정). `OPENING` 상태 세션도 `closeAll`이 함께 닫고 큐를 버린다. 이 단계의 상한은 `STREAM_CLOSE_GRACE_MS`이며 drain deadline과 무관하게 종료를 막을 수 없다. |
+| 6 | `releaseLeases()` | `LeaseRegistry.abortPending()` → `LeaseRegistry.releaseAll()`(역순 US→KR) — **모든 소켓이 닫힌 뒤에만** 실행. 그래야 새 leader가 lock을 얻는 순간 이전 연결이 0개다. 각 시장의 `LEADER_RELEASED`는 §5.4대로 unlock 전에 커밋된다. 프로세스가 `ACQUIRING_LEASES`/`RE_ELECTING`에서 `SIGTERM`을 받았다면 `abortPending()`이 진행 중 세대를 abort하고 부분 lease 역순 해제를 기다린다(§5.4). |
 
 그 뒤 `server.ts`의 기존 흐름대로 `app.close()`, 마지막에 `database.destroy()`. 종료 코드 0. deadline 초과로 강제 진행한 경우도 종료 코드는 0이며 `RUNTIME_STOPPED {forced:true, remainingOutbox}` 감사와 `shutdown_forced_total` 카운터를 남긴다.
+
+**lease 대기 중 종료.** `ACQUIRING_LEASES`에서 `SIGTERM`을 받은 프로세스는 위 순서를 그대로 지나지만 3~5단계는 즉시 끝난다(허용된 비즈니스 요청 꼬리 외에 in-flight 없음, outbox loop 미시작 → `drain`은 no-op, provider 소켓·사용자 소켓 없음). 6단계의 `abortPending()`이 폴링 루프를 다음 250 ms 경계에서 깨우므로 전체 종료는 `1 s + 허용 요청 꼬리` 안에 끝난다. 토큰·REST·WS 호출은 0건이고 종료 코드는 0이다(A15, §10.2-11).
+
+**`RequestAdmissionGate` 규격**(`+ runtime/request-admission-gate.ts`):
+
+- 상태: `closed: boolean`, `inFlight: number`. Fastify 훅으로 등록: `onRequest`(가장 먼저, Origin 검사 훅보다 앞), `onResponse`, `onError`.
+- **원자성.** `onRequest`는 동기 함수다: `if (isHealthPath(request)) return; if (closed) → reply 503 + Retry-After, return; inFlight += 1; request.admitted = true`. Node 단일 스레드에서 닫힘 검사와 증가 사이에 `await`가 없으므로 `close()`가 그 사이에 끼어들 수 없다 — “검사 통과 후 증가 전에 닫힘”으로 drain이 요청 하나를 놓치는 경합이 구조적으로 없다. `close()`도 동기다(`closed = true`).
+- `onResponse`/`onError`: `request.admitted`이면 정확히 한 번 `inFlight -= 1`(플래그를 지워 이중 감소 방지). 클라이언트가 응답 전에 연결을 끊어도 Fastify는 `onResponse`를 호출하므로 카운터가 새지 않는다.
+- 제외 경로: `/health/live`, `/health/ready`, `/health/market-data`, `/api/v1/health/trading`, `/metrics`. 이들은 닫힌 뒤에도 정상 응답하며 카운터에 포함되지 않는다(관측성이 종료 중에도 살아 있어야 드릴과 운영자가 `DRAINING`을 볼 수 있다). `/admin/*`은 비즈니스 요청으로 취급한다.
+- 거부 응답: `503 {code:'NOT_READY', message:'Server is draining', retryable:true, requestId}` + `Retry-After: 1`. 기존 오류 envelope와 같은 형식이다.
+- `drain(deadline)`: `inFlight === 0`이면 즉시, 아니면 50 ms 폴링, deadline 초과 시 `http_admission_drain_remaining` 게이지에 잔여를 기록하고 반환.
+- 테스트 `request-admission-gate.test.ts`(Fastify inject + 실제 listen 둘 다): G1. 열림 상태에서 요청 → 200, 응답 후 `inFlight === 0`; G2. 핸들러가 `Deferred`로 막힌 요청 1건(`inFlight === 1`) → `close()` → 그 뒤 도착한 비즈니스 요청 → 503 `NOT_READY` + `Retry-After`, 핸들러 spy 0회, `UnitOfWork` spy 0회, `inFlight`는 여전히 1 → `Deferred` 해결 → 첫 요청 200, `inFlight === 0`, `drain()` 해결; G3. 닫힌 뒤 `/health/ready`·`/health/live`·`/api/v1/health/trading` → 정상 응답(ready는 §6.6-1의 503 `draining:true`), `inFlight` 불변; G4. 핸들러가 던지는 요청 → `onError` 경로에서 감소 1회, `onResponse`와 합쳐 감소 총 1회; G5. 클라이언트가 응답 전 소켓 파괴 → 감소 1회; G6. 원자성: `onRequest` 훅 함수가 `AsyncFunction`이 아니고 본문에 `await`가 없음(정적 검사), 그리고 `close()`를 `onRequest` 진입 직전·직후에 끼운 두 순서에서 각각 503 / 허용+카운트 결과만 나오고 “허용됐는데 미카운트”가 없음.
 
 두 번째 신호는 무시된다(`ShutdownCoordinator.#draining` 가드). `SIGKILL`은 orchestrator의 `stop_grace_period`(45 s) 이후에만 오며, 그 경우 lease는 PostgreSQL 연결 종료로 자동 해제된다.
 
@@ -347,7 +389,7 @@ provider WS ─▶ TossWebSocketMarketData.events(signal)
 
 ### 7.2 복구 (`SupervisedRecovery`)
 
-`RecoveryCoordinator.recover(market, signal)`의 기존 절차를 유지한다: lease(멱등) → `beginEpoch` → `stream.connect` → `declare` + ack 검증 → 심볼별 rate-limited REST 스냅샷(`SnapshotRateLimiter` 10/s) → `replaceBaseline` → 안정화 대기(`RECOVERY_STABILITY_MS`) → 반환. `ProductionRuntime`은 반환값을 받아:
+`RecoveryCoordinator.recover(market, signal)`의 기존 절차를 유지한다: lease(`LeaseRegistry.held(market)` — 보유 중 lease 반환만, 획득 없음, §5.4) → `beginEpoch` → `stream.connect` → `declare` + ack 검증 → 심볼별 rate-limited REST 스냅샷(`SnapshotRateLimiter` 10/s) → `replaceBaseline` → 안정화 대기(`RECOVERY_STABILITY_MS`) → 반환. `ProductionRuntime`은 반환값을 받아:
 
 1. `recoveryTriggers`를 `PaperEngine.onRecoveryOrderBook`/조건 발동 경로로 넘긴다. 결과 fill은 `source:'RECOVERY_REST'`, `recoveryFill=true`로 기록된다(기존 의미론, 선행 문서 §7.4).
 2. `blockedSymbols`마다 SYMBOL incident `RECOVERY_SNAPSHOT_FAILED`가 이미 활성화되어 있으므로 시장 자체는 `markHealthy(epoch)`로 CAS 해제한다. 심볼 incident는 다음 성공한 스냅샷에서 개별 CAS 해제한다.
@@ -363,16 +405,19 @@ provider WS ─▶ TossWebSocketMarketData.events(signal)
 ```text
 UnitOfWork tx: orders/fills/wallets + audit_events + outbox_events (원자적)
         │
-OutboxPublisherLoop (200 ms 주기, batch 100)
+OutboxPublisherLoop (200 ms 주기, batch 100; KR+US 번들 보유 중에만 실행)
         ├ claimPendingOutbox (FOR UPDATE SKIP LOCKED, 짧은 tx)
-        ├ publish(event) = StreamHub.deliver(sessionId, event)   ← 접속 없으면 no-op 성공
-        ├ markOutboxPublished(id)
+        ├ publish(event) = StreamHub.deliver(sessionId, event)
+        │     ← 세션 없음: no-op 성공 / LIVE: 즉시 send / OPENING: 큐 수락(성공) 또는 overflow(세션 종료 후 성공)
+        ├ markOutboxPublished(id)      ← deliver가 해결된 뒤에만
         └ 매 10분 prunePublishedOutbox(1000)   (published_at < now() − 24h)
 ```
 
+- **단일 소유자.** Redis fan-out이 없으므로(§2.2) 발행기와 사용자 소켓은 같은 프로세스에 있어야 한다. `OutboxPublisherLoop.start()`는 `LeaseRegistry.acquireAll`이 번들을 반환한 직후(`RECOVERING(all)` 진입 시, §6.1) 호출되고, `stop()`은 §6.5 재선출 2단계와 §6.6 4단계에서 **lease 해제 전에** 호출된다. 따라서 어느 시각에도 outbox를 claim하는 프로세스는 두 lease를 쥔 프로세스 하나다. `ACQUIRING_LEASES`·`RE_ELECTING`·`DRAINING`(4단계 이후)의 프로세스는 claim 0건이다. `stop()`은 진행 중 `pollOnce`가 끝나기를 기다린다(타이머 정지 + in-flight promise await).
+- **`published_at`의 의미는 “이 프로세스가 전달 책임을 다했다”다.** `StreamHub.deliver(sessionId, event)`는 (a) 등록된 세션이 없으면 즉시 해결(미접속 사용자는 재접속 시 `afterSequence`로 따라잡는다), (b) `LIVE` 세션이면 `StreamSession.deliver`(백프레셔 큐 포함) 뒤 해결, (c) `OPENING` 세션이면 replay 장벽 큐에 넣고 **수락 시점**에 해결한다(§7.5). `markOutboxPublished`는 이 promise가 해결된 뒤에만 실행되므로 “published로 표시했지만 OPENING 큐에도 없고 replay에도 없음”인 이벤트는 존재하지 않는다. (c)에서 큐가 넘치면 hub가 그 세션에 `resync-required`를 보내고 닫은 뒤 해결한다 — 그 사용자는 재접속 replay로 이벤트를 다시 받는다.
 - 발행은 “접속 중인 세션에 전달 시도”이며, 미접속 세션은 재접속 시 `afterSequence`로 REST/스트림에서 따라잡는다. 이것이 outbox가 at-least-once인 이유이고 브라우저 dedupe가 존재하는 이유다.
-- `outbox_oldest_pending_seconds` 게이지는 매 poll마다 `min(created_at) where published_at is null`로 갱신한다. 알림 `OutboxLagHigh`(> 30 s)는 기존 규칙.
-- 인계 중: 이전 leader의 `drainOutbox`가 대부분을 발행하고, 남은 행은 새 leader의 loop가 첫 poll에서 발행한다. 중복 발행은 브라우저 `eventId` dedupe로 흡수된다.
+- `outbox_oldest_pending_seconds` 게이지는 매 poll마다 `min(created_at) where published_at is null`로 갱신한다. 알림 `OutboxLagHigh`(> 30 s)는 기존 규칙. 인계 중 P2가 대기하는 동안 이 값은 자연히 커지며, 그 지속 시간은 P1 drain + P2 recovery 시간으로 유계다.
+- 인계 중: 이전 leader의 `drainOutbox`가 대부분을 발행하고 `stop()`하며, 남은 행과 인계 공백 동안 쌓인 행은 새 leader의 loop가 번들 획득 직후 첫 poll에서 발행한다. 중복 발행은 서버 hub의 `eventId` dedupe(§7.5)와 브라우저 `eventId` dedupe로 흡수된다.
 
 ### 7.5 사용자 스트림 (`ws` noServer upgrade 브리지)
 
@@ -387,6 +432,7 @@ createStreamUpgradeHandler({
   sessionService,    // SessionService.authenticate(token)
   limiter,           // LayeredRateLimiter
   hub,               // StreamHub
+  gate,              // StreamGate — { isOpen(): boolean } : ProductionRuntime이 SERVING에서만 open (§6.1, §6.3)
   source,            // DurableEventSource
   tradableSymbols,   // ReadonlySet<string> — 허용 목록(canonical `MARKET:SYMBOL`), 요청 구독이 아님
   maxPayloadBytes,   // 상수 STREAM_MAX_PAYLOAD_BYTES = 4096 (클라이언트→서버 프레임 상한)
@@ -408,6 +454,7 @@ createStreamUpgradeHandler({
 | 순서 | 검사 | 실패 응답 |
 |---|---|---|
 | 0 | `closing === true`이면 아무 응답 없이 `socket.destroy()` | — |
+| 0b | `gate.isOpen() === false`(프로세스가 `SERVING`이 아님: `ACQUIRING_LEASES`, `RECOVERING`, `RE_ELECTING`, `DRAINING`) → 이 프로세스는 발행자가 아니므로 소켓을 받지 않는다(§3.12, §6.3). 1~9단계 어디에서도 `await` 뒤에 게이트가 닫힐 수 있으므로 **9단계 재검사에도 포함**한다 | 503 `NOT_READY` + `Retry-After: 1` |
 | 1 | `request.headers.upgrade?.toLowerCase() === 'websocket'`, `Connection` 헤더에 `upgrade` 포함 | 426 `UPGRADE_REQUIRED` |
 | 2 | `new URL(request.url ?? '/', 'http://placeholder').pathname === '/api/v1/stream'` (다른 경로의 upgrade는 이 서버가 지원하지 않음) | 404 `NOT_FOUND` |
 | 3 | `parseStreamQuery(url)` — 위 규칙으로 `afterSequence`·`quoteSymbols` 검증 | 400 `BAD_REQUEST` |
@@ -416,15 +463,26 @@ createStreamUpgradeHandler({
 | 6 | `pending.add(socket)`; `socket.once('close', () => pending.delete(socket))`; `await sessionService.authenticate(token)`; 세션 오류(`statusCode === 401`인 예외: 무효·만료·폐기 토큰) 또는 `session.status !== 'ACTIVE'` → 401. 그 외 예외(DB 오류 등)는 U8의 500 경로. 어느 경로든 `pending.delete(socket)` | 401 `SESSION_EXPIRED` |
 | 7 | `limiter.checkWebsocketConnection(session.id)` (5회/1 s, 기존 값) 불허 → | 429 `RATE_LIMITED` + `Retry-After` |
 | 8 | 요청 구독 개수 `n = quoteSymbols.length`로 `limiter.checkSubscription(session.id, n)` 불허 → | 429 `RATE_LIMITED` + `Retry-After` |
-| 9 | **`handleUpgrade` 직전 재검사**: `closing === true` 또는 `socket.destroyed`이면 아무 응답 없이 `socket.destroy()`하고 종료. 6~8의 `await` 동안 `detach()`가 호출되었거나 클라이언트가 떠난 경우를 잡는다 | — |
+| 9 | **`handleUpgrade` 직전 재검사**: `closing === true` 또는 `socket.destroyed`이면 아무 응답 없이 `socket.destroy()`하고 종료; `gate.isOpen() === false`이면 503 `NOT_READY` + destroy. 6~8의 `await` 동안 `detach()`·재선출이 일어났거나 클라이언트가 떠난 경우를 잡는다 | — / 503 |
 | 10 | `wss.handleUpgrade(request, socket, head, onOpen)` — 101은 `ws`가 쓴다 | 핸드셰이크 실패는 `ws`가 400을 쓰고 socket을 닫음 |
 
 `onOpen(ws)`:
 
 1. `ws`를 `StreamSocket`으로 감싼다: `send(text)`, `close(code, reason)`, `bufferedAmount` getter. 이 어댑터는 `apps/e2e/start-system.ts`의 수제 구현을 대체하며 e2e도 같은 브리지와 §7.6의 `StreamHeartbeatLoop`를 쓴다.
-2. `StreamSession.open({ sessionId: session.id, source, socket, afterSequence?, quoteSymbols: tradableSymbols })` — `afterSequence`는 3단계에서 검증한 값. `open` 실패(`OUTBOX_GAP`은 `StreamSession`이 이미 4009로 닫음; 그 외) 시 `ws.close(1011, 'STREAM_OPEN_FAILED')` 후 로그.
-3. 요청 구독마다 `await streamSession.subscribeQuote(market, symbol)`. 3단계 검증을 통과했으므로 여기서 예외는 불변식 위반이며 `ws.close(1011, 'STREAM_OPEN_FAILED')` + 로그로 처리한다.
-4. `hub.register(session.id, streamSession, ws)`. `ws.on('close')` → `hub.unregister`, `ws.on('error')` → 로그 후 `ws.terminate()`. 클라이언트→서버 프레임은 스트림 계약에 없다(시세 구독은 쿼리로만 정해진다). 따라서 `ws.on('message')`는 종류·내용을 보지 않고 `ws.close(1003, 'UNSUPPORTED_DATA')`로 닫고 `stream.inbound_rejected` 로그를 남긴다. `maxPayload` 초과는 `ws`가 1009로 닫는다.
+2. **`OPENING` 등록이 durable 읽기보다 먼저다.** `const handle = hub.registerOpening(session.id, ws)` — hub는 `{state:'OPENING', ws, queue: DurableAccountEvent[], sessionId}` 항목을 만든다. 이 시점부터 `OutboxPublisherLoop`가 이 sessionId로 `hub.deliver`하는 이벤트는 **큐에 적재**된다(상한 `STREAM_OPENING_QUEUE_MAX = 200`). 등록이 `source.latest`/`replay` 앞에 있어야 하는 이유: 등록 전에 발행된 이벤트는 replay가 읽고, 등록 후에 발행된 이벤트는 큐가 잡는다 — 두 집합의 합이 빠짐없이 전체가 되는 것은 등록 시점이 `latest` 읽기 시점보다 앞일 때만 성립한다(반대 순서면 `latest` 읽기와 등록 사이에 발행된 이벤트가 replay에도 큐에도 없다). `ws.on('close')`는 이 시점에 붙여 `hub.unregister(session.id, handle)`로 어느 상태에서 닫혀도 항목이 제거되게 한다.
+3. `StreamSession.open({ sessionId: session.id, source, socket, afterSequence?, quoteSymbols: tradableSymbols })` — `afterSequence`는 3단계에서 검증한 값. `open`은 `ready{accountSequence: latest}`와 replay 이벤트를 소켓에 쓴다. 실패(`OUTBOX_GAP`은 `StreamSession`이 이미 4009로 닫음; 그 외 → `ws.close(1011, 'STREAM_OPEN_FAILED')`) 시 `hub.unregister(session.id, handle)`로 `OPENING` 항목과 큐를 버리고 로그. 큐에 있던 이벤트는 이미 `published_at`이 찍혔지만 사용자는 재접속 replay로 다시 받는다(outbox는 `published_at`과 무관하게 `stream_sequence`로 replay되므로 손실이 아니다).
+4. 요청 구독마다 `await streamSession.subscribeQuote(market, symbol)`. 3단계 검증을 통과했으므로 여기서 예외는 불변식 위반이며 `hub.unregister` + `ws.close(1011, 'STREAM_OPEN_FAILED')` + 로그로 처리한다.
+5. **replay→live 장벽 flush + CAS.** `hub.promoteToLive(session.id, handle, streamSession, replayedUpTo)`: (a) `replayedUpTo`는 `open`이 replay한 마지막 `accountSequence`(replay가 비었으면 `ready.accountSequence`); (b) 큐를 `accountSequence` 오름차순으로 정렬하고, `accountSequence ≤ replayedUpTo`이거나 `eventId`가 replay 집합에 있는 항목을 버린다(**dedupe — 같은 이벤트가 replay와 큐 양쪽에 있는 것이 정상 경합이다**); (c) 남은 항목을 순서대로 `streamSession.deliver(event)`(백프레셔 큐 규칙 그대로); (d) 항목 상태를 `OPENING → LIVE`로 **CAS** 전환한다 — 현재 상태가 `OPENING`이고 `handle`이 일치할 때만 성공하며, 그 사이 소켓이 닫혀 항목이 제거되었으면 실패하고 flush 결과를 버린다. (c)와 (d) 사이에 `deliver`가 도착하면 여전히 `OPENING`이므로 큐에 들어가고, (d) 직후 hub가 큐를 한 번 더 비운다(길이 0이 될 때까지 반복; 각 반복은 동기 구간이라 새 적재는 다음 tick으로 밀린다). 이후 `deliver`는 `LIVE` 경로로 `streamSession.deliver`에 직접 간다.
+6. `ws.on('error')` → 로그 후 `ws.terminate()`. 클라이언트→서버 프레임은 스트림 계약에 없다(시세 구독은 쿼리로만 정해진다). 따라서 `ws.on('message')`는 종류·내용을 보지 않고 `ws.close(1003, 'UNSUPPORTED_DATA')`로 닫고 `stream.inbound_rejected` 로그를 남긴다. `maxPayload` 초과는 `ws`가 1009로 닫는다.
+
+**`StreamHub` 상태 규칙**(`+ modules/stream/stream-hub.ts`):
+
+- 항목: `sessionId → { state: 'OPENING' | 'LIVE', handle, ws, queue, session?: StreamSession }`. 같은 sessionId의 두 번째 접속은 새 handle로 **별도 항목**을 가지며(사용자가 탭 두 개를 열 수 있다) 레지스트리는 `sessionId → Set<entry>`다. `deliver(sessionId, event)`는 그 세션의 모든 항목에 전달한다.
+- `deliver(sessionId, event): Promise<void>` — 항목마다: `LIVE` → `await session.deliver(event)`; `OPENING` → `queue.length < STREAM_OPENING_QUEUE_MAX`이면 push(수락), 아니면 **overflow**: `ws.send({type:'resync-required', reason:'REPLAY_OVERFLOW'})` → `ws.close(4010, 'REPLAY_OVERFLOW')` → 항목 제거. 어느 경로든 promise는 해결된다(발행기는 `markOutboxPublished`로 진행, §7.4). overflow는 `stream_replay_overflow_total` 카운터에 남는다.
+- `unregister(sessionId, handle)` — 상태 무관 항목 제거, 큐 버림, `session?.close()`는 호출하지 않는다(소켓은 이미 닫힘). 멱등.
+- **정리 불변식**: 모든 실패(open 실패, subscribe 실패, CAS 실패), gap(4009), overflow(4010), 소켓 close/error 뒤에 그 handle의 항목은 레지스트리에 없다. `size()`는 `LIVE`+`OPENING` 항목 수이고 `closeAll` 뒤 0이다.
+- `heartbeat(serverTime)`은 `LIVE` 항목에만 보낸다(`OPENING`은 `ready` 직후이므로 훅 타임아웃 60 s 안에 전환된다; 전환이 그보다 늦으면 클라이언트가 4000으로 닫고 재접속하는 것이 올바른 결과다). `publishQuote`도 `LIVE`에만 전달한다.
+- `closeAll(code, reason)`: `OPENING` 항목은 큐를 버리고 `ws.close(code, reason)`, `LIVE`는 기존 규칙.
 
 **프론트 정렬**(§2.2 예외, A 범위): `use-portfolio-stream.ts`의 `streamUrl(afterSequence?: string)`는 `afterSequence`가 정의되어 있고 `^(0|[1-9][0-9]{0,18})$`에 맞을 때만 `url.searchParams.set('afterSequence', afterSequence)`한다(맞지 않으면 쿼리를 생략하고 전체 replay에 맡긴다). `connect()`는 `streamUrl(stateRef.current?.snapshot.accountSequence)`로 소켓을 만들고, `onopen`은 `attempt.current = 0`만 수행한다 — **`socket.send`는 삭제**한다. `quoteSymbols` 쿼리는 현재 프론트가 쓰지 않으므로 보내지 않는다. 그 외 훅 로직(heartbeat 타임아웃, 재접속 backoff, 리듀서)은 변경하지 않는다.
 
@@ -456,6 +514,12 @@ createStreamUpgradeHandler({
 - U9c. **재검사 경합**: `Deferred` 대기 중 `closing`만 먼저 `true`가 되는 순서(`detach()` 내부 순서를 spy로 관측)에서도 9단계 재검사가 `handleUpgrade`를 막는다 — `detach()`의 listener 제거와 pending 파괴 사이에 인증이 해결되는 경우를 `Deferred` 해결 시점으로 재현.
 - U9d. **닫기 상한**: `close` 프레임에 응답하지 않는 클라이언트(원시 TCP로 101만 받고 close echo를 보내지 않음) 2개 접속 → `closeAll(1012)`가 `STREAM_CLOSE_GRACE_MS + 500 ms` 안에 해결되고 `hub.size()===0`, 두 소켓 모두 `terminate` 호출 관측(fake timer로 상한 경과 주입).
 - U10. `cookieValueFromHeader`와 `cookieValue`가 같은 입력(`a=1; sid=x%3Dy; b=2`)에 같은 결과 — 파서 공유 회귀 테스트.
+- U11. **장벽 경합**: `source.replay`를 `Deferred`로 막은 채 접속 → `hub.size()===1`이고 항목 상태 `OPENING`(테스트용 `hub.stateOf(handle)`) → 그 상태에서 `hub.deliver(sessionId, E5)`(`accountSequence:'5'`, replay 범위 밖) 호출 → promise가 **replay 완료 전에** 해결됨(publisher가 막히지 않음을 증명) → `Deferred`를 `[E3, E4]`로 해결 → 클라이언트 수신 순서가 정확히 `ready` → `E3` → `E4` → `E5`, `E5`는 1회만; 상태 `LIVE`; 이후 `hub.deliver(E6)`는 큐를 거치지 않고 즉시 도달(`session.deliver` spy 직접 호출).
+- U11b. **dedupe**: replay가 `[E3, E4]`를 반환하기 직전에 `hub.deliver(E4)`(같은 `eventId`)와 `hub.deliver(E4')`(다른 `eventId`, 같은 `accountSequence:'4'`) → 클라이언트는 `E4`를 1회만 수신하고 `E4'`도 수신하지 않음(`accountSequence ≤ replayedUpTo`). 순서 뒤섞인 큐(`E7`, `E5`, `E6` 순 적재) → flush 순서 `E5, E6, E7`.
+- U11c. **overflow**: replay를 막은 채 `STREAM_OPENING_QUEUE_MAX + 1`건 `deliver` → 마지막 `deliver`가 해결되고 클라이언트가 `resync-required{reason:'REPLAY_OVERFLOW'}` 뒤 close code 4010 수신, `hub.size()===0`, `stream_replay_overflow_total` +1; `Deferred` 해결 뒤 `promoteToLive` CAS 실패(항목 없음), 예외 없음, `session.deliver` 호출 0회.
+- U11d. **정리**: (i) replay 중 클라이언트 close → `hub.size()===0`, 이후 `Deferred` 해결 시 CAS 실패·예외 없음; (ii) `open`이 `OUTBOX_GAP`(4009)로 실패 → 항목 없음; (iii) `subscribeQuote`가 던지는 픽스처 → 1011 + 항목 없음; (iv) 각 경우 뒤 `hub.deliver(sessionId, E)`는 no-op으로 해결.
+- U12. **게이트**: `gate.isOpen()`이 `false`인 픽스처로 접속 → 503 `NOT_READY` + `Retry-After: 1`, 101 없음, `hub.size()===0`, `authenticate` 호출 0회(0b단계는 인증 앞); 인증 `Deferred` 대기 중 게이트가 닫히는 순서 → 9단계 재검사에서 503, `handleUpgrade` spy 0회.
+- U13. **heartbeat 대상**: `OPENING` 항목에는 `hub.heartbeat`가 프레임을 보내지 않고 `LIVE` 전환 뒤부터 보냄.
 
 **웹 테스트** `+ apps/web/src/features/portfolio/use-portfolio-stream.test.tsx`(vitest + `@testing-library/react`, `webSocketFactory` 주입, `vi.useFakeTimers`):
 
@@ -492,7 +556,8 @@ createStreamUpgradeHandler({
 | 저장소 오류(시작) | DB 접속 실패, migration 실패 | 로그 | **EXIT 1** |
 | 불변식/감사 오류(시작) | `verifyInvariants` 실패, audit 테이블 불가 | 수동 GLOBAL incident 기록 시도 후 | **EXIT 1** |
 | provider 오류 | 토큰 401/403/429, WS 연결 실패, 선언 거부, 스냅샷 실패, `server-shutdown`, 2 missed pong | MARKET(또는 SYMBOL) incident, `DEGRADED`, 재시도(§8.3) | 계속 실행, `CANCEL_ONLY`(해당 시장) |
-| lease 손실(운영 중) | lease 연결 `error`/`end` | §6.5 | 계속 실행 |
+| lease 손실(운영 중, 어느 한 시장) | lease 연결 `error`/`end` | §6.5 전역 재선출: 두 시장 내리기 → outbox claim 중단 → 살아 있는 lease 해제 → KR+US 번들 재획득 → 두 시장 복구. **시장 로컬 재획득 없음** | 계속 실행, 전 시장 `CANCEL_ONLY`(`RE_ELECTING`) |
+| 종료 중 도착한 비즈니스 요청 | `RequestAdmissionGate` 닫힘 뒤 HTTP 요청 | 503 `NOT_READY` + `Retry-After`, `UnitOfWork` 미시작(§6.6-2). `/health/*`는 계속 응답 | `DRAINING` 계속 |
 | 저장소 오류(운영 중) | `UnitOfWork` 연속 실패, `/health/ready` db false | 기존 `TransactionErrors` 알림; admission latch는 그대로(DB가 곧 gate이므로 DB 불가 = 거래 불가) | 계속 실행; readiness 503으로 트래픽 차단 |
 | 불변식 위반(운영 중) | `InvariantViolation` 도메인 오류 | 기존 emergency latch(LOCAL incident) 활성화, 알림 | 계속 실행, 운영자 롤백 판단(배포 가이드) |
 
@@ -510,6 +575,7 @@ createStreamUpgradeHandler({
 - 창: 5분 슬라이딩 창에서 3회 실패 시 자동 재시도 중단 + 수동 incident `RECOVERY_RETRY_EXHAUSTED`(선행 문서 §7.3-9). 실패 = `SupervisedRecovery`가 incident를 만든 경우.
 - `server-shutdown` 에러 프레임 수신 시 첫 재시도 지연은 1 s 고정(계약 권고 1s→2s→4s와 일치하도록 `attempt=2`부터 시작).
 - 재시도 성공은 `feed_reconnect_total{market}` 카운터 증가 후 `RECOVERING → HEALTHY`.
+- 인스턴스는 세 개다: 시장별 두 개(provider 전송 장애의 시장 로컬 재연결)와 프로세스 단위 한 개(§6.5 재선출의 `acquireAll` 재시도). 프로세스 단위 인스턴스의 첫 시도는 지연 0이며, 실패 3회 소진 시 GLOBAL scope `RECOVERY_RETRY_EXHAUSTED`를 만든다. `acquireAll`이 대기 중인 동안은 실패가 아니라 대기다(폴링은 무기한, 실패는 연결 오류·감사 실패·abort만).
 
 ### 8.4 provider 오류 코드 매핑 (B)
 
@@ -591,7 +657,8 @@ createStreamUpgradeHandler({
 
 - 하네스가 PostgreSQL 17, Redis 7 Testcontainer, `FakeTossRestServer`, `FakeTossWsServer`를 띄우고 자격증명을 발급한다.
 - 프로세스 P1, P2는 `node apps/paper-api/dist/main.js`를 `child_process.spawn`으로 실행한다(빌드된 산출물, 프로덕션 진입점). 공통 env: `NODE_ENV=production`, `MARKET_DATA_ADAPTER=toss`, `TOSS_REST_BASE_URL=http://127.0.0.1:<rest>`, `TOSS_WS_URL=ws://127.0.0.1:<ws>/ws/v1`, `RECOVERY_STABILITY_MS=500`, `SHUTDOWN_DRAIN_DEADLINE_MS=10000`, 그리고 §5.1의 필수 비밀(하네스가 생성). `PORT`는 각각 다른 임의 포트, `PUBLIC_ORIGIN`은 동일.
-- 하네스는 `/health/*`, `/api/v1/health/trading`, `/health/market-data`를 폴링(100 ms)해 관측 로그 `[{t, process, endpoint, body}]`를 만든다.
+- 하네스는 `/health/*`, `/api/v1/health/trading`, `/health/market-data`를 폴링(100 ms)해 관측 로그 `[{t, process, endpoint, body}]`를 만든다. 또 `outbox_events`를 관찰 연결로 폴링해 프로세스별 claim 흔적(`pg_stat_activity`의 `for update skip locked` 쿼리 + P2 stdout `outbox.poll` 로그 부재)을 기록한다.
+- **배포 전제조건(드릴이 그대로 재현).** P1에 `SIGTERM`을 보내는 것은 **P2가 `/health/ready` 200이고 trading `reasons ⊇ ['ACQUIRING_LEASES']`를 보인 뒤**에만 한다. 이 전제가 인계 중 취소 가용성의 조건이다 — P1은 `DRAINING` 2단계에서 HTTP 인그레스를 닫으므로(§6.6) 그 뒤 취소를 받을 프로세스는 P2다. 배포 가이드의 stop-then-start 절차에 같은 문장을 추가한다(§13).
 
 ### 10.2 절차와 단언
 
@@ -599,15 +666,18 @@ createStreamUpgradeHandler({
 |---|---|---|
 | 1 | P1 시작 | 20 s 내 `/health/ready` 200; 두 시장 `NORMAL`; `placement:true`; 가짜 WS `connections===2`, `leader_epochs.epoch` = (KR:1, US:1) |
 | 2 | 익명 세션 생성, MARKET 주문 1건 체결, LIMIT 주문 1건 대기 | 체결 outbox 이벤트가 사용자 WS로 전달됨(하네스 클라이언트) |
-| 3 | P2 시작 | 5 s 내 P2 `/health/ready` 200, trading `reasons ⊇ ['CANCEL_ONLY','ACQUIRING_LEASES']`; 가짜 WS `connections===2`(변화 없음), `peakConcurrentConnections===2`; P2의 REST 요청 기록 0건(토큰 요청 포함) |
-| 4 | P1에 `SIGTERM` | 200 ms 내 P1 trading `reasons ⊇ ['CANCEL_ONLY','DRAINING']`, `/health/ready` 503; 드레인 중 P1으로 보낸 취소 요청(대기 LIMIT) 200; 신규 주문 요청 409 `CANCEL_ONLY` |
-| 5 | P1 종료 관측 | 종료 코드 0, `SHUTDOWN_DRAIN_DEADLINE_MS + 5 s` 내; 종료 시점에 `outbox_events where published_at is null` 개수 0; 가짜 WS `connections===0`인 순간이 P2 연결 전에 존재; P1 해제 증명은 **현재 `leader_epochs` 행이 아니라** 내구성 있는 흔적으로 한다: `audit_events`에 P1 `leaderId`의 `LEADER_RELEASED` 2건(KR, US)이 존재하고, 시장별로 P1 `LEADER_RELEASED{market}`의 `occurred_at`이 P2 `LEADER_ACQUIRED{market}`보다 앞선다 — §5.4대로 P1의 해제 감사가 unlock 전에 커밋되고 P2의 획득 감사가 같은 lock 아래에서 커밋되므로 이 순서는 타이밍이 아니라 lock 직렬화가 보장한다; P1 stdout 로그에 `lease.released {auditPersisted:true}` 2건. 하네스가 100 ms `leader_epochs` 폴링으로 `{leader_id:P1, released_at not null}` 전이를 포착했다면 증거 JSON에 기록하되 **단언하지 않는다**(P2 재획득이 그 행을 즉시 덮어쓰므로 포착은 타이밍 의존) |
-| 6 | P2 인계 | P1 종료 후 15 s 내 P2 두 시장 `RECOVERING` 관측 → `NORMAL`; `leader_epochs` 현재 행 두 개 모두 `epoch=2`, `leader_id`=P2 leaderId, **`released_at is null`**; P2 REST 기록에 `/oauth2/token` 1건이 P2 `LEADER_ACQUIRED` 두 건 **모두의 `occurred_at` 이후** 타임스탬프(§5.4: `acquire`는 감사 커밋 뒤 반환, 토큰은 그 뒤); 가짜 WS `connections===2`, `peakConcurrentConnections===2`, `evictions===0` |
+| 3 | P2 시작 | 5 s 내 P2 `/health/ready` 200, trading `reasons ⊇ ['CANCEL_ONLY','ACQUIRING_LEASES']`; 가짜 WS `connections===2`(변화 없음), `peakConcurrentConnections===2`; P2의 REST 요청 기록 0건(토큰 요청 포함); **P2 outbox claim 0건**(P2 stdout에 `outbox.poll` 로그 0건, 관찰 연결에서 P2 backend의 `for update skip locked` 0회, P1 발행 지연 없음); **P2로의 사용자 WS upgrade → 503 `NOT_READY` + `Retry-After`**, 101 없음; P2가 `pg_try_advisory_lock` 폴링 중임을 P2 stdout `lease.waiting {market:'KR'}` 로그로 확인(US 폴링 로그는 아직 없음 — 순차) |
+| 3b | 전제조건 확인 | 하네스는 3단계 단언이 모두 통과한 뒤에만 4단계로 간다(§10.1 배포 전제조건). |
+| 4 | P1에 `SIGTERM` | 200 ms 내 P1 trading `reasons ⊇ ['CANCEL_ONLY','DRAINING']`, `/health/ready` 503(`draining:true`), `/health/live` 200; **P1으로 보낸 신규 비즈니스 요청(주문 생성·취소 모두) → 503 `NOT_READY` + `Retry-After`**, P1 stdout에 해당 `requestId`의 `UnitOfWork` 시작 로그 0건; **대기 LIMIT의 취소 요청은 P2로 보내 200**(P2는 `ACQUIRING_LEASES`에서 취소를 서비스한다, §6.3), P2에서 신규 주문 요청 → 409 `CANCEL_ONLY`; 취소 결과 outbox 이벤트는 이 시점에 `published_at is null`(P2가 아직 발행자가 아님)이고 6단계 뒤 P2가 발행해 사용자 WS로 도달 |
+| 5 | P1 종료 관측 | 종료 코드 0, `SHUTDOWN_DRAIN_DEADLINE_MS + 5 s` 내; 종료 시점에 `outbox_events where published_at is null`이 **정확히 4단계의 취소 이벤트 1건**(P1이 만든 행은 전부 published, P2가 만든 행은 P2가 발행자가 된 뒤 발행 — P1 `outbox.drain` 로그의 마지막 `claimed:0` 뒤에 claim 로그 없음); 가짜 WS `connections===0`인 순간이 P2 연결 전에 존재; P1 해제 증명은 **현재 `leader_epochs` 행이 아니라** 내구성 있는 흔적으로 한다: `audit_events`에 P1 `leaderId`의 `LEADER_RELEASED` 2건(KR, US)이 존재하고, 시장별로 P1 `LEADER_RELEASED{market}`의 `occurred_at`이 P2 `LEADER_ACQUIRED{market}`보다 앞선다 — §5.4대로 P1의 해제 감사가 unlock 전에 커밋되고 P2의 획득 감사가 같은 lock 아래에서 커밋되므로 이 순서는 타이밍이 아니라 lock 직렬화가 보장한다; P1 stdout 로그에 `lease.released {auditPersisted:true}` 2건. 하네스가 100 ms `leader_epochs` 폴링으로 `{leader_id:P1, released_at not null}` 전이를 포착했다면 증거 JSON에 기록하되 **단언하지 않는다**(P2 재획득이 그 행을 즉시 덮어쓰므로 포착은 타이밍 의존) |
+| 6 | P2 인계 | P1 종료 후 15 s 내 P2 두 시장 `RECOVERING` 관측 → `NORMAL`; `leader_epochs` 현재 행 두 개 모두 `epoch=2`, `leader_id`=P2 leaderId, **`released_at is null`**; P2 REST 기록에 `/oauth2/token` 1건이 P2 `LEADER_ACQUIRED` 두 건 **모두의 `occurred_at` 이후** 타임스탬프(§5.4: `acquire`는 감사 커밋 뒤 반환, 토큰은 그 뒤); 가짜 WS `connections===2`, `peakConcurrentConnections===2`, `evictions===0`; P2 `SERVING` 뒤 사용자 WS upgrade → 101, 4단계 취소 이벤트가 그 소켓에 1회 도달(`published_at` 기록됨), P2 stdout에 `outbox.poll` 첫 로그가 P2 `LEADER_ACQUIRED{US}` 뒤 |
 | 7 | P2에서 신규 MARKET 주문 | 체결, `fills.recovery_epoch = 2`, fencing token = P2 값 |
 | 8 | 감사 검증 | `audit_events`를 `occurred_at, id`로 정렬하면 P1: `RUNTIME_DRAINING` → `LEADER_RELEASED×2` → `RUNTIME_STOPPED{forced:false}`; P2: `LEADER_ACQUIRED×2` → `RECOVERY_COMPLETED×2` → `RUNTIME_STATE_CHANGED(→SERVING)`; 시장별 P1 `LEADER_RELEASED{market}` < P2 `LEADER_ACQUIRED{market}`; 전체에서 `LEADER_RELEASED`는 P1 leaderId로 정확히 2건(`LeaseRegistry`가 두 번째 해제 감사를 쓰지 않음을 증명). 하네스 관측 로그에서 P1 `/health/ready` 503 첫 관측 < P2 `RECOVERING` 첫 관측 |
-| 9 | 부정 경로 | P2를 `SIGKILL`로 죽인 뒤 P3 시작 → advisory lock이 자동 해제되어 P3가 epoch 3으로 `NORMAL` 도달(비정상 종료 복구 증명) |
+| 9 | 부정 경로 | P2를 `SIGKILL`로 죽인 뒤 P3 시작 → advisory lock이 자동 해제되어 P3가 epoch 3으로 `NORMAL` 도달(비정상 종료 복구 증명); 4단계 취소 이벤트와 7단계 체결 이벤트는 P3 `SERVING` 뒤 사용자 WS 재접속(`afterSequence`)으로 1회씩 수신(P2 발행분과 중복 없음) |
+| 10 | **부분 lease 손실 + 동시 대기자** (§6.5 시나리오) | P3 `NORMAL` 상태에서 P4 시작 → P4 `ACQUIRING_LEASES`(KR 폴링, REST 0건) → 관찰 연결에서 P3의 **KR** lease backend만 `pg_terminate_backend` → 단언: (a) P3 stdout에 `runtime.state {to:'RE_ELECTING'}` 300 ms 내, 가짜 WS에서 P3 연결 2개 모두 종료(US 포함), `LEADER_RELEASED{US, leaderId:P3}` 1건, KR은 `LEADER_RELEASED` 없음(연결 사망); (b) P4가 15 s 내 KR·US 순으로 획득 → `RECOVERING` → `NORMAL`, `leader_epochs` 두 행 `leader_id=P4`, KR·US epoch 모두 P3 값보다 큼(**정확한 간격은 단언하지 않음**); (c) P4 토큰 요청 1건이 P4 `LEADER_ACQUIRED` 2건 뒤; (d) 전 구간 `peakConcurrentConnections===2`, `evictions===0`, `connections===0`인 순간이 P4 연결 전에 존재; (e) P3는 `RE_ELECTING`에서 `/health/ready` 200, 취소 200, 신규 주문 409, WS upgrade 503을 유지하고 `lease.waiting {market:'KR'}`을 로그 — 두 프로세스가 각 한 시장만 쥔 상태(`leader_epochs`의 `released_at is null`인 두 행의 `leader_id`가 서로 다름)는 100 ms 폴링에서 0회 관측 |
+| 11 | **대기 중 종료** | 10단계 뒤 P3(`RE_ELECTING`, 폴링 중)에 `SIGTERM` → 종료 코드 0, `SIGTERM`부터 exit까지 ≤ 3 s; P3 REST 기록은 10단계 이전 값에서 증가 0(토큰 포함), 가짜 WS에 P3 신규 연결 0; `audit_events`에 P3의 `RUNTIME_DRAINING` → `RUNTIME_STOPPED{forced:false}`, 그 사이 `LEADER_ACQUIRED` 없음; `pg_locks`에 P3 backend 없음 |
 
-전체 드릴 시간 상한 120 s. 드릴은 `pnpm --filter @skipjack/paper-api test -- leader-handoff.drill` 로 실행되며 Docker가 필요하다. Docker 없는 환경에서는 skip이 아니라 **실패**한다(릴리스 증거이므로).
+전체 드릴 시간 상한 180 s. 드릴은 `pnpm --filter @skipjack/paper-api test -- leader-handoff.drill` 로 실행되며 Docker가 필요하다. Docker 없는 환경에서는 skip이 아니라 **실패**한다(릴리스 증거이므로).
 
 ### 10.3 산출 증거
 
@@ -617,25 +687,30 @@ createStreamUpgradeHandler({
 
 ### 11.1 Stage A — ProductionRuntime (provider-neutral)
 
-범위: §4.1의 A 소유 컴포넌트, `main.ts` 축소, `003_leader_release.sql`과 `LeaderLease` acquire/release 수정 + `LeaseAuditPort`(§5.4), `/health/*` 확장, `registerStreamRoutes`(426 폴백) + `ws` noServer upgrade 브리지 + `parseStreamQuery` + 웹 훅 `streamUrl(afterSequence)` 정렬(§7.5), `StreamHeartbeatLoop`(§7.6), `config.ts`의 `MARKET_DATA_ADAPTER` 명시 규칙(§5.1), 문서 드리프트 수정(§1.1-7), `check:deployment` 확장(`TOSS_CLIENT_*` 필수 보간 — 값은 아직 사용되지 않아도 계약으로 선언 — 과 compose `MARKET_DATA_ADAPTER: toss` 리터럴 단언), `release-drill.integration.test.ts`의 “unavailable” 케이스를 `MARKET_DATA_ADAPTER=toss` + `TOSS_CLIENT_*` 누락 → `ConfigError` EXIT 1로 재정의(A에서는 `toss adapter is not available in this build`, B 이후에는 자격증명 누락 오류 — 둘 다 EXIT 1). 자동 테스트의 provider는 `fake` 번들만 사용.
+범위: §4.1의 A 소유 컴포넌트, `main.ts` 축소, `003_leader_release.sql`과 `LeaderLease` acquire(`pg_try_advisory_lock` 250 ms 폴링 + `AbortSignal`)/release 수정 + `LeaseAuditPort` + `LeaseRegistry.acquireAll` 번들(§5.4), 전역 재선출(§6.5), `RequestAdmissionGate`(§6.6), `StreamHub` `OPENING`/`LIVE` 장벽과 스트림 게이트(§7.5), 단일 소유자 `OutboxPublisherLoop`(§7.4), `/health/*` 확장, `registerStreamRoutes`(426 폴백) + `ws` noServer upgrade 브리지 + `parseStreamQuery` + 웹 훅 `streamUrl(afterSequence)` 정렬(§7.5), `StreamHeartbeatLoop`(§7.6), `config.ts`의 `MARKET_DATA_ADAPTER` 명시 규칙(§5.1), 문서 드리프트 수정(§1.1-7), `check:deployment` 확장(`TOSS_CLIENT_*` 필수 보간 — 값은 아직 사용되지 않아도 계약으로 선언 — 과 compose `MARKET_DATA_ADAPTER: toss` 리터럴 단언), `release-drill.integration.test.ts`의 “unavailable” 케이스를 `MARKET_DATA_ADAPTER=toss` + `TOSS_CLIENT_*` 누락 → `ConfigError` EXIT 1로 재정의(A에서는 `toss adapter is not available in this build`, B 이후에는 자격증명 누락 오류 — 둘 다 EXIT 1). 자동 테스트의 provider는 `fake` 번들만 사용.
 
 수용 기준:
 
 - A1. `MARKET_DATA_ADAPTER=fake`, Testcontainers PG/Redis로 `ProductionRuntime`을 시작하면 `BOOTING→…→SERVING`, 두 시장 `NORMAL`, `leader_epochs` 두 행, `placement:true`.
 - A2. 가짜 스트림 `deliverTransportClose` → 해당 시장만 `DEGRADED`(다른 시장 `NORMAL`, 배치 가능) → 자동 recovery → `NORMAL`; epoch +1; `feed_reconnect_total` +1.
 - A3. 5분 창 3회 실패 시 `RECOVERY_RETRY_EXHAUSTED` 수동 incident, 자동 재시도 중단; 해제 시 재시도 재개.
-- A4. lease 연결 강제 종료(`pg_terminate_backend`) → 300 ms 내 `stream.close()` 호출 관측, `LEADER_LEASE_LOST` incident, 재획득 후 새 epoch.
-- A5. `SIGTERM` → §6.6 순서대로 콜백 호출(순서를 기록하는 spy), outbox 잔여 0, lease 해제, 종료 코드 0, 소요 < deadline.
+- A4. **KR** lease 연결만 강제 종료(`pg_terminate_backend`) → 300 ms 내 **두 시장** `stream.close()` 호출 관측(US 포함), `runtime.state {to:'RE_ELECTING'}`, `OutboxPublisherLoop.stop()` spy가 `releaseAll` 앞, `LEADER_RELEASED{US}` 1건, `LEADER_LEASE_LOST{KR}` + `LEADER_BUNDLE_BROKEN{US}` incident, 스트림 게이트 닫힘(WS upgrade 503), 취소 HTTP 200 유지; 그 뒤 `acquireAll` 재획득(`LeaderLease.acquire` 순서 `['KR','US']`) → 두 시장 새 epoch(이전보다 큼, 간격 단언 없음) → `SERVING`, `RUNTIME_STATE_CHANGED{to:'SERVING'}` 2건째. 시장 로컬 `acquire` 호출 경로가 없음을 정적 검사(`LeaseRegistry`에 공개 `acquire(market)` 없음).
+- A5. `SIGTERM` → §6.6 순서대로 콜백 호출(순서를 기록하는 spy: `cancelOnly` → 스트림 게이트 close → `RequestAdmissionGate.close` → admission latch → matching latch → `RequestAdmissionGate.drain` → UoW drain → `OutboxPublisherLoop.drain`·`stop` → `closeSockets` → `abortPending` → `releaseAll`), outbox 잔여 0, lease 해제, 종료 코드 0, 소요 < deadline. `RequestAdmissionGate.close` 뒤 inject한 비즈니스 요청 → 503 `NOT_READY`, `UnitOfWork` spy 0회; `/health/ready` → 503 `draining:true`, `/health/live` → 200.
+- A14. `RequestAdmissionGate` 테스트 G1~G6(§6.6) 통과; 게이트 `onRequest` 훅이 Fastify 훅 목록의 첫 번째이고 동기 함수임을 단언.
+- A15. **대기 중 종료**: 관찰 연결이 KR lock을 쥔 채 런타임 시작 → `ACQUIRING_LEASES`(`lease.waiting{KR}` 로그, `pg_try_advisory_lock` 폴링 ≥ 3회 기록) → `SIGTERM` → 종료 코드 0, `SIGTERM`부터 exit까지 ≤ 2 s; `tokenProvider.getAccessToken`·provider `connect`·REST spy 0회; `LEADER_ACQUIRED` 0건; `pg_locks`에 런타임 세션 lock 없음; 감사 `RUNTIME_DRAINING` → `RUNTIME_STOPPED`. 변형: US lock만 관찰자가 쥠 → KR 획득 뒤 US 폴링 중 `SIGTERM` → KR `LEADER_RELEASED` 1건, 나머지 동일.
+- A16. **부분 손실 + 동시 대기자**(§6.5 시나리오, 단일 vitest 프로세스 안의 두 `ProductionRuntime` 인스턴스 + 공유 Testcontainers PG + 인메모리 fake 번들에 연결 카운터 추가): R1 `SERVING`, R2 `ACQUIRING_LEASES` → R1 KR lease backend 종료 → R1 `RE_ELECTING`(US 포함 소켓 0개, `LEADER_RELEASED{US}`), R2가 KR→US 순으로 획득해 15 s 내 `SERVING`; fake 번들 `peakConcurrentConnections ≤ 2`; `released_at is null`인 두 행의 `leader_id`가 서로 다른 순간 0회(100 ms 폴링); R2의 두 epoch가 R1 값보다 큼(간격 단언 없음); R1은 `RE_ELECTING`에서 R2가 살아 있는 동안 폴링 지속, 그 뒤 R1 `stop()` → 종료 ≤ 2 s, provider 호출 증가 0.
+- A17. **스트림 게이트·단일 발행자**: `ACQUIRING_LEASES`(관찰자가 KR lock 보유)인 런타임에 WS upgrade → 503 `NOT_READY` + `Retry-After`, `OutboxPublisherLoop.start` spy 0회, `claimPendingOutbox` spy 0회, 취소 HTTP 200; 관찰자가 unlock → `SERVING` 뒤 같은 upgrade → 101, `start` 1회, 대기 중 쌓인 outbox 행이 첫 poll에서 발행되어 소켓에 도달. 재선출(A4) 중에도 `claimPendingOutbox` 호출 0회.
+- A18. §7.5 U11~U13(장벽 경합, dedupe, overflow, 정리, 게이트, heartbeat 대상) 통과; `markOutboxPublished` spy가 `hub.deliver` 해결 전에 호출되지 않음(순서 기록); `OutboxPublisherLoop.stop()`이 진행 중 `pollOnce` 완료를 기다림(`Deferred`로 `publish`를 막은 채 `stop()` → 해결 뒤에만 `stop` promise 해결, 그 사이 `claim` 추가 호출 0회).
 - A6. outbox: 트랜잭션에 append된 이벤트가 접속 중 `StreamSession`에 1 s 내 도달; 미접속 세션 이벤트는 `published_at` 기록 후 재접속 시 `afterSequence`로 회수.
 - A7. `verifyInvariants` 실패 주입 → `STARTUP_INVARIANT_OR_AUDIT_FAILURE` incident 행 존재, 종료 코드 1; 재시작 시 incident 때문에 `CANCEL_ONLY` 유지.
 - A8. production + `fake` → 시작 실패; production + `MARKET_DATA_ADAPTER` 누락 → 시작 실패(`ConfigError: MARKET_DATA_ADAPTER must be set explicitly in production`); development/test + 누락 → `fake`로 시작; 비-loopback URL 덮어쓰기 → 시작 실패. `check:deployment`가 compose의 `MARKET_DATA_ADAPTER: toss` 리터럴을 단언하고, 리터럴을 제거·보간·`fake`로 바꾼 임시 사본에서 실패함을 테스트로 증명.
 - A9. 기존 게이트 전부 통과: `pnpm check`, `typecheck`, `test`, `check:deployment`, `build`, e2e 18/18.
-- A10. `RecoveryCoordinator`가 시작 중 lease를 재획득해도 `leader_epochs.epoch`가 1만 증가(멱등 증명).
-- A11. §5.4의 lease 테스트 6건(first acquire, release, reacquire, no race, release audit failure, acquire audit failure) 통과; `acquire()`의 query 순서가 `begin` → `pg_advisory_lock` → upsert → `insert audit_events(LEADER_ACQUIRED)` → `commit`이고 promise가 `commit` 뒤 해결; `release()`의 query 순서가 `begin` → `update released_at` → `insert audit_events(LEADER_RELEASED)` → `commit` → `pg_advisory_unlock` → 연결 종료; `LeaseRegistry`가 감사 행을 직접 쓰지 않음(`audit_events` insert 호출 지점이 `LeaseAuditPort` 구현 하나뿐임을 정적 검사).
+- A10. `RecoveryCoordinator`가 시작 중 `acquireLease(market)` 포트를 호출해도 `LeaseRegistry.held(market)`가 보유 lease를 반환만 하여 `leader_epochs.epoch`가 시장별 1만 증가(멱등 증명); 번들 미보유 상태에서 호출하면 `LeaseNotHeldError`.
+- A11. §5.4의 lease 테스트 10건(first acquire, release, reacquire, no race, release audit failure, acquire audit failure, abort while waiting, abort/lock race, bundle partial release, bundle order and sharing) 통과; `acquire()`의 query 순서가 `select pg_try_advisory_lock`(×n, 마지막 `true`) → `begin` → upsert → `insert audit_events(LEADER_ACQUIRED)` → `commit`이고 promise가 `commit` 뒤 해결, `pg_advisory_lock`(블로킹형) 호출 0회(정적 검사: 소스에 `pg_advisory_lock(` 문자열 없음, `pg_try_advisory_lock(`·`pg_advisory_unlock(`만 존재); `release()`의 query 순서가 `begin` → `update released_at` → `insert audit_events(LEADER_RELEASED)` → `commit` → `pg_advisory_unlock` → 연결 종료; `LeaseRegistry`가 감사 행을 직접 쓰지 않음(`audit_events` insert 호출 지점이 `LeaseAuditPort` 구현 하나뿐임을 정적 검사).
 - A12. §7.5의 upgrade 브리지 테스트 U1~U10(U1b·U1c·U8b·U9b·U9c·U9d 포함)과 §7.6 H1~H3 통과; 프로덕션 `main.ts` 경로로 기동한 런타임 통합 테스트에서 `ws` 클라이언트가 쿠키 인증 + `?afterSequence=<n>` 쿼리로 101을 받고 outbox 이벤트를 수신하며(A6과 같은 픽스처), 접속 후 텍스트 프레임을 보내면 1003으로 닫힘.
 - A13. 웹 테스트 W1~W3(§7.5) 통과; `use-portfolio-stream.ts` diff가 `streamUrl` 시그니처·`connect()`의 URL 인자·`onopen`의 `send` 제거 외 변경을 포함하지 않음(리뷰 항목); e2e 18/18은 e2e `start-system.ts`가 브리지 + `StreamHeartbeatLoop`로 전환된 뒤 통과(A9와 동일 게이트).
 
-Codex 검증 항목: 상태 전이 순서 spy 테스트를 독립 재실행; §6.6 순서 위반 여지 코드 리뷰; upgrade 브리지가 Fastify 훅에 의존하지 않고 모든 검사를 직접 수행하는지·거부 경로가 socket을 반드시 destroy하는지·`handleUpgrade` 직전에 `closing`/`socket.destroyed`를 재검사하는지·`closeAll`이 상한 안에 `terminate`로 수렴하는지 코드 리뷰; 웹 훅이 open 뒤 프레임을 전혀 보내지 않고 서버가 모든 인바운드 프레임을 1003으로 닫는 양쪽 정합 확인; heartbeat 타이머가 프로세스에 정확히 하나이고 `ready.heartbeatIntervalMs`와 같은 상수를 쓰는지 확인; `acquire`/`release`가 감사를 lease 연결의 같은 트랜잭션에서 커밋하고 unlock이 `finally`에 있는지, `LeaseRegistry`에 두 번째 감사 경로가 없는지 확인; `cancelOnly` 불리언·스텁 엔진 삭제 확인; `main.ts`가 조립 이외 로직을 갖지 않음; 새 코드 mutation 테스트(기존 리뷰 관례).
+Codex 검증 항목: 상태 전이 순서 spy 테스트를 독립 재실행; §6.6 순서 위반 여지 코드 리뷰; upgrade 브리지가 Fastify 훅에 의존하지 않고 모든 검사를 직접 수행하는지·거부 경로가 socket을 반드시 destroy하는지·`handleUpgrade` 직전에 `closing`/`socket.destroyed`를 재검사하는지·`closeAll`이 상한 안에 `terminate`로 수렴하는지 코드 리뷰; 웹 훅이 open 뒤 프레임을 전혀 보내지 않고 서버가 모든 인바운드 프레임을 1003으로 닫는 양쪽 정합 확인; heartbeat 타이머가 프로세스에 정확히 하나이고 `ready.heartbeatIntervalMs`와 같은 상수를 쓰는지 확인; `acquire`/`release`가 감사를 lease 연결의 같은 트랜잭션에서 커밋하고 unlock이 `finally`에 있는지, `LeaseRegistry`에 두 번째 감사 경로가 없는지 확인; `LeaderLease.acquire`가 `pg_try_advisory_lock` 폴링(250 ms 고정)만 쓰고 `true` 직후 abort 재검사 → 즉시 unlock 경로가 있으며 그 경로에서 `begin`·upsert·감사·provider 호출이 없는지 코드 리뷰; `LeaseRegistry.acquireAll`이 KR→US 순차이고 시장별 공개 `acquire`가 없으며 부분 획득이 역순 해제되는지, 세대 promise가 공유·재사용되지 않는지 확인; lease 손실 콜백이 시장 로컬 재획득이 아니라 `reelect`로 가고 재선출이 두 시장 소켓·outbox `stop`·`abortPending`·`releaseAll`을 lease 재획득 앞에 두는지 확인; `RequestAdmissionGate.onRequest`가 동기이고 닫힘 검사와 증가 사이에 `await`가 없는지, `/health/*`·`/metrics`만 제외되는지, `close`가 admission latch 앞인지 확인; `OutboxPublisherLoop.start`가 번들 획득 뒤에만, `stop`이 `releaseAll` 앞에만 호출되는지 호출 지점 전수 확인; `StreamHub`의 `registerOpening`이 `source.latest`/`replay` 앞이고 `promoteToLive`가 CAS이며 모든 실패·gap·overflow·close 경로가 항목을 제거하는지, `markOutboxPublished`가 `deliver` 해결 뒤인지 확인; A15·A16에서 provider spy 0회 단언이 실제 `tokenProvider`·`connect`·REST 경로 전부를 덮는지 확인; `cancelOnly` 불리언·스텁 엔진 삭제 확인; `main.ts`가 조립 이외 로직을 갖지 않음; 새 코드 mutation 테스트(기존 리뷰 관례).
 
 ### 11.2 Stage B — OAuth + Toss REST/WS 어댑터, 가짜 서버
 
@@ -660,13 +735,13 @@ Codex 검증 항목: 가짜 서버 행동 표(§9.3)와 AsyncAPI 원문 대조; 
 
 범위: §10 하네스와 드릴, 릴리스 체크리스트·배포 가이드 증거 갱신, 런북 “Verification” 절에 드릴 명령 추가.
 
-수용 기준: §10.2의 1~9 전부. 추가로:
+수용 기준: §10.2의 1~11 전부(3b 전제조건 포함). 추가로:
 
-- C1. 드릴 3회 연속 통과(플래키 방지), 각 실행 `peakConcurrentConnections===2`, `evictions===0`.
+- C1. 드릴 3회 연속 통과(플래키 방지), 각 실행 `peakConcurrentConnections===2`, `evictions===0`, 10단계에서 “두 프로세스가 각 한 시장만 보유”인 관측 0회, 11단계 종료 ≤ 3 s.
 - C2. 드릴 산출 JSON(§10.3)이 생성되고 체크리스트가 그 요약을 인용.
 - C3. 릴리스 체크리스트의 미완 항목을 `[x]`로 바꾸는 커밋은 C의 마지막 커밋이며, Codex 검증 통과 후에만 작성.
 
-Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2의 REST 기록 0건과 단계 6의 토큰 타임스탬프 순서 재확인; 단계 5·8의 해제 증명이 현재 `leader_epochs` 행에 의존하지 않음(감사·로그 기반)과 `LEADER_RELEASED`→`LEADER_ACQUIRED` 순서가 §5.4의 lock 아래 커밋에서 나오는지(3회 반복에서 시장별 순서 역전 0건) 확인; 하네스가 프로덕션 진입점(`dist/main.js`)을 쓰는지 확인(테스트 전용 진입점 금지).
+Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2의 REST 기록 0건·outbox claim 0건·WS upgrade 503과 단계 6의 토큰 타임스탬프 순서 재확인; 단계 4에서 P1 비즈니스 요청 503과 `UnitOfWork` 미시작, 취소가 P2에서 200인지 재확인; 단계 10에서 부분 lease 상태 관측 0회와 epoch 단언이 “이전보다 큼”만인지, 단계 11에서 P3 provider 호출 증가 0인지 재확인; 단계 5·8의 해제 증명이 현재 `leader_epochs` 행에 의존하지 않음(감사·로그 기반)과 `LEADER_RELEASED`→`LEADER_ACQUIRED` 순서가 §5.4의 lock 아래 커밋에서 나오는지(3회 반복에서 시장별 순서 역전 0건) 확인; 하네스가 프로덕션 진입점(`dist/main.js`)을 쓰는지 확인(테스트 전용 진입점 금지).
 
 ### 11.4 단계 간 규칙
 
@@ -702,8 +777,17 @@ Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2
 | `outbox_published_total` | counter | 없음 |
 | `outbox_drain_remaining` | gauge | 없음 |
 | `stream_sessions_open` | gauge | 없음 (`StreamHub.size()`, heartbeat마다 갱신) |
-| `shutdown_drain_seconds` | gauge | `phase` = `inflight\|outbox\|sockets\|leases` |
+| `shutdown_drain_seconds` | gauge | `phase` = `http\|inflight\|outbox\|sockets\|leases` |
 | `shutdown_forced_total` | counter | 없음 |
+| `leader_reelection_total` | counter | `market`(잃은 시장) |
+| `leader_lease_poll_total` | counter | `market` (`pg_try_advisory_lock` 호출 수; 대기 중이면 4/s로 증가) |
+| `http_admission_rejected_total` | counter | 없음 (`RequestAdmissionGate` 503 수) |
+| `http_admission_inflight` | gauge | 없음 |
+| `http_admission_drain_remaining` | gauge | 없음 |
+| `stream_upgrade_rejected_total` | counter | `reason` = `not_ready\|closing\|auth\|rate_limited\|bad_request\|forbidden` |
+| `stream_replay_queue_depth` | gauge | 없음 (`OPENING` 항목 큐 길이 합, heartbeat마다 갱신) |
+| `stream_replay_overflow_total` | counter | 없음 |
+| `outbox_claims_total` | counter | 없음 (`claimPendingOutbox` 호출 수 — 번들 미보유 프로세스에서 0이어야 한다) |
 
 ### 12.3 알림 추가 (`infra/monitoring/prometheus-alerts.yaml`)
 
@@ -711,24 +795,35 @@ Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2
 - `LeaderLeaseWaitLong`: `leader_lease_wait_seconds > 60` → 런북 `redis-or-leader-loss.md` (“이전 프로세스가 종료되지 않음” 절 추가).
 - `ProviderAuthFailed`: `increase(provider_token_refresh_total{result="auth_failed"}[10m]) > 0` → 런북 `market-data-degraded.md`.
 - `ShutdownForced`: `increase(shutdown_forced_total[1h]) > 0` → 런북 `postgres-or-outbox-lag.md`.
+- `LeaderReelection`: `increase(leader_reelection_total[10m]) > 0` → 런북 `redis-or-leader-loss.md`(“한 시장 lease 손실은 전역 재선출” 절 추가: 두 시장이 함께 `CANCEL_ONLY`가 되는 것이 정상이며, `runtime_state{state="RE_ELECTING"}`이 60 s 이상 1이면 `pg_locks`에서 다른 프로세스의 lock 잔존 확인).
+- `LeaderBundleSplit`: `count(leader_lease_held == 1) by (instance)`가 두 인스턴스에서 동시에 1인 상태 2m → 즉시, 런북 `redis-or-leader-loss.md`(설계상 발생 불가 — 발생하면 §5.4 순차 규칙 위반이므로 두 프로세스 중 늦게 시작한 쪽을 재시작).
+- `HttpAdmissionRejectedOutsideDrain`: `increase(http_admission_rejected_total[5m]) > 0 and runtime_state{state="DRAINING"} == 0` → 런북 `postgres-or-outbox-lag.md`(게이트가 `DRAINING` 밖에서 닫혀 있으면 버그).
+- `OutboxClaimsWithoutBundle`: `increase(outbox_claims_total[5m]) > 0 and min(leader_lease_held) == 0` → 즉시, 런북 `redis-or-leader-loss.md`(단일 발행자 규칙 위반).
+- `StreamReplayOverflow`: `increase(stream_replay_overflow_total[10m]) > 5` → 런북 `postgres-or-outbox-lag.md`(replay가 200건 이상 느린 것은 outbox 지연 또는 DB 지연 신호).
 
 ### 12.4 로그 이벤트
 
-구조화 로그 키 `event`: `runtime.state`, `lease.acquired`, `lease.released`(`auditPersisted` 포함), `lease.release_mark_failed`, `lease.lost`, `provider.connect`, `provider.close`, `provider.token.refresh`, `recovery.start`, `recovery.complete`, `outbox.drain`, `stream.upgrade_failed`, `stream.inbound_rejected`, `shutdown.phase`. 공통 필드 `leaderId`, `market`, `epoch`, `requestId`(해당 시). 비밀 필드 없음.
+구조화 로그 키 `event`: `runtime.state`, `lease.waiting`(폴링 시작 시 1회 + 매 10 s, `{market, waitedMs, polls}`), `lease.acquired`, `lease.acquire_aborted`(`{market, lockedThenUnlocked: boolean}` — abort/lock 경합에서 `true`), `lease.partial_released`, `lease.released`(`auditPersisted` 포함), `lease.release_mark_failed`, `lease.lost`, `runtime.reelect`(`{lostMarket, survivingMarket}`), `http.admission_rejected`(`{requestId, path}`), `provider.connect`, `provider.close`, `provider.token.refresh`, `recovery.start`, `recovery.complete`, `outbox.poll`(`{claimed, published, failed}` — 번들 보유 프로세스에만 존재), `outbox.drain`, `stream.upgrade_rejected`(`{reason}`; `not_ready` 포함), `stream.upgrade_failed`, `stream.inbound_rejected`, `stream.replay_overflow`, `shutdown.phase`. 공통 필드 `leaderId`, `market`, `epoch`, `requestId`(해당 시). 비밀 필드 없음.
 
 ## 13. 마이그레이션과 롤백
 
 - 스키마: `003_leader_release.sql` — `alter table leader_epochs add column released_at timestamptz;` 단 하나. nullable additive이며 이전 이미지(97921b7)는 이 컬럼을 읽지도 쓰지도 않으므로 호환된다. 새 이미지의 `acquire`는 upsert에서 `released_at = null`을 쓰고 `release`는 unlock 전에 `now()`와 `LEADER_RELEASED` 감사를 같은 트랜잭션으로 쓴다(§5.4). `audit_events` 스키마 변경은 없다(`LEADER_ACQUIRED`/`LEADER_RELEASED`는 `event_type` 값일 뿐이다). 이전 이미지가 획득한 행은 `released_at`이 null인 채 남지만, 새 이미지의 다음 `acquire`가 어차피 null로 덮어쓰므로 데이터 정리가 필요 없다. 기존 규칙대로 배포 전에 one-off job으로 실행한다.
 - 설정: `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 secret store에 추가한 뒤 배포한다. `MARKET_DATA_ADAPTER=toss`는 compose 리터럴이므로 운영자가 따로 넣을 값이 없고, 빠뜨릴 수도 없다. 비밀 누락 시 새 이미지는 §8.1에 따라 EXIT 1이며 readiness가 켜지지 않으므로 이전 프로세스를 먼저 종료하지 않았다면 영향이 없다(stop-then-start이므로 실제로는 이전 프로세스가 이미 종료된 상태 → 취소만 가능한 공백이 생기며, 이는 배포 전 `docker compose config`/secret 존재 검증으로 예방).
-- 배포 절차: 배포 가이드의 stop-then-start를 그대로 따른다. 이 문서가 그 절차를 처음으로 코드로 보증한다.
+- 배포 절차: 배포 가이드의 stop-then-start를 따르되 **전제조건 한 줄을 추가**한다: “새 프로세스(P2)가 `/health/ready` 200이고 `/api/v1/health/trading`의 `reasons`에 `ACQUIRING_LEASES`가 보이기 전에는 이전 프로세스(P1)에 `SIGTERM`을 보내지 않는다.” P1은 `DRAINING` 2단계에서 HTTP 인그레스를 닫아 신규 비즈니스 요청(취소 포함)을 503으로 거부하므로(§6.6), 그 사이 취소를 받는 프로세스는 P2다(§6.3, §10.1). P2가 `ACQUIRING_LEASES`에 있는 동안 provider 호출·outbox claim·사용자 WS는 0이므로 P2를 먼저 띄우는 것은 “세 번째 연결 금지”와 충돌하지 않는다. 이 문서가 그 절차를 처음으로 코드로 보증한다.
+- P1 `SIGTERM` 뒤 P2가 `SERVING`이 되기까지의 공백(P1 drain ≤ `SHUTDOWN_DRAIN_DEADLINE_MS` + P2 폴링 ≤ 250 ms + recovery)에는 사용자 WS가 어느 프로세스에도 붙지 못하고(503 → 훅 backoff 재접속) outbox 이벤트는 `published_at is null`로 쌓인다. P2 첫 poll이 발행하고 재접속 replay가 따라잡는다. 이 공백은 `OutboxLagHigh` 임계(30 s) 안이어야 하며, 드릴 §10.2-6이 15 s 안을 단언한다.
 - 롤백: 이전 이미지로 같은 stop-then-start. 이전 이미지는 provider를 조립하지 않으므로 `CANCEL_ONLY`로 시작한다(fail-closed, 알려진 동작). 이전 이미지는 `MARKET_DATA_ADAPTER`를 `'fake'`인지만 비교하므로 compose의 `toss` 리터럴과 `TOSS_CLIENT_*`는 무시된다. `released_at` 컬럼도 무시된다. Redis 데이터는 rate-limit뿐이므로 롤백에 영향이 없다.
-- 롤백 트리거는 배포 가이드 기존 규칙 + “새 프로세스가 `ACQUIRING_LEASES`에서 60 s 이상 머무르고 이전 프로세스가 이미 종료됨”(lock 잔존 의심 → `pg_locks` 확인 후 `pg_terminate_backend`).
+- 롤백 트리거는 배포 가이드 기존 규칙 + “새 프로세스가 `ACQUIRING_LEASES`에서 60 s 이상 머무르고 이전 프로세스가 이미 종료됨”(lock 잔존 의심 → `pg_locks` 확인 후 `pg_terminate_backend`; 새 프로세스는 다음 250 ms 폴링에서 획득한다) + “`RE_ELECTING`이 60 s 이상 지속”(`LeaderReelection` 알림) + “`DRAINING`이 아닌데 `http_admission_rejected_total`이 증가”(`HttpAdmissionRejectedOutsideDrain`). 새 프로세스를 롤백하려면 `SIGTERM` 한 번으로 충분하다 — lease 대기 중이어도 §6.6대로 ≤ 2 s 안에 종료 코드 0으로 끝나며 provider 호출을 남기지 않는다(`SIGKILL` 불필요).
 
 ## 14. 미해결 없음 — 결정 사항 요약
 
 - Redis는 lease·fan-out에 쓰지 않는다. 런북·라벨의 드리프트는 A가 고친다.
 - 시장당 WS 1개, 프로세스당 2개, 계정 한도 2개. 인계는 stop-then-start만.
-- 새 프로세스는 lease를 무기한 대기하며 그동안 `CANCEL_ONLY`로 서비스한다. 토큰 발급은 lease 획득 뒤다.
+- 새 프로세스는 lease를 논리적으로 무기한 대기하며 그동안 `CANCEL_ONLY`로 서비스한다. 대기는 `pg_try_advisory_lock` 250 ms 폴링 + `AbortSignal`이며 `pg_advisory_lock` 블로킹은 쓰지 않는다. `SIGTERM`은 대기 중에도 ≤ 2 s 안에 종료 코드 0으로 끝나고 provider 호출 0건을 남긴다. 토큰 발급은 KR+US 번들 획득 뒤다.
+- lease는 KR→US 순차 번들(`LeaseRegistry.acquireAll`)로만 획득한다. 시장별 공개 획득 API는 없다. 부분 획득은 abort/실패 시 역순 해제한다. `pg_try_advisory_lock` 성공 직후 abort면 즉시 unlock하고 upsert·감사·provider 호출을 하지 않는다.
+- 어느 한 시장의 lease 손실은 전역 재선출(`RE_ELECTING`)이다: 스트림 게이트·admission·matching 닫기 → outbox claim 중단 → 두 시장 provider 루프·소켓 abort/종료 → 진행 중 획득 세대 abort → 살아 있는 lease 해제 → 번들 재획득 → 두 시장 복구. 시장 로컬 lease 재획득은 없다. provider 전송 장애는 시장 로컬로 남는다. 실패 경로의 epoch 간격은 1을 넘을 수 있고 불변식은 “이전보다 큼”이다.
+- 두 lease를 모두 쥐고 `SERVING`인 프로세스 하나만 사용자 WS upgrade를 받고 `OutboxPublisherLoop`를 돌린다. 그 외 상태의 upgrade는 503 `NOT_READY` + `Retry-After`. 취소 HTTP는 `ACQUIRING_LEASES`에서도 가능하다. 발행기는 번들 획득 직후 시작하고 lease 해제·재선출 전에 claim을 멈춘다.
+- `StreamHub`는 세션을 durable `latest`/`replay` 읽기 **앞에** `OPENING`으로 등록하고, replay 중 도착한 live 이벤트를 상한 200의 큐에 받아 `eventId`/`accountSequence`로 dedupe한 뒤 순서대로 flush하고 CAS로 `LIVE`가 된다. 발행기는 `OPENING` 큐 수락 뒤에만 `published`를 찍는다. 실패·gap·overflow·close는 모두 항목을 제거하고, overflow는 `resync-required` 후 4010으로 닫는다.
+- 종료는 HTTP 인그레스를 먼저 울타리로 막는다: `DRAINING`/readiness 503 → 스트림 게이트 + `RequestAdmissionGate` 닫기(`onRequest`에서 닫힘 검사와 in-flight 증가가 동기 원자, `/health/*`·`/metrics` 제외) → 허용된 요청 drain → `UnitOfWork` drain → outbox drain·stop → 소켓 → lease. 닫힌 뒤 요청은 503이고 `UnitOfWork`를 시작할 수 없다. 인계 중 취소 가용성은 이미 준비된 P2가 제공하며, 배포 전제조건은 “P2가 `ACQUIRING_LEASES`로 준비될 때까지 P1에 `SIGTERM`을 보내지 않는다”이다.
 - provider 실패는 프로세스를 죽이지 않는다. 설정·DB·불변식 실패만 종료한다.
 - 모든 자동 검증은 loopback 가짜 서버(또는 인메모리 `fake` 번들)로만 수행한다. 예외 없음.
 - production의 `MARKET_DATA_ADAPTER`는 compose 리터럴 `toss`로 명시하며 암묵적 기본값이 없다. development/test 기본값만 `fake`.
@@ -749,4 +844,6 @@ Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2
 - lease 감사 점검: §5.4(같은 트랜잭션, unlock 전 커밋, `finally` unlock, `LeaseRegistry` 무감사)·§6.6-6·§10.2-5·6·8·A11·§11.3 Codex 항목·§13·§14가 같은 순서 “P1 `LEADER_RELEASED` 커밋 → unlock → P2 lock → P2 `LEADER_ACQUIRED` 커밋 → P2 토큰”을 말하며, 순서 단언의 근거가 타이밍이 아니라 lock 직렬화임을 §5.4와 §10.2-5 양쪽에 적었다.
 - 계약 점검: 연결 2개·topic 100·선언 5/s·PING 60 s·180 s idle·`server-shutdown`·토큰 단일 유효성은 모두 pinned 계약 원문에서 확인한 값이다.
 - 정합 점검(Codex 리뷰 반영): §5.4(unlock 전 `released_at` 기록, acquire 시 null 리셋)와 §10.2-5·6(해제 증명은 감사·로그, 현재 행은 P2·null 단언)과 §13(컬럼 의미)이 일치한다. §7.5(브리지가 직접 검사)와 §1.1-5·§4.1·§6.6-5·A12가 같은 컴포넌트를 가리킨다. `ws`/`@types/ws` 버전은 §5.7·§14 모두 8.18.1이다. `MARKET_DATA_ADAPTER` 규칙은 §5.1·§5.6·§8.1·A8·§11.4·§13에서 같은 문장(production 명시 필수, compose 리터럴 `toss`, dev/test 기본 `fake`, production `fake` 금지)을 말한다. 자동 테스트는 여전히 fake 번들·가짜 서버만 쓴다(§9.5).
-- 잔여 위험(허용): lease 손실 감지 지연 중 일시적 3번째 연결(§6.5), deadline 초과 시 outbox 잔여 행의 at-least-once 재발행(§6.6-4).
+- 동시성 점검(Codex 3차 리뷰 반영, 네 블로커): (1) **취소 가능한 번들 획득** — §3.6·§5.4(폴링 루프, abort 재검사, 부분 역순 해제, 테스트 7~10)·§6.1(`ACQUIRING_LEASES`에서 `SIGTERM`)·§6.6-6(`abortPending`)·A11·A15·§10.2-11·§13(롤백은 `SIGTERM` 한 번)·§14가 같은 절차를 말하고, 세션 블로킹 lock 함수와 두 시장 동시 획득은 §5.4·A11의 금지문 외에 어디에도 남지 않았다. (2) **부분 lease 교착 방지** — §3.11·§5.4(순차 KR→US, 공개 `acquire(market)` 없음)·§6.1(`RE_ELECTING`)·§6.5(7단계 전역 재선출, P1-US/KR-lost + P2 동시 시나리오, epoch 간격 > 1 허용)·§7.2(`held(market)`)·§8.1·§8.3(프로세스 단위 supervisor)·A4·A10·A16·§10.2-10·§12.3(`LeaderBundleSplit`)이 일치하며, “시장 로컬 재획득”은 §3.11과 §6.5의 부정문으로만 등장한다. (3) **단일 소유자와 replay→live** — §3.12·§6.1(`SERVING`만 게이트 열림, 발행기는 번들 뒤 시작)·§6.3(503 `NOT_READY`, claim 0건)·§6.5-1·2·§7.4(`published_at` 의미, `deliver` 세 경로)·§7.5(0b·9단계 게이트, `onOpen` 2~5단계, `StreamHub` 상태 규칙, U11~U13)·A17·A18·§10.2-3·4·6·§12.2·§12.3(`OutboxClaimsWithoutBundle`)이 같은 규칙을 말한다. (4) **HTTP 인그레스 울타리** — §3.13·§4.1·§6.6(2단계 순서 (a)~(d), 3단계 두 카운터, `RequestAdmissionGate` 규격과 G1~G6)·§8.1·A5·A14·§10.1 전제조건·§10.2-3b·4·§12.2·§12.3(`HttpAdmissionRejectedOutsideDrain`)·§13이 일치하며, “드레인 중 P1이 취소를 받는다”는 문장은 남지 않았다(취소는 P2).
+- 보존 확인: 자동 provider 테스트는 여전히 fake 번들·loopback 가짜 서버만 쓴다(§9.5, A16의 연결 카운터도 인메모리 fake 번들). `ws`/`@types/ws` 8.18.1 유지(§5.7). production `MARKET_DATA_ADAPTER` 명시 규칙 유지(§5.1). 이전 리뷰의 스트림(쿼리 전용 프로토콜, heartbeat 단일 타이머, closeAll 상한)·lease 감사(같은 트랜잭션, unlock 전 커밋, `finally` unlock) 수정은 그대로이며, 새 규칙은 그 위에 추가되었다(예: `acquire`의 lock 획득 단계만 `pg_try_advisory_lock` 폴링으로 바뀌고 트랜잭션 순서는 동일).
+- 잔여 위험(허용): lease 손실 감지 지연 중 일시적 3번째 연결(§6.5), deadline 초과 시 outbox 잔여 행의 at-least-once 재발행(§6.6-4), 인계 공백 동안 사용자 WS 503과 outbox 지연(§13, 15 s 안, `OutboxLagHigh` 30 s 임계 아래), 폴링 250 ms로 인한 인계 지연 최대 한 주기.
