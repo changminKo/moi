@@ -176,15 +176,17 @@ describe('paper API acceptance vertical slice', () => {
         createdAt: now.toISOString(),
       },
     ];
-    const stream = await StreamSession.open({
-      sessionId: 'session',
-      source: {
-        latest: async () => '2',
-        oldest: async () => '1',
-        replay: async () => events,
-      },
-      socket: { send: (value) => messages.push(value), close: () => {} },
-    });
+    const stream = (
+      await StreamSession.open({
+        sessionId: 'session',
+        source: {
+          latest: async () => '2',
+          oldest: async () => '1',
+          replay: async () => events,
+        },
+        socket: { send: (value) => messages.push(value), close: () => {} },
+      })
+    ).session;
     const event = events[0];
     if (!event) throw new Error('acceptance event missing');
     await stream.deliver(event);

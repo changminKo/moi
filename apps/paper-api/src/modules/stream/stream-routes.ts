@@ -90,6 +90,8 @@ export async function registerStreamRoutes(
         if (dependencies.quoteSymbols !== undefined)
           Object.assign(options, { quoteSymbols: dependencies.quoteSymbols });
         await StreamSession.open(options);
+        // The 426 fallback route keeps this branch only for unit-test compatibility;
+        // production upgrades go through stream-upgrade.ts.
       });
       return reply.hijack();
     }

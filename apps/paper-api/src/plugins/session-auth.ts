@@ -10,17 +10,23 @@ declare module 'fastify' {
     session?: SessionPrincipal;
   }
 }
-export function cookieValue(
-  request: FastifyRequest,
+/** Header-level cookie parser shared by Fastify routes and the raw upgrade bridge. */
+export function cookieValueFromHeader(
+  header: string | undefined,
   name: string,
 ): string | undefined {
-  const raw = request.headers.cookie;
-  if (!raw) return undefined;
-  for (const pair of raw.split(';')) {
+  if (!header) return undefined;
+  for (const pair of header.split(';')) {
     const [key, ...value] = pair.trim().split('=');
     if (key === name) return decodeURIComponent(value.join('='));
   }
   return undefined;
+}
+export function cookieValue(
+  request: FastifyRequest,
+  name: string,
+): string | undefined {
+  return cookieValueFromHeader(request.headers.cookie, name);
 }
 export function registerSessionAuth(
   app: FastifyInstance,

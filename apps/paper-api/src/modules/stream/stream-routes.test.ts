@@ -34,11 +34,13 @@ describe('stream session', () => {
       replay: async () => events,
     };
     const first = socket();
-    const stream = await StreamSession.open({
-      sessionId: 's1',
-      source,
-      socket: first,
-    });
+    const stream = (
+      await StreamSession.open({
+        sessionId: 's1',
+        source,
+        socket: first,
+      })
+    ).session;
     expect(first.messages).toEqual([
       { type: 'ready', accountSequence: '2', heartbeatIntervalMs: 30_000 },
       ...events.map(({ eventId, accountSequence, eventType, payload }) => ({
@@ -93,12 +95,14 @@ describe('stream session', () => {
     const symbols = new Set(
       Array.from({ length: 6 }, (_, i) => `KR:${quote.symbol}-${i}`),
     );
-    const session = await StreamSession.open({
-      sessionId: 's1',
-      source,
-      socket: socket(),
-      quoteSymbols: symbols,
-    });
+    const session = (
+      await StreamSession.open({
+        sessionId: 's1',
+        source,
+        socket: socket(),
+        quoteSymbols: symbols,
+      })
+    ).session;
     for (let i = 0; i < 5; i += 1)
       await session.subscribeQuote(quote.market, `${quote.symbol}-${i}`);
     await expect(
@@ -112,16 +116,18 @@ describe('stream session', () => {
       value: 100,
       configurable: true,
     });
-    const session = await StreamSession.open({
-      sessionId: 's1',
-      source: {
-        latest: async () => '0',
-        oldest: async () => '1',
-        replay: async () => [],
-      },
-      socket: s,
-      maxQueue: 1,
-    });
+    const session = (
+      await StreamSession.open({
+        sessionId: 's1',
+        source: {
+          latest: async () => '0',
+          oldest: async () => '1',
+          replay: async () => [],
+        },
+        socket: s,
+        maxQueue: 1,
+      })
+    ).session;
     const event = {
       id: 'x',
       eventId: 'x',

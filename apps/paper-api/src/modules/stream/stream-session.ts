@@ -42,7 +42,17 @@ export interface StreamSessionOptions {
   readonly maxQueue?: number;
 }
 
-const HEARTBEAT_MS = 30_000;
+/** Advertised in `ready` and used by the single process-wide StreamHeartbeatLoop. */
+export const STREAM_HEARTBEAT_MS = 30_000;
+/** Same bound as the per-session `subscribeQuote` limit. */
+export const STREAM_MAX_QUOTE_SUBSCRIPTIONS = 5;
+
+export interface StreamOpenResult {
+  readonly session: StreamSession;
+  /** accountSequence of the last replayed event, or `ready.accountSequence` when replay was empty. */
+  readonly replayedUpTo: string;
+  readonly replayedEventIds: ReadonlySet<string>;
+}
 
 function message(value: unknown): string {
   return JSON.stringify(value);
@@ -66,7 +76,7 @@ export class StreamSession {
     this.#maxQueue = options.maxQueue ?? 100;
   }
 
-  static async open(options: StreamSessionOptions): Promise<StreamSession> {
+  static async open(options: StreamSessionOptions): Promise<StreamOpenResult> {
     const stream = new StreamSession(options);
     const after = options.afterSequence;
     const oldest = await options.source.oldest(options.sessionId);
@@ -79,14 +89,25 @@ export class StreamSession {
       stream.#socket.close(4009, 'OUTBOX_GAP');
       throw new Error('OUTBOX_GAP');
     }
+    const latest = await options.source.latest(options.sessionId);
     stream.#send({
       type: 'ready',
-      accountSequence: await options.source.latest(options.sessionId),
-      heartbeatIntervalMs: HEARTBEAT_MS,
+      accountSequence: latest,
+      heartbeatIntervalMs: STREAM_HEARTBEAT_MS,
     });
-    for (const event of await options.source.replay(options.sessionId, after))
+    let replayedUpTo = latest;
+    const replayedEventIds = new Set<string>();
+    for (const event of await options.source.replay(options.sessionId, after)) {
       stream.#send(stream.#event(event));
-    return stream;
+      replayedUpTo = event.accountSequence;
+      replayedEventIds.add(event.eventId);
+    }
+    return { session: stream, replayedUpTo, replayedEventIds };
+  }
+
+  /** Not queued behind backpressure: heartbeats carry no ordering guarantee. */
+  heartbeat(serverTime: string): void {
+    this.#send({ type: 'heartbeat', serverTime });
   }
 
   async deliver(event: DurableAccountEvent): Promise<void> {
@@ -107,7 +128,10 @@ export class StreamSession {
   async subscribeQuote(market: Market, symbol: string): Promise<void> {
     const key = `${market}:${symbol}`;
     if (!this.#symbols.has(key)) throw new Error('symbol is not tradable');
-    if (!this.#subscriptions.has(key) && this.#subscriptions.size >= 5)
+    if (
+      !this.#subscriptions.has(key) &&
+      this.#subscriptions.size >= STREAM_MAX_QUOTE_SUBSCRIPTIONS
+    )
       throw new Error('quote subscription limit');
     this.#subscriptions.add(key);
   }
