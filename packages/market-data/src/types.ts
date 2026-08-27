@@ -139,20 +139,38 @@ export type MarketDataErrorCode =
   | 'SUBSCRIPTION_REJECTED'
   | 'PONG_FAILED'
   | 'INVALID_DECIMAL'
-  | 'UNSUPPORTED_DATA';
+  | 'UNSUPPORTED_DATA'
+  | 'AUTH_FAILED'
+  | 'AUTH_THROTTLED'
+  | 'RATE_LIMITED';
 
 /**
  * Transport-level failures. They are deliberately *not* `DomainError`s: a feed
  * fault is not a trading decision, and only the engine may translate one into
  * a `MARKET_DATA_DEGRADED` domain outcome or a safety incident.
  */
+export interface MarketDataErrorDetails {
+  /** Provider HTTP status when the failure came from a handshake or REST call. */
+  readonly statusCode?: number;
+  /** Parsed `Retry-After` in milliseconds for RATE_LIMITED. */
+  readonly retryAfterMs?: number;
+}
+
 export class MarketDataError extends Error {
   readonly code: MarketDataErrorCode;
+  readonly statusCode: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
-  constructor(code: MarketDataErrorCode, message: string) {
+  constructor(
+    code: MarketDataErrorCode,
+    message: string,
+    details: MarketDataErrorDetails = {},
+  ) {
     super(message);
     this.name = 'MarketDataError';
     this.code = code;
+    this.statusCode = details.statusCode;
+    this.retryAfterMs = details.retryAfterMs;
   }
 }
 

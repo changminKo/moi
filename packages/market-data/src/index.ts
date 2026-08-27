@@ -27,6 +27,14 @@ export type {
 } from './ports.js';
 export { TOSS_CONTRACT_SERVERS } from './toss/contract-servers.js';
 export {
+  OAuthTokenProvider,
+  type OAuthTokenProviderOptions,
+  parseRetryAfterMs,
+  TOKEN_MIN_REISSUE_INTERVAL_MS,
+  TOKEN_REFRESH_LEAD_MS,
+  type TokenRefreshResult,
+} from './toss/oauth-token-provider.js';
+export {
   buildSubscriptionPlan,
   type SubscriptionPlan,
   TOSS_SYMBOL_WHITELIST,
@@ -45,6 +53,7 @@ export {
   type MarketDataChannel,
   MarketDataError,
   type MarketDataErrorCode,
+  type MarketDataErrorDetails,
   type MarketEvent,
   type MarketOrderBook,
   type MarketOrderBookEvent,
