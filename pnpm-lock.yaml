@@ -71,6 +71,9 @@ importers:
       '@fastify/helmet':
         specifier: 13.1.1
         version: 13.1.1
+      '@skipjack/market-data':
+        specifier: workspace:*
+        version: link:../../packages/market-data
       '@skipjack/trading-core':
         specifier: workspace:*
         version: link:../../packages/trading-core

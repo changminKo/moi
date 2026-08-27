@@ -93,7 +93,8 @@ export class MarketHealthMachine {
     return resolved;
   }
   private async degrade(causeCode: string): Promise<void> {
-    if (this.#state === 'HEALTHY') this.#state = 'DEGRADED';
+    // A failed recovery attempt drops RECOVERING back to DEGRADED (§6.2).
+    if (this.#state !== 'DEGRADED') this.#state = 'DEGRADED';
     if (!this.#incident)
       this.#incident = await this.#incidents.activate({
         market: this.market,

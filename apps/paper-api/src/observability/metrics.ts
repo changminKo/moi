@@ -2,8 +2,8 @@ type Labels = Record<string, string>;
 const allowed: Record<string, readonly string[]> = {
   market_data_health: ['market', 'state'],
   feed_ping_latency_seconds: [],
-  feed_reconnect_total: [],
-  recovery_duration_seconds: [],
+  feed_reconnect_total: ['market'],
+  recovery_duration_seconds: ['market'],
   rest_snapshot_request_total: ['market', 'result'],
   order_event_total: ['market', 'event_type', 'status'],
   transaction_duration_seconds: ['tx_type'],

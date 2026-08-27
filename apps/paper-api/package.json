@@ -11,6 +11,7 @@
   "dependencies": {
     "@fastify/cors": "11.3.0",
     "@fastify/helmet": "13.1.1",
+    "@skipjack/market-data": "workspace:*",
     "@skipjack/trading-core": "workspace:*",
     "fastify": "5.12.1",
     "kysely": "0.29.5",
