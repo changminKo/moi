@@ -93,6 +93,7 @@ export class StreamHub {
     handle: StreamHandle,
     opened: StreamOpenResult,
   ): Promise<boolean> {
+    if (handle.sessionId !== sessionId) return false;
     const flushed = new Set<string>();
     const replayedUpTo = BigInt(opened.replayedUpTo);
     let rounds = 0;
@@ -126,7 +127,6 @@ export class StreamHub {
         return false;
       }
     }
-    void sessionId;
   }
 
   publishQuote(event: QuoteEvent): void {
