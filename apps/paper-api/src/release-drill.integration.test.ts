@@ -476,7 +476,11 @@ describe('public release drill', () => {
     let loseLeader: (() => void) | undefined;
     const lease = await LeaderLease.acquire('US', {
       clientFactory: async () => ({
-        query: async () => ({ rows: [{ epoch: '7', fencing_token: '11' }] }),
+        query: async (text: string) => ({
+          rows: /pg_try_advisory_lock/.test(text)
+            ? [{ pg_try_advisory_lock: true }]
+            : [{ epoch: '7', fencing_token: '11' }],
+        }),
         on: (event, listener) => {
           if (event === 'end') loseLeader = () => listener();
         },

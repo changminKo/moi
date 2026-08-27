@@ -418,8 +418,10 @@ describe('ledger migration', () => {
         expect(results.map((result) => result.migrationName)).toEqual([
           '001_ledger',
           '002_audit_partitions',
+          '003_leader_release',
         ]);
         expect(results.map((result) => result.status)).toEqual([
+          'Success',
           'Success',
           'Success',
         ]);
@@ -450,6 +452,7 @@ describe('ledger migration', () => {
         expect(applied.rows.map((row) => row.name)).toEqual([
           '001_ledger',
           '002_audit_partitions',
+          '003_leader_release',
         ]);
       } finally {
         await fresh.destroy();
@@ -2030,4 +2033,16 @@ describe('pg_temp shadowing', () => {
     },
     TEST_TIMEOUT_MS,
   );
+});
+
+describe('003_leader_release', () => {
+  it('adds a nullable released_at column to leader_epochs', async () => {
+    const column = await sql<{ is_nullable: string; data_type: string }>`
+      select is_nullable, data_type from information_schema.columns
+      where table_name = 'leader_epochs' and column_name = 'released_at'
+    `.execute(db);
+    expect(column.rows).toEqual([
+      { is_nullable: 'YES', data_type: 'timestamp with time zone' },
+    ]);
+  });
 });

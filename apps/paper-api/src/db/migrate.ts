@@ -9,7 +9,11 @@ import {
 } from 'kysely/migration';
 import type { Database, LedgerDatabase } from './database.js';
 
-const MIGRATION_NAMES = ['001_ledger', '002_audit_partitions'] as const;
+const MIGRATION_NAMES = [
+  '001_ledger',
+  '002_audit_partitions',
+  '003_leader_release',
+] as const;
 
 const MIGRATIONS_DIRECTORY = join(
   dirname(fileURLToPath(import.meta.url)),
