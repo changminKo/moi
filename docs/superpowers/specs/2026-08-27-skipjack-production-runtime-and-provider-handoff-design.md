@@ -1,0 +1,618 @@
+# Skipjack Production Market Runtime and Provider Handoff Design
+
+- 문서 상태: 승인된 아키텍처를 구체화한 설계 문서 (Task 10 A/B/C, design-only)
+- 기준 커밋: `97921b7` (`docs: record public mvp acceptance evidence`)
+- 선행 문서: [`2026-08-21-skipjack-paper-trading-architecture-design.md`](2026-08-21-skipjack-paper-trading-architecture-design.md), [`docs/operations/deployment.md`](../../operations/deployment.md), [`docs/operations/release-checklist.md`](../../operations/release-checklist.md)
+- 구현 책임: Claude (implementation owner). 각 단계는 Codex가 독립 검증한다.
+- 이 문서는 코드가 아니라 계약이다. 이 문서와 코드가 다르면 코드가 틀린 것이며, 문서를 바꾸려면 이 문서를 먼저 고친다.
+
+## 1. 배경과 문제
+
+릴리스 체크리스트의 유일한 미완 항목은 다음이다.
+
+> Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` and never creates a third provider connection.
+
+`apps/paper-api/src/main.ts`의 현재 `startProductionServer()`는 다음을 조립하지 않는다.
+
+| 이미 존재하는 부품 | 위치 | 현재 `main.ts`에서의 상태 |
+|---|---|---|
+| `StartupCoordinator` | `src/lifecycle/startup-coordinator.ts` | 사용 안 함 |
+| `ShutdownCoordinator` | `src/lifecycle/shutdown-coordinator.ts` | 사용 안 함 (`drain`이 `database.destroy()`만 호출) |
+| `LeaderLease` (PostgreSQL advisory lock + `leader_epochs`) | `src/market-data/leader-lease.ts` | 사용 안 함 |
+| `RecoveryCoordinator` | `src/market-data/recovery-coordinator.ts` | 사용 안 함 |
+| `MarketHealthMachine` | `src/market-data/health-machine.ts` | 사용 안 함 |
+| `MarketStateStore` | `src/market-data/market-state-store.ts` | 사용 안 함 |
+| `PaperEngine` | `src/engine/paper-engine.ts` | 사용 안 함 (`placement.engine`이 no-op 스텁) |
+| `OutboxPublisher`, `claimPendingOutbox`, `markOutboxPublished`, `prunePublishedOutbox` | `src/modules/stream/outbox-publisher.ts` | 사용 안 함 |
+| `registerStreamRoutes` / `StreamSession` | `src/modules/stream/` | 등록 안 됨 (WebSocket upgrade 핸들러도 없음) |
+| `TossRestClient`, `TossWebSocketMarketData`, `buildSubscriptionPlan` | `packages/market-data/src/toss/` | 사용 안 함 |
+| `FakeMarketData` | `packages/market-data/src/fake-market-data.ts` | `MARKET_DATA_ADAPTER=fake`일 때만 “cancelOnly=false” 플래그로 참조 |
+
+그 결과 프로덕션 이미지는 fail-closed로 `CANCEL_ONLY`에서 시작하고, 실제 시세도, 리더 인계도, outbox 발행도 없다. 이 문서는 그 부품들을 하나의 `ProductionRuntime` 경계 안에서 조립하고, 가짜 provider 서버만으로 인계 드릴을 증명하는 방법을 확정한다.
+
+### 1.1 조사 중 확인한 결함 (이 설계가 흡수하는 것)
+
+구현 전에 알아야 할, 기준 커밋에 존재하는 불일치다. 각각 어느 단계(A/B/C)가 해소하는지 명시한다.
+
+1. **구독 선언 프레임이 pinned AsyncAPI 1.2.2와 다르다.** 계약은 텍스트 프레임에 **JSON 배열** `[{"id":"req-1"},{"type":"trade:us","codes":["AAPL"]}]`을 보내라고 하지만, `TossWebSocketMarketData.declare()`는 `{"type":"subscriptions","subscriptions":[{"channel":"trade:us","codes":[...]}]}` 객체를 보낸다. 계약에서 파생된 가짜 WS 서버는 이 프레임을 `wrong-format` 에러로 거부하므로 B 단계 테스트가 이 결함을 반드시 드러낸다. **B가 어댑터를 계약에 맞게 고친다.**
+2. **`transportClosed` 이벤트의 `market`이 `'US'`로 고정**되어 있다(`finish()`). 시장별 연결 모델(§5.2)에서는 어댑터 인스턴스가 자기 시장을 알아야 한다. **B가 `TossWebSocketOptions.market`을 추가한다.**
+3. **어댑터가 자체 keepalive 타이머(`setInterval`, 60 s)를 소유**한다. `ports.ts` 주석은 “no port owns a timer of its own”을 요구하고, `MarketHealthMachine.onPong`은 결과를 받아야 상태를 바꾼다. **B가 어댑터 내부 타이머를 제거하고, A의 `KeepaliveLoop`가 유일한 타이머 소유자가 된다.**
+4. **`RecoveryCoordinator.recover()`가 `acquireLease(market)`을 다시 호출**한다. `StartupCoordinator.open()`도 같은 시장의 lease를 먼저 획득하므로, 두 곳이 원시 `LeaderLease.acquire`를 쓰면 epoch가 두 번 증가하고 PostgreSQL 연결이 두 개 열린다. **A가 `LeaseRegistry`(§5.4)로 획득을 멱등화한다.**
+5. **프로덕션 `main.ts`에 사용자 스트림(`/api/v1/stream`)과 WebSocket upgrade가 없다.** e2e `start-system.ts`만 수제 upgrade를 갖는다. **A가 `ws` 기반 upgrade를 프로덕션에 등록한다.**
+6. **한 연결에 KR 40 + US 40 종목 × 2 채널 = 160 topic**은 계약의 연결당 100 topic 한도를 넘는다. 따라서 시장당 1 연결(80 topic)이 유일한 합법 배치이고, 계정당 동시 연결 한도 2개가 정확히 소진된다. 이것이 “세 번째 연결 금지”가 단순한 규범이 아니라 provider 한도에서 나오는 하드 제약인 이유다.
+7. **문서 드리프트**: `infra/compose.yaml` 라벨 `skipjack.leader-markets: KRX,US`는 코드의 `Market` 값 `KR`과 다르다. `docs/runbooks/redis-or-leader-loss.md`는 `skipjack:leader:*` Redis 키와 `leader_epochs.released_at` 컬럼을 언급하지만 lease는 PostgreSQL advisory lock이고 컬럼은 없다. 이 문서는 Redis를 lease에 쓰지 않음을 확정하고(§3.2), `released_at` 컬럼을 A의 additive migration으로 추가한다(§13). 라벨과 런북 수정은 A의 문서 범위에 포함한다.
+
+## 2. 목표와 비목표
+
+### 2.1 목표
+
+- G1. 프로덕션 `paper-api` 프로세스 하나가 HTTP, 시장별 fenced leader, provider 스트림/스냅샷, `PaperEngine`, outbox 발행, 사용자 스트림을 소유하고, 정상 상태에서 `NORMAL`을 보인다.
+- G2. 시작·종료·장애·복구가 하나의 명시적 상태 기계(§6)를 따르며, 모든 비정상 경로가 fail-closed(`CANCEL_ONLY` 유지, 취소는 항상 가능)다.
+- G3. 인계 드릴 `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL`을 두 개의 실제 API 프로세스로 자동 증명하고, provider 연결 동시 개수 최대 2를 계측으로 증명한다.
+- G4. Toss OAuth/REST/WebSocket 어댑터는 pinned 계약(OpenAPI 1.2.14, AsyncAPI 1.2.2)에서 파생한 **로컬 가짜 서버**로만 검증한다. 어떤 자동화도 라이브 Toss에 접속하지 않는다.
+- G5. provider 비밀(client id/secret, access token)은 런타임 메모리와 플랫폼 secret store에만 존재하고, 로그·감사·브라우저·CI·테스트 단언 어디에도 나타나지 않는다.
+- G6. 릴리스 체크리스트의 미완 항목을 체크할 수 있는 증거(드릴 로그, 메트릭 스냅샷, 커밋 해시)를 생산한다.
+
+### 2.2 비목표
+
+- 실제 주문 경로, 계좌 채널(`personal:order`), 실계좌 인증 정보. 기존 공개 경계(README “Real-account boundary”)는 그대로다.
+- `paper-api` 다중 replica, 수평 확장, 시장 단위 프로세스 분리.
+- Redis 기반 lease, Redis pub/sub fan-out. Redis는 계속 rate-limit 저장소로만 쓴다.
+- 새 주문 유형, 수수료, 슬리피지, 화이트리스트 변경.
+- 라이브 provider에 대한 탐색·회귀·성능 테스트. 계약 갱신은 사람이 수동으로 수행하는 별도 절차다(§9.5).
+- 웹 프론트엔드 변경. 프론트는 이미 `NORMAL/DEGRADED/RECOVERING/CANCEL_ONLY`를 표시한다.
+
+## 3. 고려한 대안
+
+| # | 대안 | 결정 | 이유 |
+|---|---|---|---|
+| 3.1 | 리더/시세를 별도 `market-leader` 프로세스로 분리 | 기각 | 배포 토폴로지·런북·`check:deployment`가 “단일 `paper-api`가 HTTP와 leader를 함께 소유”를 전제한다. 프로세스 분리는 인계 드릴 대상 프로세스를 둘로 늘려 “세 번째 연결” 증명을 어렵게 한다. |
+| 3.2 | Redis lease(SET NX PX)로 leader 선출 | 기각 | 이미 `LeaderLease`가 PostgreSQL advisory lock + `leader_epochs`로 구현·테스트됨. PostgreSQL이 ledger의 단일 진실이므로 fencing token도 같은 곳에 있어야 한다. Redis 장애가 leader 손실로 번지는 경로를 만들지 않는다. |
+| 3.3 | 두 시장을 하나의 WebSocket으로 구독 | 기각 | 160 topic > 100 topic/연결(계약). 불가능. |
+| 3.4 | 시장별 프로세스 두 개(KR 프로세스, US 프로세스) | 기각 | 3.1과 같은 이유. 또 각 프로세스가 연결 1개씩 열면 인계 중 4개가 되어 계정 한도(2)를 넘는다. |
+| 3.5 | 롤링 배포(새 프로세스 먼저 기동, 준비되면 이전 종료) | 기각 | 새 프로세스가 연결을 열면 3번째·4번째 연결이 되고 provider가 가장 오래된 연결을 끊어 이전 leader가 비정상 종료된다. 배포 가이드가 이미 금지한다. stop-then-start만 허용. |
+| 3.6 | 인계 중 새 leader가 `lock_timeout`으로 대기 포기 후 종료 | 기각 | 대기 포기는 재시작 루프를 만들고, 그 사이 취소조차 불가능하다. 새 프로세스는 lease를 **무기한 대기**하되 그 동안 `CANCEL_ONLY`로 HTTP를 서비스한다(§6.3). 대기 시간은 메트릭·알림으로 관측한다. |
+| 3.7 | 테스트에서 `fetch`/socket factory를 인메모리로 mock | 부분 채택 | 단위 테스트는 기존 방식(인메모리 `FetchLike`, `TossSocketFactory`) 유지. 그러나 어댑터 통합과 인계 드릴은 **실제 TCP를 듣는 로컬 가짜 서버**를 사용한다. 두 OS 프로세스가 같은 가짜 provider를 공유해야 연결 개수를 셀 수 있고, 실제 HTTP/WS 스택(헤더, 101 handshake, close frame)을 지나야 한다. |
+| 3.8 | 라이브 Toss에서 녹화한 replay 픽스처 | 기각 | 녹화 자체가 라이브 접속이다. 계약 예시(`examples`)와 기존 `fixtures/toss/*.json`만 사용한다. |
+| 3.9 | provider 실패 시 프로세스 종료(orchestrator 재시작) | 기각 | 종료하면 취소마저 불가능해진다. provider 실패는 시장 incident + 재시도로 흡수하고, 프로세스는 `CANCEL_ONLY`로 살아 있어야 한다. 종료는 설정·DB·불변식 실패에만 허용(§8). |
+| 3.10 | Node 24 내장 `WebSocket` 클라이언트 | 기각 | 내장 클라이언트는 handshake에 임의 헤더(`Authorization: Bearer`)를 붙일 수 없다. `ws` 패키지를 채택한다(§5.7). |
+
+## 4. 아키텍처 개요
+
+```text
+                 SIGTERM/SIGINT
+                       │
+┌──────────────────────▼──────────────────────────────────────────────┐
+│ ProductionRuntime (apps/paper-api/src/runtime/production-runtime.ts) │
+│                                                                      │
+│  RuntimeStateMachine ── AdmissionLatch ── TradingCapabilities        │
+│        │                                                             │
+│  StartupCoordinator ─┬─ restore/verifyInvariants (UnitOfWork)        │
+│                      ├─ LeaseRegistry.acquire(KR), acquire(US)       │
+│                      └─ SupervisedRecovery(KR), (US)                 │
+│                              │                                       │
+│  MarketRuntime[KR]           │           MarketRuntime[US]           │
+│   ├ MarketDataStream (1 WS)  │            ├ MarketDataStream (1 WS)  │
+│   ├ MarketHealthMachine      │            ├ MarketHealthMachine      │
+│   ├ MarketStateStore         │            ├ MarketStateStore         │
+│   ├ RecoveryCoordinator      │            ├ RecoveryCoordinator      │
+│   ├ MarketEventLoop          │            ├ MarketEventLoop          │
+│   ├ KeepaliveLoop            │            ├ KeepaliveLoop            │
+│   └ ReconnectSupervisor      │            └ ReconnectSupervisor      │
+│                              ▼                                       │
+│  PaperEngine ── UnitOfWork ── PostgreSQL (orders/fills/outbox/audit) │
+│                                                                      │
+│  OutboxPublisherLoop ── StreamHub ── StreamSession (per user WS)     │
+│  ShutdownCoordinator                                                 │
+└─────────────────────────────────────────────────────────────────────-┘
+          │ provider ports (MarketDataStream, MarketSnapshotSource, …)
+┌─────────▼───────────────────────────────────────────────────────────┐
+│ ProviderBundle                                                       │
+│  toss: OAuthTokenProvider + TossRestClient + TossWebSocketMarketData │
+│  fake: FakeMarketData + FakeSnapshotSource (test/dev only)           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.1 컴포넌트 소유권
+
+| 컴포넌트 | 위치 (신규 `+` / 기존) | 소유 단계 | 소유하는 것 |
+|---|---|---|---|
+| `ProductionRuntime` | `+ apps/paper-api/src/runtime/production-runtime.ts` | A | 위 도표의 모든 조립, 상태 기계, 타이머, AbortController |
+| `RuntimeStateMachine` | `+ apps/paper-api/src/runtime/runtime-state.ts` | A | §6.1 프로세스 상태, 전이 감사, `runtime_state` 메트릭 |
+| `AdmissionLatch` | `+ apps/paper-api/src/runtime/admission-latch.ts` | A | 프로세스 로컬 admission/matching 게이트 (`StartupLatch`/`ShutdownLatch` 구현) |
+| `TradingCapabilities` | `+ apps/paper-api/src/runtime/trading-capabilities.ts` | A | `(market) → Set<Capability>` 계산 (§6.4) |
+| `LeaseRegistry` | `+ apps/paper-api/src/runtime/lease-registry.ts` | A | 시장별 `LeaderLease` 멱등 획득·보유·해제, lease 손실 감지 |
+| `MarketRuntime` | `+ apps/paper-api/src/runtime/market-runtime.ts` | A | 시장 하나의 stream/health/state/recovery/event loop/keepalive/reconnect |
+| `SupervisedRecovery` | `MarketRuntime` 내부 | A | `RecoveryCoordinator.recover`를 감싸 provider 오류를 incident로 변환(§8.2) |
+| `StreamHub` | `+ apps/paper-api/src/modules/stream/stream-hub.ts` | A | 접속 중 `StreamSession` 레지스트리, sessionId별 durable event 전달, 시세 fan-out |
+| `OutboxPublisherLoop` | `+ apps/paper-api/src/modules/stream/outbox-publisher-loop.ts` | A | `OutboxPublisher.pollOnce` 주기 실행, prune, drain |
+| `ProviderBundle` 선택 | `+ apps/paper-api/src/runtime/provider-bundle.ts` | A (인터페이스) / B (toss 구현) | `MARKET_DATA_ADAPTER`에 따른 포트 구현 묶음 |
+| `OAuthTokenProvider` | `+ packages/market-data/src/toss/oauth-token-provider.ts` | B | `POST /oauth2/token` client credentials, 캐시, 갱신, 무효화 처리 |
+| `TossWebSocketMarketData` 수정 | `packages/market-data/src/toss/toss-websocket.ts` | B | §1.1 결함 1·2·3 해소, `ws` socket factory |
+| `TossRestClient` 유지 | `packages/market-data/src/toss/toss-rest.ts` | B | 가짜 서버 대비 검증, `429` `Retry-After` 존중 추가 |
+| `FakeTossRestServer`, `FakeTossWsServer` | `+ packages/market-data/testing/fake-toss/` | B | §9 |
+| 인계 드릴 | `+ apps/paper-api/src/runtime/leader-handoff.drill.integration.test.ts` | C | §10 |
+| 드릴 하네스 | `+ apps/paper-api/src/runtime/testing/two-process-harness.ts` | C | Testcontainers + 가짜 서버 + 두 `node dist/main.js` 자식 프로세스 |
+| `003_leader_release.sql` | `+ apps/paper-api/src/db/migrations/003_leader_release.sql` | A | `leader_epochs.released_at` |
+
+`main.ts`는 A 이후 다음 세 줄 수준의 책임만 가진다: `loadConfig()` → `createProviderBundle(config)` → `ProductionRuntime.start()`. 기존 `startProductionServer()` 안의 취소 전용 `execute` 구현, `cancelOnly` 불리언, 스텁 `engine`은 삭제한다.
+
+## 5. 설정, 비밀, 연결 모델
+
+### 5.1 환경 변수 (전체)
+
+`apps/paper-api/src/config.ts`의 zod 스키마를 다음으로 확장한다. 표에 없는 변수는 존재하지 않는다.
+
+| 변수 | 필수 | 기본값 | 검증 규칙 |
+|---|---|---|---|
+| `NODE_ENV` | 예 | `development` | `development \| test \| production` |
+| `HOST`, `PORT` | 예 | `127.0.0.1`, `3000` | 기존 |
+| `PUBLIC_ORIGIN` | 예 | — | URL |
+| `DATABASE_URL` | 예 | — | URL, 비밀 |
+| `REDIS_URL` | 예 | — | URL |
+| `SESSION_HASH_KEYS` | 예 | — | 기존 |
+| `CSRF_SECRET` | 예 | — | ≥ 32 |
+| `ADMIN_API_KEY` | production에서 예 | — | ≥ 32 |
+| `MARKET_DATA_ADAPTER` | 아니오 | `toss` | `toss \| fake`. `NODE_ENV=production`에서 `fake`이면 **시작 실패**(`ConfigError: fake adapter is forbidden in production`). |
+| `TOSS_CLIENT_ID` | adapter=`toss`일 때 예 | — | 비밀. 정규식 `^c_[A-Za-z0-9]{8,}$` (계약 예시 형식) |
+| `TOSS_CLIENT_SECRET` | adapter=`toss`일 때 예 | — | 비밀. 길이 ≥ 16 |
+| `TOSS_REST_BASE_URL` | 아니오 | `https://openapi.tossinvest.com` | URL. §5.3 loopback 규칙 |
+| `TOSS_WS_URL` | 아니오 | `wss://openapi-ws.tossinvest.com/ws/v1` | URL. §5.3 loopback 규칙 |
+| `SHUTDOWN_DRAIN_DEADLINE_MS` | 아니오 | `30000` | 정수 `5000..40000`. `stop_grace_period`(45 s)보다 작아야 한다 |
+| `RECOVERY_STABILITY_MS` | 아니오 | `5000` | 정수 `0..30000`. 드릴과 테스트가 짧게 설정 |
+
+기본값은 pinned 계약의 `servers`에서 그대로 가져온 값이다(OpenAPI `servers[0].url`, AsyncAPI `servers.production`). 기본값을 코드 상수 `TOSS_CONTRACT_SERVERS`로 두고 계약 파일과 일치하는지 테스트가 단언한다.
+
+`MARKET_DATA_ADAPTER=fake`는 기존과 같이 e2e와 개발 전용이며, `FakeMarketData`와 `FakeSnapshotSource`(현재 e2e `start-system.ts`에 있는 결정적 스냅샷 소스를 `@skipjack/market-data/testing`으로 승격)를 묶는다. `fake`일 때도 lease·recovery·outbox·shutdown 경로는 `toss`와 완전히 같다. 다른 것은 provider 포트 구현만이다.
+
+### 5.2 연결 모델
+
+- 프로세스는 시장당 **정확히 하나**의 provider WebSocket을 연다: `KR` 1개, `US` 1개. 각 연결은 해당 시장 40 종목 × {`trade`, `orderbook`} = 80 topic을 선언한다(`buildSubscriptionPlan`).
+- 연결은 오직 **해당 시장의 lease를 보유한 동안만** 열려 있을 수 있다. lease 손실 → 즉시 소켓 종료(§6.5).
+- REST 호출(스냅샷, FX, 캘린더, 종목)은 연결 수에 포함되지 않으나, **lease 보유 프로세스만** 수행한다. 새 프로세스는 lease를 얻기 전에 REST를 호출하지 않는다(토큰 발급 포함).
+- 따라서 정상 운영 시 provider 연결은 2개, 인계 중 최대 2개, 그 외 시각에는 0개다. 계정 한도(2)를 초과할 정상 경로는 존재하지 않는다.
+
+### 5.3 provider URL loopback 규칙
+
+`TOSS_REST_BASE_URL`·`TOSS_WS_URL`을 기본값과 다르게 설정하는 것은 다음 둘 중 하나일 때만 허용된다. 그렇지 않으면 시작 실패다.
+
+1. `NODE_ENV !== 'production'`.
+2. URL의 host가 loopback(`127.0.0.1`, `::1`, `localhost`)이다.
+
+이 규칙으로 프로덕션 비밀이 도달할 수 있는 host는 Toss 공식 host 또는 자기 자신만이다. 인계 드릴(C)은 `NODE_ENV=production`으로 실제 프로덕션 코드 경로를 실행하면서 loopback 가짜 서버를 가리킬 수 있다.
+
+### 5.4 리더 lease와 `LeaseRegistry`
+
+- `LeaseRegistry.acquire(market)`: 보유 중이고 `isHeld`인 lease가 있으면 그것을 반환한다. 없으면 `LeaderLease.acquire(market, { connectionString, leaderId })`를 호출한다. 동시에 두 호출자가 오면 같은 promise를 공유한다. 이로써 `StartupCoordinator`와 `RecoveryCoordinator`의 이중 획득(§1.1-4)이 epoch를 한 번만 올린다.
+- `leaderId`는 프로세스 시작 시 생성한 UUID 하나를 전 시장에 공유한다. 로그·감사·메트릭 라벨에 그대로 사용한다.
+- `LeaderLease.acquire`는 `pg_advisory_lock(hashtext(market))`에서 **블로킹**한다. 이전 leader가 lock을 쥐고 있으면 새 프로세스는 여기서 대기한다. 이것이 stop-then-start 인계의 직렬화 지점이다. 대기 시간은 `leader_lease_wait_seconds{market}` 게이지로 노출한다.
+- lease 전용 연결의 `error`/`end` 이벤트 → `LeaseRegistry`가 `onLost(market)` 콜백을 호출한다(§6.5).
+- `release(market)`은 `pg_advisory_unlock` 후 연결을 닫고, 같은 트랜잭션 없이 별도 짧은 UnitOfWork로 `update leader_epochs set released_at = now() where market_code = $1 and leader_id = $2 and released_at is null`을 실행한다(§13 migration). 이 update 실패는 로그만 남기고 종료를 막지 않는다.
+- Epoch/fencing token 의미는 기존과 같다: 새 leader는 항상 더 큰 값을 받고, `MarketStateStore.beginEpoch`와 `PaperEngine.currentFencingToken`이 이 값을 사용해 이전 epoch 이벤트와 fill을 거부한다.
+
+### 5.5 OAuth 토큰 provider (B)
+
+`OAuthTokenProvider implements TokenProvider`:
+
+- 요청: `POST {TOSS_REST_BASE_URL}/oauth2/token`, `Content-Type: application/x-www-form-urlencoded`, 본문 `grant_type=client_credentials&client_id=…&client_secret=…`. 응답은 BFF envelope가 아닌 OAuth2 표준 `{access_token, token_type, expires_in}`이다. 계약 예시 `expires_in`은 86400이다.
+- 캐시: 메모리 단일 슬롯 `{token, expiresAt}`. `getAccessToken(signal)`은 남은 수명이 `TOKEN_REFRESH_LEAD_MS = 300_000`(5분) 이상이면 캐시를 반환하고, 아니면 재발급한다. 동시 호출은 하나의 in-flight promise를 공유한다.
+- 무효화 처리: 계약상 client당 유효 토큰은 1개이며 재발급 시 이전 토큰은 즉시 무효다. 어댑터가 `401`을 받으면 `tokenProvider.invalidate()` 후 **정확히 1회** 재발급·재시도한다. 두 번째 `401`은 오류로 전파되어 시장 incident `PROVIDER_AUTH_FAILED`가 된다.
+- 속도: `AUTH` rate-limit 그룹 보호를 위해 재발급 간 최소 간격 `TOKEN_MIN_REISSUE_INTERVAL_MS = 10_000`. 그 안의 요청은 `MarketDataError('PONG_FAILED')`가 아니라 새 코드 `AUTH_THROTTLED`로 거부된다(`MarketDataErrorCode`에 `AUTH_FAILED`, `AUTH_THROTTLED` 추가).
+- `403 access_denied`(허용 IP 미등록)는 재시도하지 않고 `PROVIDER_IP_NOT_ALLOWED` incident가 된다. 이는 운영자 조치가 필요한 상태다.
+- 토큰 문자열은 `Authorization` 헤더 조립 외 어디에도 복사되지 않는다. 로거 redaction 규칙에 `access_token`, `client_secret`, `Authorization`을 추가한다(§12).
+- **토큰은 lease 획득 뒤에만 발급된다.** `MarketRuntime.connect()`가 `LeaseRegistry.acquire` 완료 뒤 처음 `tokenProvider.getAccessToken`을 호출한다. 이전 leader가 아직 살아 있을 때 새 프로세스가 토큰을 재발급해 이전 leader의 REST를 무효화하는 사고를 구조적으로 막는다.
+
+### 5.6 비밀 취급 원칙
+
+- 비밀은 `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, access token, `DATABASE_URL`, `SESSION_HASH_KEYS`, `CSRF_SECRET`, `ADMIN_API_KEY`다.
+- 주입은 플랫폼 secret store만 사용한다. `infra/compose.yaml`은 `TOSS_CLIENT_ID: "${TOSS_CLIENT_ID:?…}"`, `TOSS_CLIENT_SECRET: "${TOSS_CLIENT_SECRET:?…}"`를 필수 보간으로 추가한다. `scripts/check-deployment-contract.mjs`는 두 변수를 필수 보간 목록에 추가하고, `web` 서비스 환경과 CI 워크플로에서 `TOSS_`가 등장하면 실패하도록 유지·확장한다.
+- 어떤 테스트도 실제 client id/secret를 필요로 하지 않는다. 가짜 서버는 하네스가 생성한 임의 자격증명(`c_test…`, 32바이트 랜덤 secret)을 받아들인다.
+
+### 5.7 의존성 추가
+
+- `ws` `8.18.3`을 `@skipjack/market-data`(Toss 클라이언트 socket factory, 가짜 WS 서버)와 `@skipjack/paper-api`(사용자 스트림 upgrade) 런타임 의존성으로 추가한다. `@types/ws`는 devDependency. 채택 이유는 §3.10.
+- 다른 새 런타임 의존성은 없다. 가짜 REST 서버는 `node:http`로 작성한다.
+
+## 6. 라이프사이클 상태 기계
+
+### 6.1 프로세스 상태
+
+```text
+BOOTING ──config/db ok──▶ RESTORING ──invariants ok──▶ ACQUIRING_LEASES
+   │                          │                               │ both leases held
+   │ config/db error          │ invariant/audit error         ▼
+   ▼                          ▼                          RECOVERING(all)
+ EXIT(1)               FAILED_CLOSED ─▶ EXIT(1)               │
+                                                              ▼
+              ┌────────────────────────────────────── SERVING ◀────────────┐
+              │  (admission open; trading mode per market from §6.2)        │
+              │                                                             │
+              └── SIGTERM/SIGINT ──▶ DRAINING ──▶ STOPPED ──▶ EXIT(0)      │
+                                       │ deadline exceeded                  │
+                                       └──▶ STOPPED(forced) ──▶ EXIT(0)     │
+```
+
+- `BOOTING`: `loadConfig`, `createDatabase`, `migrateToLatest`, Fastify 빌드, `app.listen`. **listen은 `RESTORING` 전에 수행**한다. 그래야 새 프로세스가 lease를 기다리는 동안 `/health/*`, 조회, 취소를 서비스할 수 있다.
+- `RESTORING`: `StartupCoordinator.restore` = 활성 incident 로드, `market_states` 로드, 열려 있는 주문·예약 로드; `verifyInvariants` = 기존 ledger 불변식 검사(예약 합계, 지갑 음수 금지, OCO 쌍 정합). 실패 → `FAILED_CLOSED`: 수동 incident `STARTUP_INVARIANT_OR_AUDIT_FAILURE`(GLOBAL, 모든 capability 차단, `source=MANUAL`) 기록 후 **프로세스 종료 코드 1**. 재시작 후에도 이 incident가 남아 `CANCEL_ONLY`를 강제하고, 운영자가 `/admin/incidents/:id/resolve`로 해제해야 한다.
+- `ACQUIRING_LEASES`: `LeaseRegistry.acquire('KR')`, `acquire('US')`를 병렬로 호출하고 **둘 다** 완료될 때까지 대기한다. 이 상태의 trading 응답은 `reasons: ['CANCEL_ONLY','ACQUIRING_LEASES']`.
+- `RECOVERING(all)`: 두 시장의 `SupervisedRecovery`가 병렬로 실행된다. provider 오류는 프로세스 상태를 바꾸지 않고 시장 incident가 된다(§8.2).
+- `SERVING`: admission latch 열림. 이 시점부터 각 시장의 거래 모드는 §6.2 시장 상태 기계가 결정한다. 프로세스는 두 시장이 모두 `DEGRADED`여도 `SERVING`이다(취소는 가능).
+- `DRAINING`: §6.6.
+- 모든 전이는 `audit_events`에 `RUNTIME_STATE_CHANGED {from, to, leaderId}`로 기록되고, `runtime_state{state}` 게이지를 갱신한다.
+
+### 6.2 시장 상태 (시장당 하나)
+
+기존 `MarketHealthMachine`의 `HEALTHY/DEGRADED/RECOVERING`을 그대로 사용하며, 사용자에게 보이는 이름은 기존 매핑을 따른다: `HEALTHY→NORMAL`, `DEGRADED→DEGRADED`, `RECOVERING→RECOVERING`. `CANCEL_ONLY`는 시장 상태가 아니라 §6.4 capability 결과다.
+
+```text
+        connect+declare ok, snapshots ok, stability elapsed, CAS resolve ok
+RECOVERING ─────────────────────────────────────────────────────────▶ HEALTHY
+   ▲  ▲                                                                 │
+   │  │ reconnect attempt begins                                        │ transportClosed | 2 missed pongs
+   │  └──────────────── DEGRADED ◀──────────────────────────────────────┘
+   │                        │ subscription rejected | snapshot failed | provider auth failed
+   │                        ▼
+   └──── ReconnectSupervisor schedules retry (backoff, §8.3) ── 3 failures in 5 min ──▶ MANUAL HOLD
+```
+
+- `MANUAL HOLD`는 별도 상태가 아니라 `DEGRADED` + 수동 incident `RECOVERY_RETRY_EXHAUSTED`(MARKET scope, `source=MANUAL`)다. 자동 재시도는 멈추고, 운영자가 incident를 해제하면 `ReconnectSupervisor`가 다시 시작한다.
+- 시장 incident는 원인별로 독립 행이며 §9.1(선행 문서)의 CAS 규칙으로만 해제된다.
+
+### 6.3 lease 대기 중 서비스 계약
+
+`ACQUIRING_LEASES` 동안:
+
+- `/health/live` 200, `/health/ready` 200 (db+audit 기준 유지). 즉 로드밸런서는 트래픽을 보내고, 사용자는 조회·취소를 할 수 있다.
+- `/api/v1/health/trading` → `{placement:false, cancellation:true, fx:false, reasons:['CANCEL_ONLY','ACQUIRING_LEASES']}`.
+- `/health/market-data` → 각 시장 `{state:'RECOVERING', reasons:['LEADER_LEASE_PENDING']}`.
+- 주문 생성/정정/FX 요청은 기존 `CANCEL_ONLY`(409) 도메인 오류로 거부된다.
+
+### 6.4 유효 capability 계산
+
+`TradingCapabilities.for(market)`:
+
+```text
+if admission latch closed            → {CANCEL}
+else                                 → ALL_CAPABILITIES − ⋃ denied(active incidents with scope GLOBAL, LOCAL, MARKET=market)
+```
+
+- 심볼·계정 scope incident는 기존처럼 `OrderPlacementService`와 `PaperEngine`이 해당 scope에서 적용한다.
+- 시장이 `DEGRADED`/`RECOVERING`이면 `MarketHealthMachine`이 만든 MARKET incident가 `PLACE, AMEND, MATCH, TRIGGER`를 차단하므로 그 시장만 배치 불가, 다른 시장은 정상이다.
+- `/api/v1/health/trading`의 `placement`는 두 시장 중 하나라도 `PLACE`가 허용되면 `true`이고, `reasons`에 차단된 시장이 `MARKET_DEGRADED:KR` 형식으로 나열된다. `fx`는 GLOBAL/LOCAL incident와 admission latch에만 의존한다.
+
+### 6.5 lease 손실
+
+`LeaseRegistry.onLost(market)`이 호출되면 `MarketRuntime[market]`은 **다음 순서를 동기적으로 시작**한다(각 단계는 이전 단계 실패와 무관하게 실행).
+
+1. 시장 AbortController abort → event loop, keepalive, 진행 중 recovery 취소.
+2. `stream.close()` — provider 연결 종료. 이 단계가 “세 번째 연결 금지”의 핵심이다: lease 없는 프로세스는 연결을 가질 수 없다.
+3. matching latch(해당 시장) 닫기, `MarketHealthMachine.onClose('LEASE_LOST')` → `DEGRADED` + incident `LEADER_LEASE_LOST`.
+4. `ReconnectSupervisor`가 `LeaseRegistry.acquire(market)`부터 다시 시작하는 recovery를 예약한다(§8.3 backoff). 재획득하면 새 epoch로 `RECOVERING → HEALTHY`.
+
+잔여 위험: PostgreSQL 연결 사망 감지까지의 지연 동안 이전 프로세스의 소켓이 살아 있고 새 leader가 연결을 열면 provider가 가장 오래된 연결(이전 프로세스)을 끊는다. 이 경우에도 (a) 새 leader의 연결은 유지되고, (b) 이전 프로세스의 fill은 fencing token 불일치로 DB에서 거부되며, (c) `provider_connections_open` 합계가 2를 넘는 순간이 알림으로 남는다. 이는 이중 leader가 아니라 감지 지연이며, 허용된 잔여 위험으로 기록한다.
+
+### 6.6 종료 시퀀스 (`ShutdownCoordinator.drain`)
+
+`SIGTERM`/`SIGINT` 수신 시 기존 `ShutdownCoordinator`가 다음 콜백으로 구성된다. deadline은 `now + SHUTDOWN_DRAIN_DEADLINE_MS`(기본 30 s).
+
+| 순서 | 콜백 | `ProductionRuntime`이 주입하는 구현 |
+|---|---|---|
+| 1 | `cancelOnly()` | 상태 `DRAINING`; `/health/ready`가 503 `{code:'NOT_READY', details:{draining:true}}`를 반환하도록 플래그; trading `reasons`에 `DRAINING` 추가; 감사 `RUNTIME_DRAINING`. |
+| 2 | `admission.close()` | admission latch 닫기 → 모든 시장 `{CANCEL}`. 두 시장의 matching latch 닫기(새 fill 없음). |
+| 3 | `drainInflight(deadline)` | `UnitOfWork` in-flight 카운터가 0이 될 때까지 50 ms 폴링, deadline 초과 시 진행. |
+| 4 | `drainOutbox(deadline)` | `OutboxPublisherLoop.drain(deadline)`: `pollOnce`를 반복해 `claimed === 0`이 두 번 연속이면 종료. deadline 초과 시 남은 행 개수를 `outbox_drain_remaining` 게이지에 기록하고 진행(행은 DB에 남아 새 leader가 발행한다 — at-least-once). |
+| 5 | `closeSockets()` | 시장 AbortController abort; 두 provider `stream.close()`; `StreamHub.closeAll(1012, 'SERVICE_RESTART')`로 사용자 WebSocket 종료(브라우저는 재접속 후 REST 스냅샷으로 조정). |
+| 6 | `releaseLeases()` | `LeaseRegistry.releaseAll()` — **모든 소켓이 닫힌 뒤에만** 실행. 그래야 새 leader가 lock을 얻는 순간 이전 연결이 0개다. |
+
+그 뒤 `server.ts`의 기존 흐름대로 `app.close()`, 마지막에 `database.destroy()`. 종료 코드 0. deadline 초과로 강제 진행한 경우도 종료 코드는 0이며 `RUNTIME_STOPPED {forced:true, remainingOutbox}` 감사와 `shutdown_forced_total` 카운터를 남긴다.
+
+두 번째 신호는 무시된다(`ShutdownCoordinator.#draining` 가드). `SIGKILL`은 orchestrator의 `stop_grace_period`(45 s) 이후에만 오며, 그 경우 lease는 PostgreSQL 연결 종료로 자동 해제된다.
+
+## 7. 데이터·이벤트·outbox 흐름
+
+### 7.1 시세 인바운드
+
+```text
+provider WS ─▶ TossWebSocketMarketData.events(signal)
+            ─▶ MarketEventLoop[market]
+                 ├ trade      → MarketStateStore.applyEvent → PaperEngine.onTrade(envelope)
+                 ├ orderBook  → MarketStateStore.applyEvent → PaperEngine.onOrderBook(envelope)
+                 │                                          → StreamHub.publishQuote(envelope)
+                 └ transportClosed → MarketHealthMachine.onClose(reason) → ReconnectSupervisor
+```
+
+- `MarketStateStore.applyEvent`는 현재 epoch/fencing token으로 봉투를 만들고 심볼별 단조 증가 버전을 부여한다. provider는 시퀀스를 주지 않으므로 버전은 프로세스 로컬 도착 순서다(`marketDataVersion`). 이전 epoch 봉투는 `ORDER_STATE_CONFLICT`로 거부된다(기존 동작).
+- `PaperEngine.onTrade/onOrderBook`은 fill이 생기면 `onFill` 콜백으로 `UnitOfWork` 트랜잭션을 실행한다. 트랜잭션은 `currentFencingToken(market)`과 `leader_epochs.fencing_token`을 비교해 불일치 시 롤백한다(기존 규칙).
+- `StreamHub.publishQuote`는 해당 심볼을 구독한 `StreamSession`에만 in-process로 전달한다. Redis는 관여하지 않는다.
+- 이벤트 처리 중 예외(파싱 불가, `UNSUPPORTED_DATA`)는 이벤트 하나를 버리고 `market_event_rejected_total{market,reason}`을 올린다. 연속 20개 거부 시 `onClose('EVENT_REJECTION_BURST')`로 degrade한다.
+
+### 7.2 복구 (`SupervisedRecovery`)
+
+`RecoveryCoordinator.recover(market, signal)`의 기존 절차를 유지한다: lease(멱등) → `beginEpoch` → `stream.connect` → `declare` + ack 검증 → 심볼별 rate-limited REST 스냅샷(`SnapshotRateLimiter` 10/s) → `replaceBaseline` → 안정화 대기(`RECOVERY_STABILITY_MS`) → 반환. `ProductionRuntime`은 반환값을 받아:
+
+1. `recoveryTriggers`를 `PaperEngine.onRecoveryOrderBook`/조건 발동 경로로 넘긴다. 결과 fill은 `source:'RECOVERY_REST'`, `recoveryFill=true`로 기록된다(기존 의미론, 선행 문서 §7.4).
+2. `blockedSymbols`마다 SYMBOL incident `RECOVERY_SNAPSHOT_FAILED`가 이미 활성화되어 있으므로 시장 자체는 `markHealthy(epoch)`로 CAS 해제한다. 심볼 incident는 다음 성공한 스냅샷에서 개별 CAS 해제한다.
+3. `MarketEventLoop`와 `KeepaliveLoop`를 시작한다.
+4. `recovery_duration_seconds{market}`, `leader_epoch{market}` 갱신, 감사 `RECOVERY_COMPLETED {market, epoch, recovered, blocked}`.
+
+### 7.3 Keepalive
+
+`KeepaliveLoop[market]`: 60 s마다 `stream.ping()` → 성공 시 `health.onPong(true)`, 실패(타임아웃 30 s, `PONG_FAILED`) 시 `health.onPong(false)`. 두 번 연속 실패면 health machine이 `DEGRADED`가 되고 loop는 `stream.close()`를 호출해 §7.1의 `transportClosed` 경로로 수렴한다. 계약의 180 s 서버 idle 종료보다 충분히 짧다. 어댑터는 타이머를 소유하지 않는다(§1.1-3).
+
+### 7.4 사용자 이벤트 outbox
+
+```text
+UnitOfWork tx: orders/fills/wallets + audit_events + outbox_events (원자적)
+        │
+OutboxPublisherLoop (200 ms 주기, batch 100)
+        ├ claimPendingOutbox (FOR UPDATE SKIP LOCKED, 짧은 tx)
+        ├ publish(event) = StreamHub.deliver(sessionId, event)   ← 접속 없으면 no-op 성공
+        ├ markOutboxPublished(id)
+        └ 매 10분 prunePublishedOutbox(1000)   (published_at < now() − 24h)
+```
+
+- 발행은 “접속 중인 세션에 전달 시도”이며, 미접속 세션은 재접속 시 `afterSequence`로 REST/스트림에서 따라잡는다. 이것이 outbox가 at-least-once인 이유이고 브라우저 dedupe가 존재하는 이유다.
+- `outbox_oldest_pending_seconds` 게이지는 매 poll마다 `min(created_at) where published_at is null`로 갱신한다. 알림 `OutboxLagHigh`(> 30 s)는 기존 규칙.
+- 인계 중: 이전 leader의 `drainOutbox`가 대부분을 발행하고, 남은 행은 새 leader의 loop가 첫 poll에서 발행한다. 중복 발행은 브라우저 `eventId` dedupe로 흡수된다.
+
+### 7.5 사용자 스트림
+
+- `registerStreamRoutes`를 프로덕션에 등록하고, Fastify `server.on('upgrade')`에 `ws.WebSocketServer({ noServer: true })` 기반 upgrade를 연결한다. 인증·origin 검사·rate-limit은 기존 route 코드가 수행한다.
+- `StreamHub`가 `StreamSession` 생성/해제를 추적하고, `closeAll(code, reason)`을 제공한다.
+
+## 8. Fail-closed 오류 처리
+
+원칙: **불확실하면 거래를 막고 취소는 남긴다.** 프로세스 종료는 “거래를 막을 수단마저 신뢰할 수 없을 때”만 허용된다.
+
+### 8.1 오류 분류
+
+| 분류 | 예 | 처리 | 프로세스 |
+|---|---|---|---|
+| 설정 오류 | 필수 env 누락, production에서 `fake`, 비-loopback URL 덮어쓰기 | `ConfigError` 로그(비밀 값 미출력) | **EXIT 1**, 네트워크 접속 전 |
+| 저장소 오류(시작) | DB 접속 실패, migration 실패 | 로그 | **EXIT 1** |
+| 불변식/감사 오류(시작) | `verifyInvariants` 실패, audit 테이블 불가 | 수동 GLOBAL incident 기록 시도 후 | **EXIT 1** |
+| provider 오류 | 토큰 401/403/429, WS 연결 실패, 선언 거부, 스냅샷 실패, `server-shutdown`, 2 missed pong | MARKET(또는 SYMBOL) incident, `DEGRADED`, 재시도(§8.3) | 계속 실행, `CANCEL_ONLY`(해당 시장) |
+| lease 손실(운영 중) | lease 연결 `error`/`end` | §6.5 | 계속 실행 |
+| 저장소 오류(운영 중) | `UnitOfWork` 연속 실패, `/health/ready` db false | 기존 `TransactionErrors` 알림; admission latch는 그대로(DB가 곧 gate이므로 DB 불가 = 거래 불가) | 계속 실행; readiness 503으로 트래픽 차단 |
+| 불변식 위반(운영 중) | `InvariantViolation` 도메인 오류 | 기존 emergency latch(LOCAL incident) 활성화, 알림 | 계속 실행, 운영자 롤백 판단(배포 가이드) |
+
+### 8.2 `SupervisedRecovery`
+
+`RecoveryCoordinator.recover`를 감싸서:
+
+- `MarketDataError`, OAuth 오류, `AbortError` 이외의 네트워크 오류를 잡아 `causeCode`로 변환한다: `PROVIDER_AUTH_FAILED`(401×2), `PROVIDER_IP_NOT_ALLOWED`(403), `PROVIDER_RATE_LIMITED`(429), `PROVIDER_CONNECT_FAILED`(WS 연결 실패), `SUBSCRIPTION_REJECTED`, `PROVIDER_UNAVAILABLE`(그 외).
+- incident를 활성화하고 `ReconnectSupervisor`에 재시도를 예약한 뒤 **정상 반환**한다. `StartupCoordinator`는 예외를 보지 않으므로 admission을 열고 `SERVING`으로 간다. 시장은 incident 덕분에 `CANCEL_ONLY`다.
+- 불변식·감사 오류(`InvariantViolation`, `TransactionalAuditFailure`)는 잡지 않고 던진다 → `StartupCoordinator`가 `STARTUP_INVARIANT_OR_AUDIT_FAILURE`로 처리 → EXIT 1.
+
+### 8.3 `ReconnectSupervisor` backoff
+
+- 지연: `reconnectDelayMs(attempt)` (기존 함수: full jitter, base 250 ms, cap 30 s).
+- 창: 5분 슬라이딩 창에서 3회 실패 시 자동 재시도 중단 + 수동 incident `RECOVERY_RETRY_EXHAUSTED`(선행 문서 §7.3-9). 실패 = `SupervisedRecovery`가 incident를 만든 경우.
+- `server-shutdown` 에러 프레임 수신 시 첫 재시도 지연은 1 s 고정(계약 권고 1s→2s→4s와 일치하도록 `attempt=2`부터 시작).
+- 재시도 성공은 `feed_reconnect_total{market}` 카운터 증가 후 `RECOVERING → HEALTHY`.
+
+### 8.4 provider 오류 코드 매핑 (B)
+
+| provider 신호 | 어댑터 오류 | 런타임 causeCode |
+|---|---|---|
+| WS handshake 401 | `AUTH_FAILED` | `PROVIDER_AUTH_FAILED` |
+| WS handshake 403 / REST 403 | `AUTH_FAILED` | `PROVIDER_IP_NOT_ALLOWED` |
+| REST 429 | `RATE_LIMITED`(신규 코드), `Retry-After` 존중 후 최대 2회 재시도 | `PROVIDER_RATE_LIMITED` |
+| error frame `rate-limit-exceeded` | `SUBSCRIPTION_REJECTED` (1 s 후 재선언 1회) | `SUBSCRIPTION_REJECTED` |
+| error frame `too-many-topics`, `wrong-format`, `no-type`, `invalid-type`, `no-codes`, `too-many` | `SUBSCRIPTION_REJECTED` | `SUBSCRIPTION_REJECTED` |
+| error frame `server-shutdown` | `TRANSPORT_CLOSED` 이벤트 | `TRANSPORT_CLOSED` |
+| error frame `internal-error` | `TRANSPORT_CLOSED` | `PROVIDER_UNAVAILABLE` |
+| ack `rejected[]` 일부 | `declare()` 반환값 | `SUBSCRIPTION_REJECTED` (RecoveryCoordinator 기존 동작: 거부가 하나라도 있으면 실패) |
+| 2 missed pong | `PONG_FAILED` | `PONG_FAILED` |
+| 비정상 close (코드 없음) | `TRANSPORT_CLOSED` | `TRANSPORT_CLOSED` |
+
+## 9. 가짜 provider 계약 전략 (B)
+
+### 9.1 원칙
+
+- 가짜 서버는 `packages/market-data/contracts/toss/openapi.json`, `asyncapi.json`(SHA-256이 `provenance.json`과 일치해야 함)에서 파생된 **행동 모델**이다. 테스트 시작 시 두 파일의 해시를 단언하고, 불일치면 전체 스위트가 실패한다(기존 규칙 유지).
+- 응답 본문은 계약의 `examples`와 기존 `fixtures/toss/*.json`에서만 만든다. 가짜 서버는 새 필드를 발명하지 않는다.
+- 가짜 서버는 `127.0.0.1`의 임의 포트에만 바인드한다. `0.0.0.0` 바인드는 코드상 불가능하게 한다(host 인자 없음).
+
+### 9.2 `FakeTossRestServer` (`node:http`)
+
+지원 경로와 행동:
+
+| 경로 | 행동 |
+|---|---|
+| `POST /oauth2/token` | form 본문 검증(`grant_type=client_credentials`, 등록된 `client_id/secret`). 성공: `{access_token, token_type:'Bearer', expires_in}`(`expires_in`은 제어 API로 설정, 기본 86400). 재발급 시 이전 토큰을 무효화(client당 1개). 실패: 계약 예시대로 `400 invalid_request/unsupported_grant_type`, `401 invalid_client` + `WWW-Authenticate: Basic realm="openapi"`, `403 access_denied`, `429`. |
+| `GET /api/v1/prices`, `/api/v1/orderbook`, `/api/v1/stocks/all`, `/api/v1/market-calendar/{KR\|US}`, `/api/v1/exchange-rate` | `Authorization: Bearer` 검증(무효/만료/무효화된 토큰 → 401). 응답은 하네스가 시드한 심볼별 현재가·호가(결정적, `lossy-recovery.json`과 같은 시드 규칙). envelope `{success:true, result}`. |
+| 그 외 | 404. 주문·계좌 경로는 **구현하지 않는다**(호출되면 404 → 테스트 실패로 드러남). |
+
+제어 API(in-process, HTTP 아님): `issueCredentials()`, `setTokenTtl(seconds)`, `invalidateAllTokens()`, `failNext(path, status, count)`, `setRetryAfter(seconds)`, `seedSnapshot(market, symbol, price, book)`, `requests()`(경로·상태·Authorization 존재 여부만 기록, 토큰 값은 기록하지 않음).
+
+### 9.3 `FakeTossWsServer` (`ws`)
+
+| 계약 규칙 | 가짜 서버 행동 |
+|---|---|
+| handshake `Authorization: Bearer` | 없음/무효 → HTTP 401로 upgrade 거부; 미등록 IP 시뮬레이션 플래그 → 403 |
+| 계정당 동시 연결 2개, 초과 시 가장 오래된 연결 종료 | 정확히 구현. `peakConcurrentConnections`, `evictions` 카운터 노출 |
+| 선언 = JSON 배열 텍스트 프레임, full-replace, `[]`는 전체 해제 | 구현. 객체 프레임 → `error wrong-format` |
+| 연결당 100 topic | 초과 → `error too-many-topics` |
+| 선언 5회/초 | 초과 → `error rate-limit-exceeded` |
+| ack `{"type":"subscriptions","subscribed":[...],"rejected":[...],"id"?}`가 데이터보다 먼저 | 구현. `rejectTopics()` 제어로 `symbol-market-mismatch` 등 거부 주입 |
+| 텍스트 `PING` → `{"type":"pong"}` | 구현. `failNextPongs(n)`으로 무응답 주입 |
+| 180 s 클라이언트 무수신 시 종료 | 구현(하네스 가상 시계로 단축 가능) |
+| `server-shutdown` 에러 프레임 후 종료 | `announceShutdownAndClose()` 제어 |
+| 데이터 프레임 `{"type":"message","topic":"trade:us:AAPL","data":{...}}` | `emitTrade`, `emitOrderBook`, `dropNext(n)`, `emitOutOfOrder([...])` — 기존 conformance 하네스 동사와 1:1 |
+
+`runMarketDataConformance`(기존 `adapter-conformance.ts`)를 `TossWebSocketMarketData + FakeTossWsServer` 조합으로 실행하는 것이 B의 1차 수용 기준이다. 이는 §1.1-1의 프레임 결함을 자동으로 드러낸다.
+
+### 9.4 테스트 계층
+
+| 계층 | 도구 | provider |
+|---|---|---|
+| 단위(어댑터 파서/토큰 캐시) | vitest, 인메모리 `FetchLike`/`TossSocketFactory` | 없음 |
+| 어댑터 통합 | vitest + `FakeTossRestServer/WsServer`(실 TCP loopback) | 가짜 |
+| 런타임 통합(A) | vitest + Testcontainers PG/Redis + `FakeMarketData` 번들 | 가짜(인메모리) |
+| 런타임 통합(B) | 위 + `toss` 번들 + 가짜 서버 | 가짜(TCP) |
+| 인계 드릴(C) | vitest + Testcontainers + 가짜 서버 + 두 자식 프로세스 | 가짜(TCP) |
+| e2e(Playwright) | 기존 `MARKET_DATA_ADAPTER=fake` | 가짜(인메모리) |
+
+### 9.5 라이브 provider 접속 금지 규칙 (명시)
+
+1. 저장소의 어떤 테스트, CI 잡, 스크립트, 픽스처 생성기, 드릴도 `openapi.tossinvest.com`, `openapi-ws.tossinvest.com` 또는 그 외 비-loopback provider host에 접속하지 않는다.
+2. 강제 수단:
+   - vitest 전역 setup(`packages/market-data`, `apps/paper-api`)이 `globalThis.fetch`와 `ws` 클라이언트 생성을 감싸 대상 host가 loopback이 아니면 `Error('LIVE_PROVIDER_FORBIDDEN: <host>')`를 던진다. Testcontainers는 Docker 소켓/loopback만 사용하므로 영향 없다.
+   - `scripts/check-deployment-contract.mjs`가 CI 워크플로의 `TOSS_` 참조를 금지한다(기존). 테스트 소스에서 `tossinvest.com` 문자열이 계약 파일·이 문서·`TOSS_CONTRACT_SERVERS` 상수 이외에 등장하면 실패하도록 검사를 추가한다.
+   - `provenance.json` 해시 단언(기존).
+3. 계약 갱신은 사람이 `curl`로 파일을 받아 `provenance.json`의 `retrievedAt`·`sha256`을 갱신하는 수동 커밋이다. 자동화하지 않으며, 갱신 커밋은 가짜 서버·어댑터 테스트가 통과할 때만 병합된다.
+4. 실제 자격증명은 개발자 머신·CI·테스트 어디에도 필요하지 않다. 프로덕션 secret store에만 존재한다.
+5. 이 규칙의 예외는 없다. “한 번만 확인”도 금지다. 라이브 검증은 배포 후 운영 관측(§12)으로만 이루어진다.
+
+## 10. 우아한 인계 드릴 (C)
+
+### 10.1 구성
+
+- 하네스가 PostgreSQL 17, Redis 7 Testcontainer, `FakeTossRestServer`, `FakeTossWsServer`를 띄우고 자격증명을 발급한다.
+- 프로세스 P1, P2는 `node apps/paper-api/dist/main.js`를 `child_process.spawn`으로 실행한다(빌드된 산출물, 프로덕션 진입점). 공통 env: `NODE_ENV=production`, `MARKET_DATA_ADAPTER=toss`, `TOSS_REST_BASE_URL=http://127.0.0.1:<rest>`, `TOSS_WS_URL=ws://127.0.0.1:<ws>/ws/v1`, `RECOVERY_STABILITY_MS=500`, `SHUTDOWN_DRAIN_DEADLINE_MS=10000`, 그리고 §5.1의 필수 비밀(하네스가 생성). `PORT`는 각각 다른 임의 포트, `PUBLIC_ORIGIN`은 동일.
+- 하네스는 `/health/*`, `/api/v1/health/trading`, `/health/market-data`를 폴링(100 ms)해 관측 로그 `[{t, process, endpoint, body}]`를 만든다.
+
+### 10.2 절차와 단언
+
+| 단계 | 행위 | 단언 |
+|---|---|---|
+| 1 | P1 시작 | 20 s 내 `/health/ready` 200; 두 시장 `NORMAL`; `placement:true`; 가짜 WS `connections===2`, `leader_epochs.epoch` = (KR:1, US:1) |
+| 2 | 익명 세션 생성, MARKET 주문 1건 체결, LIMIT 주문 1건 대기 | 체결 outbox 이벤트가 사용자 WS로 전달됨(하네스 클라이언트) |
+| 3 | P2 시작 | 5 s 내 P2 `/health/ready` 200, trading `reasons ⊇ ['CANCEL_ONLY','ACQUIRING_LEASES']`; 가짜 WS `connections===2`(변화 없음), `peakConcurrentConnections===2`; P2의 REST 요청 기록 0건(토큰 요청 포함) |
+| 4 | P1에 `SIGTERM` | 200 ms 내 P1 trading `reasons ⊇ ['CANCEL_ONLY','DRAINING']`, `/health/ready` 503; 드레인 중 P1으로 보낸 취소 요청(대기 LIMIT) 200; 신규 주문 요청 409 `CANCEL_ONLY` |
+| 5 | P1 종료 관측 | 종료 코드 0, `SHUTDOWN_DRAIN_DEADLINE_MS + 5 s` 내; 종료 시점에 `outbox_events where published_at is null` 개수 0; 가짜 WS `connections===0`인 순간이 P2 연결 전에 존재; `leader_epochs.released_at` 두 행 모두 not null |
+| 6 | P2 인계 | P1 종료 후 15 s 내 P2 두 시장 `RECOVERING` 관측 → `NORMAL`; `leader_epochs.epoch` = (KR:2, US:2); P2 REST 기록에 `/oauth2/token` 1건이 **lease 획득 감사 이후** 타임스탬프; 가짜 WS `connections===2`, `peakConcurrentConnections===2`, `evictions===0` |
+| 7 | P2에서 신규 MARKET 주문 | 체결, `fills.recovery_epoch = 2`, fencing token = P2 값 |
+| 8 | 감사 검증 | `audit_events`에 P1: `RUNTIME_DRAINING`, `LEADER_RELEASED×2`, `RUNTIME_STOPPED{forced:false}`; P2: `LEADER_ACQUIRED×2`, `RECOVERY_COMPLETED×2`, `RUNTIME_STATE_CHANGED(→SERVING)` 순서가 타임스탬프 순 |
+| 9 | 부정 경로 | P2를 `SIGKILL`로 죽인 뒤 P3 시작 → advisory lock이 자동 해제되어 P3가 epoch 3으로 `NORMAL` 도달(비정상 종료 복구 증명) |
+
+전체 드릴 시간 상한 120 s. 드릴은 `pnpm --filter @skipjack/paper-api test -- leader-handoff.drill` 로 실행되며 Docker가 필요하다. Docker 없는 환경에서는 skip이 아니라 **실패**한다(릴리스 증거이므로).
+
+### 10.3 산출 증거
+
+드릴은 `apps/paper-api/test-results/leader-handoff/<utc>.json`에 관측 로그, 연결 카운터, epoch 테이블, 종료 코드를 기록한다(untracked). 릴리스 체크리스트 갱신 시 이 파일의 요약(시각, 커밋, peak=2, evictions=0)을 인용한다.
+
+## 11. A/B/C 경계와 수용 기준
+
+### 11.1 Stage A — ProductionRuntime (provider-neutral)
+
+범위: §4.1의 A 소유 컴포넌트, `main.ts` 축소, `003_leader_release.sql`, `/health/*` 확장, `registerStreamRoutes` + upgrade, 문서 드리프트 수정(§1.1-7), `check:deployment` 확장(`TOSS_CLIENT_*` 필수 보간 — 값은 아직 사용되지 않아도 계약으로 선언). provider는 `fake` 번들만 사용.
+
+수용 기준:
+
+- A1. `MARKET_DATA_ADAPTER=fake`, Testcontainers PG/Redis로 `ProductionRuntime`을 시작하면 `BOOTING→…→SERVING`, 두 시장 `NORMAL`, `leader_epochs` 두 행, `placement:true`.
+- A2. 가짜 스트림 `deliverTransportClose` → 해당 시장만 `DEGRADED`(다른 시장 `NORMAL`, 배치 가능) → 자동 recovery → `NORMAL`; epoch +1; `feed_reconnect_total` +1.
+- A3. 5분 창 3회 실패 시 `RECOVERY_RETRY_EXHAUSTED` 수동 incident, 자동 재시도 중단; 해제 시 재시도 재개.
+- A4. lease 연결 강제 종료(`pg_terminate_backend`) → 300 ms 내 `stream.close()` 호출 관측, `LEADER_LEASE_LOST` incident, 재획득 후 새 epoch.
+- A5. `SIGTERM` → §6.6 순서대로 콜백 호출(순서를 기록하는 spy), outbox 잔여 0, lease 해제, 종료 코드 0, 소요 < deadline.
+- A6. outbox: 트랜잭션에 append된 이벤트가 접속 중 `StreamSession`에 1 s 내 도달; 미접속 세션 이벤트는 `published_at` 기록 후 재접속 시 `afterSequence`로 회수.
+- A7. `verifyInvariants` 실패 주입 → `STARTUP_INVARIANT_OR_AUDIT_FAILURE` incident 행 존재, 종료 코드 1; 재시작 시 incident 때문에 `CANCEL_ONLY` 유지.
+- A8. production + `fake` → 시작 실패; 비-loopback URL 덮어쓰기 → 시작 실패.
+- A9. 기존 게이트 전부 통과: `pnpm check`, `typecheck`, `test`, `check:deployment`, `build`, e2e 18/18.
+- A10. `RecoveryCoordinator`가 시작 중 lease를 재획득해도 `leader_epochs.epoch`가 1만 증가(멱등 증명).
+
+Codex 검증 항목: 상태 전이 순서 spy 테스트를 독립 재실행; §6.6 순서 위반 여지 코드 리뷰; `cancelOnly` 불리언·스텁 엔진 삭제 확인; `main.ts`가 조립 이외 로직을 갖지 않음; 새 코드 mutation 테스트(기존 리뷰 관례).
+
+### 11.2 Stage B — OAuth + Toss REST/WS 어댑터, 가짜 서버
+
+범위: §5.5, §5.7, §8.4, §9, §1.1-1·2·3 결함 수정, `toss` 번들, `TossRestClient` 429/`Retry-After`.
+
+수용 기준:
+
+- B1. `runMarketDataConformance`가 `TossWebSocketMarketData + FakeTossWsServer`로 전부 통과.
+- B2. 선언 프레임이 계약 배열 형식; 가짜 서버가 객체 프레임을 `wrong-format`으로 거부하는 회귀 테스트 존재.
+- B3. `transportClosed.market`이 어댑터 인스턴스 시장과 일치.
+- B4. 어댑터에 `setInterval` 없음(정적 검사 테스트); `KeepaliveLoop` 주도 ping이 가짜 서버 pong 기록과 1:1.
+- B5. 토큰: 캐시 히트, 5분 전 갱신, 401→1회 재발급→성공, 401×2→`AUTH_FAILED`, 403→재시도 없음, 10 s 재발급 스로틀, 동시 호출 단일 in-flight.
+- B6. REST 429 + `Retry-After: 2` → 2 s 대기 후 재시도, 최대 2회.
+- B7. 런타임 통합(B): `toss` 번들 + 가짜 서버로 A1~A5 동등 시나리오 통과. 특히 `server-shutdown` 프레임 → 1 s 후 재연결 → `NORMAL`.
+- B8. 로그 캡처 전체에서 정규식 `Bearer\s+\S+`, `client_secret=`, 발급된 토큰 문자열 등장 0건.
+- B9. 라이브 접속 가드(§9.5-2) 테스트: 비-loopback fetch 시도가 `LIVE_PROVIDER_FORBIDDEN`으로 실패.
+- B10. 계약 해시 단언과 `TOSS_CONTRACT_SERVERS` 상수 일치 테스트.
+
+Codex 검증 항목: 가짜 서버 행동 표(§9.3)와 AsyncAPI 원문 대조; 어댑터가 계약 밖 필드에 의존하지 않음; 토큰 무효화 경합(재발급 중 401) 코드 리뷰; 비밀 문자열 로그 grep 독립 재실행.
+
+### 11.3 Stage C — 2-프로세스 인계 드릴
+
+범위: §10 하네스와 드릴, 릴리스 체크리스트·배포 가이드 증거 갱신, 런북 “Verification” 절에 드릴 명령 추가.
+
+수용 기준: §10.2의 1~9 전부. 추가로:
+
+- C1. 드릴 3회 연속 통과(플래키 방지), 각 실행 `peakConcurrentConnections===2`, `evictions===0`.
+- C2. 드릴 산출 JSON(§10.3)이 생성되고 체크리스트가 그 요약을 인용.
+- C3. 릴리스 체크리스트의 미완 항목을 `[x]`로 바꾸는 커밋은 C의 마지막 커밋이며, Codex 검증 통과 후에만 작성.
+
+Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2의 REST 기록 0건과 단계 6의 토큰 타임스탬프 순서 재확인; 하네스가 프로덕션 진입점(`dist/main.js`)을 쓰는지 확인(테스트 전용 진입점 금지).
+
+### 11.4 단계 간 규칙
+
+- A는 B 없이 병합 가능하다(`toss` 번들 선택 시 A 상태에서는 `ConfigError: toss adapter is not available in this build`로 시작 실패 — fail-closed). B 병합 후 이 오류 경로가 삭제된다.
+- C는 B에 의존한다. C 전에는 체크리스트 항목이 미완으로 남는다.
+- 각 단계는 별도 커밋 시리즈이며, 단계 시작 전 이 문서와의 편차가 발견되면 이 문서를 먼저 수정하는 `docs:` 커밋을 만든다.
+
+## 12. 보안과 관측성
+
+### 12.1 보안
+
+- 비밀 경계는 §5.6. 브라우저 번들·`web` 서비스 env·CI에 `TOSS_` 금지는 `check:deployment`가 강제.
+- provider IP 허용 목록: Toss는 등록 IP만 허용한다. 배포 가이드에 “`paper-api`의 egress IP는 고정이어야 하며 secret store 옆에 기록”을 추가한다. `403`은 코드가 아니라 운영 설정 문제이므로 `PROVIDER_IP_NOT_ALLOWED` 런북 항목을 `market-data-degraded.md`에 추가한다.
+- 로거 redaction: 기존 규칙에 `authorization`, `access_token`, `client_secret`, `TOSS_CLIENT_SECRET` 키와 `Bearer\s+\S+` 값 패턴을 추가한다. 감사 payload에는 토큰·client id를 넣지 않는다(leaderId만).
+- 가짜 서버는 loopback 전용, 테스트 프로세스 수명과 함께 종료. 자격증명은 매 실행 생성.
+- 관리자 API(`/admin/*`)는 변경 없음. 수동 incident 해제가 인계 복구의 유일한 사람 개입 지점이다.
+
+### 12.2 메트릭 (추가/확정)
+
+| 이름 | 종류 | 라벨 |
+|---|---|---|
+| `runtime_state` | gauge(0/1) | `state` |
+| `market_data_health` | gauge(0/1) | `market`, `state` (기존 알림 사용) |
+| `leader_epoch` | gauge | `market` |
+| `leader_lease_held` | gauge(0/1) | `market` |
+| `leader_lease_wait_seconds` | gauge | `market` |
+| `provider_connections_open` | gauge | 없음(프로세스 합계) |
+| `provider_token_refresh_total` | counter | `result` = `ok\|auth_failed\|throttled\|error` |
+| `feed_reconnect_total` | counter | `market` (기존 알림) |
+| `recovery_duration_seconds` | gauge | `market` (기존 알림) |
+| `market_event_rejected_total` | counter | `market`, `reason` |
+| `outbox_oldest_pending_seconds` | gauge | 없음 (기존 알림) |
+| `outbox_published_total` | counter | 없음 |
+| `outbox_drain_remaining` | gauge | 없음 |
+| `shutdown_drain_seconds` | gauge | `phase` = `inflight\|outbox\|sockets\|leases` |
+| `shutdown_forced_total` | counter | 없음 |
+
+### 12.3 알림 추가 (`infra/monitoring/prometheus-alerts.yaml`)
+
+- `ProviderConnectionsAboveLimit`: `provider_connections_open > 2` for 0m → 즉시, 런북 `redis-or-leader-loss.md`.
+- `LeaderLeaseWaitLong`: `leader_lease_wait_seconds > 60` → 런북 `redis-or-leader-loss.md` (“이전 프로세스가 종료되지 않음” 절 추가).
+- `ProviderAuthFailed`: `increase(provider_token_refresh_total{result="auth_failed"}[10m]) > 0` → 런북 `market-data-degraded.md`.
+- `ShutdownForced`: `increase(shutdown_forced_total[1h]) > 0` → 런북 `postgres-or-outbox-lag.md`.
+
+### 12.4 로그 이벤트
+
+구조화 로그 키 `event`: `runtime.state`, `lease.acquired`, `lease.released`, `lease.lost`, `provider.connect`, `provider.close`, `provider.token.refresh`, `recovery.start`, `recovery.complete`, `outbox.drain`, `shutdown.phase`. 공통 필드 `leaderId`, `market`, `epoch`, `requestId`(해당 시). 비밀 필드 없음.
+
+## 13. 마이그레이션과 롤백
+
+- 스키마: `003_leader_release.sql` — `alter table leader_epochs add column released_at timestamptz;` 단 하나. additive이며 이전 이미지(97921b7)는 이 컬럼을 읽지도 쓰지도 않으므로 호환된다. 기존 규칙대로 배포 전에 one-off job으로 실행한다.
+- 설정: `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`을 secret store에 추가한 뒤 배포한다. 누락 시 새 이미지는 §8.1에 따라 EXIT 1이며 readiness가 켜지지 않으므로 이전 프로세스를 먼저 종료하지 않았다면 영향이 없다(stop-then-start이므로 실제로는 이전 프로세스가 이미 종료된 상태 → 취소만 가능한 공백이 생기며, 이는 배포 전 `docker compose config`/secret 존재 검증으로 예방).
+- 배포 절차: 배포 가이드의 stop-then-start를 그대로 따른다. 이 문서가 그 절차를 처음으로 코드로 보증한다.
+- 롤백: 이전 이미지로 같은 stop-then-start. 이전 이미지는 provider를 조립하지 않으므로 `CANCEL_ONLY`로 시작한다(fail-closed, 알려진 동작). `released_at` 컬럼은 무시된다. Redis 데이터는 rate-limit뿐이므로 롤백에 영향이 없다.
+- 롤백 트리거는 배포 가이드 기존 규칙 + “새 프로세스가 `ACQUIRING_LEASES`에서 60 s 이상 머무르고 이전 프로세스가 이미 종료됨”(lock 잔존 의심 → `pg_locks` 확인 후 `pg_terminate_backend`).
+
+## 14. 미해결 없음 — 결정 사항 요약
+
+- Redis는 lease·fan-out에 쓰지 않는다. 런북·라벨의 드리프트는 A가 고친다.
+- 시장당 WS 1개, 프로세스당 2개, 계정 한도 2개. 인계는 stop-then-start만.
+- 새 프로세스는 lease를 무기한 대기하며 그동안 `CANCEL_ONLY`로 서비스한다. 토큰 발급은 lease 획득 뒤다.
+- provider 실패는 프로세스를 죽이지 않는다. 설정·DB·불변식 실패만 종료한다.
+- 모든 자동 검증은 loopback 가짜 서버로만 수행한다. 예외 없음.
+- `ws 8.18.3` 추가. 다른 런타임 의존성 추가 없음.
+- `RECOVERY_STABILITY_MS`, `SHUTDOWN_DRAIN_DEADLINE_MS`만 조정 가능하게 노출하고, 나머지 시간 상수(60 s ping, 30 s pong 타임아웃, 200 ms outbox 주기, 5분/3회 창, 5분 토큰 리드, 10 s 토큰 스로틀)는 코드 상수다.
+
+## 15. 자기 검토 결과
+
+- 모순 점검: §6.6(소켓 종료 후 lease 해제)와 §5.4(lease 획득 후 연결)와 §10.2-5(연결 0인 순간 존재)가 같은 불변식을 세 관점에서 말하며 충돌하지 않는다. §8.2(provider 오류는 정상 반환)와 `StartupCoordinator`의 catch(불변식 오류만 도달)가 정합한다. §6.3(`/health/ready` 200 while `ACQUIRING_LEASES`)와 §6.6-1(`DRAINING`에서 503)은 서로 다른 상태에 대한 규칙이며 충돌하지 않는다.
+- 범위 점검: 실계좌·주문 채널·다중 replica·Redis lease·프론트 변경을 명시적으로 제외했고, 모든 신규 컴포넌트에 소유 단계가 있다.
+- 계약 점검: 연결 2개·topic 100·선언 5/s·PING 60 s·180 s idle·`server-shutdown`·토큰 단일 유효성은 모두 pinned 계약 원문에서 확인한 값이다.
+- 잔여 위험(허용): lease 손실 감지 지연 중 일시적 3번째 연결(§6.5), deadline 초과 시 outbox 잔여 행의 at-least-once 재발행(§6.6-4).
