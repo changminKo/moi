@@ -14,7 +14,11 @@ import { StartupCoordinator } from '../lifecycle/startup-coordinator.js';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
 import { registerAdminRoutes } from '../modules/admin/admin-routes.js';
+import { registerFxRoutes } from '../modules/fx/fx-routes.js';
+import { FxService } from '../modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../modules/health/health-routes.js';
+import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
+import { InstrumentService } from '../modules/instruments/instrument-service.js';
 import { OrderPlacementService } from '../modules/orders/order-placement-service.js';
 import { registerOrderRoutes } from '../modules/orders/order-routes.js';
 import { OrderService } from '../modules/orders/order-service.js';
@@ -114,12 +118,27 @@ class CountingUnitOfWork extends UnitOfWork {
       this.#inFlight -= 1;
     }
   }
+  /** Counts a non-UnitOfWork ledger transaction (fills, FX) toward the drain. */
+  async track<T>(work: () => Promise<T>): Promise<T> {
+    this.#inFlight += 1;
+    try {
+      return await work();
+    } finally {
+      this.#inFlight -= 1;
+    }
+  }
   async drain(deadline: number): Promise<number> {
     while (this.#inFlight > 0 && Date.now() < deadline)
       await new Promise((resolve) => setTimeout(resolve, 50));
     return this.#inFlight;
   }
 }
+
+/** Static virtual FX table for the paper ledger (fee-free, §2.1 virtual FX). */
+const FX_RATES: Readonly<Record<string, string>> = {
+  'KRW:USD': '0.0007',
+  'USD:KRW': '1428.57',
+};
 
 function defaultLog(event: string, fields: Record<string, unknown>): void {
   console.log(
@@ -634,7 +653,7 @@ export class ProductionRuntime {
     const persistFill = createFillPersistence({
       db: this.#db,
       log: this.#log,
-      onTransaction: (work) => this.#uow.run(() => work()),
+      onTransaction: (work) => this.#uow.track(work),
     });
     const engine = new PaperEngine({
       feeModel: createFeeModel({
@@ -800,6 +819,16 @@ export class ProductionRuntime {
           principal,
           service: orderService,
         });
+        await registerInstrumentRoutes(
+          instance,
+          this.#instrumentService(),
+          (market, symbol) => this.#quote(market, symbol),
+        );
+        await registerFxRoutes(instance, this.#fxService(), {
+          principal,
+          canFx: () =>
+            this.#capabilities.tradingHealth(this.#runtimeReasons()).fx,
+        });
         await registerStreamRoutes(instance, {
           principal,
           source,
@@ -861,6 +890,98 @@ export class ProductionRuntime {
     });
     this.#bridge.attach();
     return app;
+  }
+
+  #instrumentService(): InstrumentService {
+    const symbols = this.#o.symbols ?? this.#o.bundle.symbols;
+    return new InstrumentService({
+      catalog: MARKETS.flatMap((market) =>
+        symbols[market].map((symbol) => ({
+          market,
+          symbol,
+          name: symbol,
+          tradable: true,
+          currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
+        })),
+      ),
+    });
+  }
+
+  /** Current book-derived quote from this leader's market state (never invented). */
+  #quote(market: Market, symbol: string): Record<string, unknown> {
+    const store = this.#stores.get(market);
+    const book = store?.get(symbol) as
+      | { asks?: { price: string }[]; bids?: { price: string }[] }
+      | undefined;
+    const health = this.markets.get(market)?.health.state ?? 'RECOVERING';
+    return {
+      market,
+      symbol,
+      price: book?.asks?.[0]?.price ?? book?.bids?.[0]?.price ?? null,
+      asOf: new Date().toISOString(),
+      health,
+      recoveryEpoch: store?.recoveryEpoch.toString() ?? '0',
+      marketDataVersion: store?.currentVersion.toString() ?? '0',
+    };
+  }
+
+  #fxService(): FxService {
+    return new FxService({
+      rate: (from, to) => FX_RATES[`${from}:${to}`] ?? '0.0007',
+      loadWallets: async (sessionId) => {
+        const rows = await sql<{ currency: 'KRW' | 'USD'; available: string }>`
+          select currency, available::text as available from wallets where session_id = ${sessionId}::uuid
+        `.execute(this.#db);
+        return new Map(rows.rows.map((row) => [row.currency, row.available]));
+      },
+      onExchange: (quote, receipt) =>
+        this.#uow.track(() =>
+          this.#db.transaction().execute(async (trx) => {
+            const debit = await sql<{ id: string }>`
+              update wallets set total = total - ${quote.sourceAmount}::numeric,
+                available = available - ${quote.sourceAmount}::numeric, version = version + 1
+              where session_id = ${quote.sessionId}::uuid and currency = ${quote.from}
+                and available >= ${quote.sourceAmount}::numeric
+              returning id
+            `.execute(trx);
+            if (debit.rows.length !== 1)
+              throw new DomainError(
+                'INSUFFICIENT_AVAILABLE_CASH',
+                'insufficient balance for the conversion',
+              );
+            await sql`
+              update wallets set total = total + ${quote.targetAmount}::numeric,
+                available = available + ${quote.targetAmount}::numeric, version = version + 1
+              where session_id = ${quote.sessionId}::uuid and currency = ${quote.to}
+            `.execute(trx);
+            const payload = {
+              quoteId: quote.id,
+              from: quote.from,
+              to: quote.to,
+              sourceAmount: quote.sourceAmount,
+              targetAmount: quote.targetAmount,
+              exchangedAt: receipt.exchangedAt,
+            };
+            await sql`
+              insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
+              values (${randomUUID()}::uuid, ${quote.sessionId}, null, 'FX_CONVERTED', ${JSON.stringify(payload)}::jsonb, now())
+            `.execute(trx);
+            const sequence = await sql<{ sequence: string }>`
+              with next as (
+                select coalesce(max(account_sequence), 0) + 1 as sequence
+                from account_sequences where session_id = ${quote.sessionId}::uuid
+              )
+              insert into account_sequences (id, session_id, account_sequence, mutation_kind)
+              select ${randomUUID()}::uuid, ${quote.sessionId}::uuid, sequence, 'FX_CONVERTED' from next
+              returning account_sequence::text as sequence
+            `.execute(trx);
+            await sql`
+              insert into outbox_events (id, event_id, session_id, stream_sequence, event_type, payload)
+              values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${quote.sessionId}::uuid, ${sequence.rows[0]?.sequence ?? '1'}, 'FX_CONVERTED', ${JSON.stringify(payload)}::jsonb)
+            `.execute(trx);
+          }),
+        ),
+    });
   }
 
   #runtimeReasons(): string[] {

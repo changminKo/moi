@@ -885,4 +885,121 @@ describe('ProductionRuntime', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  it(
+    'serves instrument search, quotes, and virtual FX in production; FX is refused while not SERVING',
+    async () => {
+      await observer.query("select pg_try_advisory_lock(hashtext('KR'))");
+      const waiting = await start({ awaitServing: false });
+      await vi.waitFor(() =>
+        expect(waiting.runtime.state.current).toBe('ACQUIRING_LEASES'),
+      );
+      const client = await anonymousSession(waiting.origin);
+      const headers = (extra: Record<string, string> = {}) => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+        ...extra,
+      });
+      const search = await json(`${waiting.origin}/api/v1/instruments?q=AAPL`);
+      expect(search.status).toBe(200);
+      expect(search.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            market: 'US',
+            symbol: 'AAPL',
+            tradable: true,
+          }),
+        ]),
+      );
+      const blocked = await json(`${waiting.origin}/api/v1/fx/quotes`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '10000' }),
+      });
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.code).toBe('CANCEL_ONLY');
+      await observer.query("select pg_advisory_unlock(hashtext('KR'))");
+      await vi.waitFor(
+        () => expect(waiting.runtime.state.current).toBe('SERVING'),
+        { timeout: 15_000 },
+      );
+
+      waiting.bundle.streamFor('US').emitOrderBook({
+        market: 'US',
+        symbol: 'AAPL',
+        book: {
+          market: 'US',
+          symbol: 'AAPL',
+          currency: 'USD',
+          asks: [{ price: '190.30', volume: '100' }],
+          bids: [{ price: '190.20', volume: '100' }],
+        },
+        sourceTimestamp: null,
+      });
+      await vi.waitFor(async () => {
+        const quote = await json(
+          `${waiting.origin}/api/v1/markets/US/symbols/AAPL/quote`,
+        );
+        expect(quote.body).toMatchObject({
+          market: 'US',
+          symbol: 'AAPL',
+          price: '190.30',
+          health: 'HEALTHY',
+        });
+      });
+      const quote = await json(`${waiting.origin}/api/v1/fx/quotes`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '10000' }),
+      });
+      expect(quote.status, JSON.stringify(quote.body)).toBeLessThan(300);
+      const conversion = await json(`${waiting.origin}/api/v1/fx/conversions`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ quoteId: quote.body.quoteId }),
+      });
+      expect(conversion.status, JSON.stringify(conversion.body)).toBeLessThan(
+        300,
+      );
+      const wallets = (
+        await observer.query(
+          'select currency, total::text as total, available::text as available from wallets where session_id = $1 order by currency',
+          [client.id],
+        )
+      ).rows;
+      expect(wallets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            currency: 'KRW',
+            total: '9990000',
+            available: '9990000',
+          }),
+          expect.objectContaining({
+            currency: 'USD',
+            total: '7',
+            available: '7',
+          }),
+        ]),
+      );
+      const outbox = (
+        await observer.query(
+          "select event_type from outbox_events where session_id = $1 and event_type = 'FX_CONVERTED'",
+          [client.id],
+        )
+      ).rows;
+      expect(outbox).toHaveLength(1);
+      expect(
+        (
+          await observer.query(
+            "select count(*)::int as n from audit_events where event_type = 'FX_CONVERTED' and session_reference = $1",
+            [client.id],
+          )
+        ).rows[0]?.n,
+      ).toBe(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
 });
