@@ -45,6 +45,25 @@ function stableError(
       },
     };
   }
+  // Domain and route errors that already carry a stable public code (for
+  // example `CANCEL_ONLY` with 409) keep it; only unknown failures collapse to
+  // INTERNAL_ERROR so nothing internal leaks.
+  if (
+    status >= 400 &&
+    status < 500 &&
+    typeof error.code === 'string' &&
+    /^[A-Z][A-Z_]*$/.test(error.code)
+  ) {
+    return {
+      status,
+      body: {
+        code: error.code,
+        message: error.message,
+        retryable: false,
+        requestId,
+      },
+    };
+  }
   if (status === 403) {
     return {
       status,
