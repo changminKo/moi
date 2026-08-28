@@ -50,6 +50,7 @@ import { AdmissionLatch } from './admission-latch.js';
 import { createFillPersistence } from './fill-persistence.js';
 import { leaseAuditPort } from './lease-audit.js';
 import { LeaseRegistry } from './lease-registry.js';
+import { verifyLedgerInvariants } from './ledger-invariants.js';
 import { MarketRuntime } from './market-runtime.js';
 import { createOutboxEventSource } from './outbox-event-source.js';
 import type { FakeProviderBundle, ProviderBundle } from './provider-bundle.js';
@@ -132,22 +133,7 @@ function defaultLog(event: string, fields: Record<string, unknown>): void {
 }
 
 async function defaultVerifyInvariants(db: Database): Promise<void> {
-  const negative = await sql<{ n: number }>`
-    select count(*)::int as n from wallets where available < 0 or total < 0
-  `.execute(db);
-  if ((negative.rows[0]?.n ?? 0) > 0)
-    throw new DomainError('INVARIANT_VIOLATION', 'wallet balance below zero');
-  const mismatch = await sql<{ n: number }>`
-    select count(*)::int as n from wallets w
-    where w.reserved <> coalesce((select sum(r.amount) from reservations r where r.wallet_id = w.id and r.released_at is null), 0)
-  `
-    .execute(db)
-    .catch(() => ({ rows: [{ n: 0 }] }));
-  if ((mismatch.rows[0]?.n ?? 0) > 0)
-    throw new DomainError(
-      'INVARIANT_VIOLATION',
-      'wallet reservations do not reconcile',
-    );
+  await verifyLedgerInvariants(db);
 }
 
 /**

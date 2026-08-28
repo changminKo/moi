@@ -44,7 +44,9 @@ select event_type, count(*) from audit_events
 where occurred_at > now() - interval '1 hour' group by event_type order by 2 desc;
 select w.session_id, w.currency, w.available, w.reserved,
        coalesce(sum(r.amount), 0) as open_reservations
-from wallets w left join reservations r on r.wallet_id = w.id and r.released_at is null
+from wallets w left join reservations r
+  on r.session_id = w.session_id and r.kind = 'CASH'
+ and r.currency = w.currency and r.released = false
 group by w.session_id, w.currency, w.available, w.reserved
 having w.reserved <> coalesce(sum(r.amount), 0);
 ```
@@ -62,15 +64,23 @@ The last query must return zero rows; any row is the invariant the latch protect
 
 Run all four before declaring the incident over. Every query is read-only.
 
-1. **Reservations** — no reservation may outlive its order:
+1. **Reservations** — no unreleased reservation may outlive its order, and every wallet's `reserved` must equal its unreleased CASH reservations (the same check `paper-api` runs at RESTORING):
    ```sql
    select r.id, r.order_id, o.status
    from reservations r
    join orders o on o.id = r.order_id
    where o.status in ('FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')
-     and r.released_at is null;
+     and r.released = false;
+   select w.session_id, w.currency, w.reserved,
+          coalesce((select sum(r.amount) from reservations r
+                    where r.session_id = w.session_id and r.kind = 'CASH'
+                      and r.currency = w.currency and r.released = false), 0) as open_reservations
+   from wallets w
+   where w.reserved <> coalesce((select sum(r.amount) from reservations r
+                    where r.session_id = w.session_id and r.kind = 'CASH'
+                      and r.currency = w.currency and r.released = false), 0);
    ```
-   Expected: zero rows.
+   Expected: zero rows from both.
 2. **Leader fence** — exactly one live epoch per market and the running process holds it:
    ```sql
    select market, max(epoch) as epoch, bool_or(released_at is null) as live

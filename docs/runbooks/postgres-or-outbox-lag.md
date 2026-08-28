@@ -50,15 +50,23 @@ curl -sS "$API_ORIGIN/metrics" | grep -E 'transaction_(error|duration)|db_lock_w
 
 Run all four before declaring the incident over. Every query is read-only.
 
-1. **Reservations** — no reservation may outlive its order:
+1. **Reservations** — no unreleased reservation may outlive its order, and every wallet's `reserved` must equal its unreleased CASH reservations (the same check `paper-api` runs at RESTORING):
    ```sql
    select r.id, r.order_id, o.status
    from reservations r
    join orders o on o.id = r.order_id
    where o.status in ('FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')
-     and r.released_at is null;
+     and r.released = false;
+   select w.session_id, w.currency, w.reserved,
+          coalesce((select sum(r.amount) from reservations r
+                    where r.session_id = w.session_id and r.kind = 'CASH'
+                      and r.currency = w.currency and r.released = false), 0) as open_reservations
+   from wallets w
+   where w.reserved <> coalesce((select sum(r.amount) from reservations r
+                    where r.session_id = w.session_id and r.kind = 'CASH'
+                      and r.currency = w.currency and r.released = false), 0);
    ```
-   Expected: zero rows.
+   Expected: zero rows from both.
 2. **Leader fence** — exactly one live epoch per market and the running process holds it:
    ```sql
    select market, max(epoch) as epoch, bool_or(released_at is null) as live
