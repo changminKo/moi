@@ -267,7 +267,7 @@ export class TossRestClient
         ) {
           // The provider invalidates the previous token on reissue (§5.5): refresh once.
           invalidated = true;
-          this.options.tokenProvider.invalidate();
+          this.options.tokenProvider.invalidate(token);
           last = new MarketDataError(
             'AUTH_FAILED',
             'Toss REST rejected the access token',

@@ -69,8 +69,14 @@ export class OAuthTokenProvider implements TokenProvider {
     return this.#inFlight;
   }
 
-  /** Drops the cached token (after a provider 401); the next call reissues. */
-  invalidate(): void {
+  /**
+   * Drops the cached token after a provider 401. When the rejected token is
+   * given, a late rejection of an already-replaced token is ignored so two
+   * concurrent 401s cannot discard a freshly issued token.
+   */
+  invalidate(rejectedToken?: string): void {
+    if (rejectedToken !== undefined && this.#cached?.token !== rejectedToken)
+      return;
     this.#cached = null;
   }
 

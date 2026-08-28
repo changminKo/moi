@@ -115,6 +115,7 @@ export class TossWebSocketMarketData implements MarketDataStream {
   private readonly clearTimeoutFn: typeof clearTimeout;
   private readonly random: () => number;
   private readonly socketFactory: TossSocketFactory;
+  private lastToken: string | undefined;
 
   constructor(private readonly options: TossWebSocketOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -145,7 +146,7 @@ export class TossWebSocketMarketData implements MarketDataStream {
         error.statusCode === 401 &&
         this.options.tokenProvider.invalidate
       ) {
-        this.options.tokenProvider.invalidate();
+        this.options.tokenProvider.invalidate(this.lastToken);
         await this.handshake(signal);
         return;
       }
@@ -155,6 +156,7 @@ export class TossWebSocketMarketData implements MarketDataStream {
 
   private async handshake(signal: AbortSignal): Promise<void> {
     const token = await this.options.tokenProvider.getAccessToken(signal);
+    this.lastToken = token;
     if (signal.aborted) throw abortError();
     this.closed = false;
     this.controlQueue = [];

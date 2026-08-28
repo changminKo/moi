@@ -138,6 +138,6 @@ export interface FxRateSource {
  */
 export interface TokenProvider {
   getAccessToken(signal: AbortSignal): Promise<string>;
-  /** Drops a cached token after the provider rejected it (401). */
-  invalidate?(): void;
+  /** Drops a cached token after the provider rejected it (401); pass the rejected token when known. */
+  invalidate?(rejectedToken?: string): void;
 }

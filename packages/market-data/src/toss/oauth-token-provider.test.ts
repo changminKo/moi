@@ -168,3 +168,22 @@ describe('OAuthTokenProvider (B5)', () => {
     expect(outcomes).toEqual(['ok']);
   });
 });
+
+describe('OAuthTokenProvider.invalidate guard', () => {
+  it('ignores an invalidate for a token that is no longer the cached one', async () => {
+    const { provider, advance, issuedCount } = harness();
+    const first = await provider.getAccessToken(signal());
+    provider.invalidate(first);
+    advance(TOKEN_MIN_REISSUE_INTERVAL_MS);
+    const second = await provider.getAccessToken(signal());
+    expect(second).toBe('tok-2');
+    // A late 401 for the *old* token must not drop the fresh one.
+    provider.invalidate(first);
+    expect(await provider.getAccessToken(signal())).toBe('tok-2');
+    expect(issuedCount()).toBe(2);
+    // Untargeted invalidate keeps the old behaviour.
+    provider.invalidate();
+    advance(TOKEN_MIN_REISSUE_INTERVAL_MS);
+    expect(await provider.getAccessToken(signal())).toBe('tok-3');
+  });
+});
