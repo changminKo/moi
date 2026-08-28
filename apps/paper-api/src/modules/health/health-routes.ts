@@ -33,17 +33,19 @@ export async function registerHealthRoutes(
   });
   app.get('/health/ready', async (request, reply) => {
     headers(reply, request);
+    const draining = deps.draining?.() === true;
     const [db, audit] = await Promise.all([
       dependencyAvailable(deps.db),
       dependencyAvailable(deps.audit),
     ]);
     const body = {
-      status: db && audit ? 'ready' : 'not_ready',
+      status: db && audit && !draining ? 'ready' : 'not_ready',
       db,
       audit,
+      draining,
       requestId: request.id,
     };
-    if (!db || !audit)
+    if (!db || !audit || draining)
       return reply.code(503).send({
         code: 'NOT_READY',
         message: 'Required dependencies are unavailable',

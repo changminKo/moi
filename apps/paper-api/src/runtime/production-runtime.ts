@@ -63,6 +63,12 @@ type LogFn = (event: string, fields: Record<string, unknown>) => void;
 type ShutdownSpy = (step: string) => () => void;
 
 const MARKETS: readonly Market[] = ['KR', 'US'];
+/**
+ * After losing a lease the process yields for longer than one lease poll
+ * interval before re-acquiring, so a successor already polling (§6.5, §10.2-10)
+ * wins the bundle instead of the loser flapping back into leadership.
+ */
+const REELECTION_YIELD_MS = 1_000;
 const MARKET_DENIED: readonly Capability[] = [
   'PLACE',
   'AMEND',
@@ -509,6 +515,18 @@ export class ProductionRuntime {
     if (this.#stopping) return;
     this.state.transition('ACQUIRING_LEASES');
     try {
+      await new Promise<void>((resolveYield) => {
+        const timer = setTimeout(resolveYield, REELECTION_YIELD_MS);
+        this.#controller.signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            resolveYield();
+          },
+          { once: true },
+        );
+      });
+      if (this.#controller.signal.aborted || this.#stopping) return;
       await this.#acquireBundle(this.#controller.signal);
       if (this.#controller.signal.aborted) return;
       this.state.transition('RECOVERING');

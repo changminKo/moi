@@ -21,6 +21,8 @@ export interface FakeRestRequestRecord {
   readonly status: number;
   /** Whether an Authorization header was present — never the token itself. */
   readonly authorized: boolean;
+  /** Wall-clock ms when the request was answered. */
+  readonly at: number;
 }
 
 const DEFAULT_TOKEN_TTL_SECONDS = 86_400;
@@ -74,6 +76,7 @@ export class FakeTossRestServer {
   #ipAllowed = true;
   #tokenRequests = 0;
   #port = 0;
+  #onTokenIssued: ((token: string) => void) | undefined;
 
   constructor() {
     this.#server = createServer((request, response) => {
@@ -141,6 +144,10 @@ export class FakeTossRestServer {
   activeTokenCount(): number {
     return this.#tokens.size;
   }
+  /** Lets a harness hand freshly issued tokens to a fake WebSocket server. */
+  onTokenIssued(listener: (token: string) => void): void {
+    this.#onTokenIssued = listener;
+  }
 
   // ---- HTTP ---------------------------------------------------------------
 
@@ -152,7 +159,13 @@ export class FakeTossRestServer {
     const method = request.method ?? 'GET';
     const authorized = typeof request.headers.authorization === 'string';
     const record = (status: number): void => {
-      this.#requests.push({ method, path: url.pathname, status, authorized });
+      this.#requests.push({
+        method,
+        path: url.pathname,
+        status,
+        authorized,
+        at: Date.now(),
+      });
     };
     const injected = this.#failNext.get(url.pathname);
     if (injected && injected.remaining > 0) {
@@ -334,6 +347,7 @@ export class FakeTossRestServer {
       expiresAt: Date.now() + this.#tokenTtlSeconds * 1000,
     });
     this.#activeTokenByClient.set(clientId, token);
+    this.#onTokenIssued?.(token);
     record(200);
     json(response, 200, {
       access_token: token,
