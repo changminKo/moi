@@ -394,4 +394,25 @@ describe('MarketRuntime', () => {
     await runtime.close();
     expect(stream.receivedEvents()).toBeDefined();
   });
+
+  it('feeds every recovered REST baseline into the engine as a RECOVERY_REST book and reports transport changes', async () => {
+    const transports: string[] = [];
+    const { runtime, engine, stream } = build({
+      onTransport: (state) => transports.push(state),
+    });
+    await runtime.connect(new AbortController().signal);
+    expect(engine.onRecoveryOrderBook).toHaveBeenCalledTimes(1);
+    const envelope = (
+      engine.onRecoveryOrderBook.mock.calls as unknown[][]
+    )[0]?.[0] as {
+      recoveryEpoch: bigint;
+      payload: { symbol: string; asks: unknown[] };
+    };
+    expect(envelope.recoveryEpoch).toBe(3n);
+    expect(envelope.payload).toMatchObject({ symbol: 'AAPL', asks: BOOK.asks });
+    expect(transports).toEqual(['connected']);
+    stream.emitTransportClosed('gone');
+    await vi.waitFor(() => expect(transports).toContain('closed'));
+    await runtime.close();
+  });
 });

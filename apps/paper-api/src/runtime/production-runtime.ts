@@ -741,6 +741,12 @@ export class ProductionRuntime {
       stabilityMs: this.#o.config.recoveryStabilityMs,
       metrics: this.metrics,
       log: this.#log,
+      onTransport: () => {
+        this.metrics.gauge(
+          'provider_connections_open',
+          this.#o.bundle.connectionsOpen(),
+        );
+      },
     });
     this.markets.set(market, runtime);
   }

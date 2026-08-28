@@ -75,6 +75,8 @@ export interface MarketRuntimeDeps {
   readonly reconnectDelayMs?: (attempt: number) => number;
   readonly keepaliveIntervalMs?: number;
   readonly pongTimeoutMs?: number;
+  /** Fired when this market's provider transport opens or closes (§12.2 gauge). */
+  readonly onTransport?: (state: 'connected' | 'closed') => void;
 }
 
 type ProviderFailure = { readonly statusCode?: number; readonly code?: string };
@@ -234,6 +236,7 @@ export class MarketRuntime {
       });
       this.#startLoop();
       this.#startKeepalive();
+      this.#d.onTransport?.('connected');
       return true;
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
@@ -256,6 +259,21 @@ export class MarketRuntime {
 
   async #applyRecovery(outcome: RecoveryOutcome): Promise<void> {
     const store = this.#d.stateStore;
+    // Every recovered REST baseline becomes the engine's book for that symbol,
+    // labelled RECOVERY_REST so any fill it produces is a recovery fill. Without
+    // it, resting orders would wait for the first live frame after a reconnect.
+    for (const symbol of outcome.recoveredSymbols) {
+      const snapshot = store.get(symbol) as
+        | { book?: OrderBookSnapshot }
+        | undefined;
+      if (snapshot?.book === undefined) continue;
+      await this.#d.engine.onRecoveryOrderBook({
+        recoveryEpoch: store.recoveryEpoch,
+        leaderFencingToken: store.leaderFencingToken,
+        marketDataVersion: store.currentVersion,
+        payload: snapshot.book,
+      });
+    }
     for (const trigger of outcome.recoveryTriggers) {
       await this.#d.engine.onRecoveryOrderBook({
         recoveryEpoch: store.recoveryEpoch,
@@ -344,6 +362,7 @@ export class MarketRuntime {
 
   async #onTransportClosed(reason: string): Promise<void> {
     this.#stopKeepalive();
+    this.#d.onTransport?.('closed');
     if (this.#controller.signal.aborted) return;
     this.#d.log('provider.close', { market: this.#d.market, reason });
     // Any transport loss is TRANSPORT_CLOSED (§8.4); the provider's reason is
