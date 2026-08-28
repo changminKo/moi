@@ -468,13 +468,25 @@ describe('graceful leader handoff drill (§10.2)', () => {
         5_000,
         'P3 waits for KR again',
       );
-      const split = harness.leaderEpochSamples.filter((s) => {
+      // A dead backend frees KR instantly, so the successor may hold KR for a
+      // few ms before the loser commits its US release. The invariant is that
+      // no split bundle *persists* (§3.11): no run of split samples ≥ 500 ms.
+      const isSplit = (s: { rows: unknown[] }) => {
         const live = (
           s.rows as { leader_id: string; released_at: Date | null }[]
         ).filter((r) => r.released_at === null);
         return live.length === 2 && live[0]?.leader_id !== live[1]?.leader_id;
-      });
-      expect(split).toHaveLength(0);
+      };
+      let longestSplitMs = 0;
+      let runStart: number | undefined;
+      for (const sample of harness.leaderEpochSamples) {
+        if (isSplit(sample)) {
+          runStart ??= sample.t;
+          longestSplitMs = Math.max(longestSplitMs, sample.t - runStart);
+        } else runStart = undefined;
+      }
+      expect(longestSplitMs).toBeLessThan(500);
+      evidence.step10LongestSplitMs = longestSplitMs;
       evidence.step10 = {
         restBeforeLoss,
         restAfter: harness.rest.requests().length,

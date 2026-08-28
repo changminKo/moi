@@ -504,6 +504,11 @@ export class ProductionRuntime {
         });
       }
     };
+    // Release the surviving lease right after the sockets close and before any
+    // incident write: the successor must never see this process holding one
+    // market while the DB round-trips for incidents complete (§6.5-5).
+    await safely('abort_pending', () => this.leases.abortPending());
+    await safely('release_all', () => this.leases.releaseAll());
     await safely('lost_incident', async () =>
       this.markets.get(reason.lostMarket)?.health.onClose('LEADER_LEASE_LOST'),
     );
@@ -511,8 +516,6 @@ export class ProductionRuntime {
       this.markets.get(surviving)?.health.onClose('LEADER_BUNDLE_BROKEN'),
     );
     await safely('refresh_incidents', () => this.#refreshIncidents());
-    await safely('abort_pending', () => this.leases.abortPending());
-    await safely('release_all', () => this.leases.releaseAll());
     if (this.#stopping) return;
     this.state.transition('ACQUIRING_LEASES');
     try {
