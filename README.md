@@ -58,17 +58,24 @@ described in the deployment guide and run:
 docker compose -f infra/compose.yaml up --build
 ```
 
+`MARKET_DATA_ADAPTER` selects the market-data provider and has no implicit
+default in production: `infra/compose.yaml` declares the literal `toss`, and a
+production process refuses to start with `fake` or with the variable missing.
 `MARKET_DATA_ADAPTER=fake` is for deterministic tests and development only.
-Provider tokens, database URLs, Redis URLs, admin credentials, and session
-secrets are runtime-only values and must never enter the browser bundle.
+Provider credentials (`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`), database URLs,
+Redis URLs, admin credentials, and session secrets are runtime-only values and
+must never enter the browser bundle.
 
-The current image does not yet compose the live provider adapter, market
-leader lifecycle, and outbox publisher into `paper-api` at runtime. When the
-fake adapter is not explicitly selected, the API therefore starts fail-closed
-in `CANCEL_ONLY`: reads and cancellations remain available, while placement
-and virtual FX are disabled. Do not enable the fake adapter for a public
-deployment. The release remains blocked until the runtime integration and its
-graceful leader-handoff drill are complete; see the release checklist.
+At runtime one `paper-api` process owns the HTTP API, one fenced leader lease
+per market (PostgreSQL advisory locks), one provider WebSocket per market, the
+paper engine, the outbox publisher, and the user stream. Provider failures
+degrade the affected market to `CANCEL_ONLY` and retry; only configuration,
+database, or invariant failures stop the process. Deployments are
+stop-then-start: the new process waits for the lease bundle in `CANCEL_ONLY`
+while the old one drains, so no third provider connection is ever opened. The
+two-process drill that proves this runs against a loopback fake provider
+(`pnpm --filter @skipjack/paper-api test:drill`); no automated test contacts
+Toss. See the release checklist for the recorded evidence.
 
 ## Simulation limits
 
