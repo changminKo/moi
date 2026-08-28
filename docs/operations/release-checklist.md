@@ -51,14 +51,19 @@ handoff therefore remains unchecked below.
   with identical ledger/audit counts and zero checked invariant violations.
 - [x] The previous read surface and a pre-backup anonymous-session cookie read
   the forward-compatible restored schema without rolling migrations back.
-- [ ] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
+- [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`
   passed 3 consecutive runs — `2026-08-28T00-38-41.009Z-drill.json`, `2026-08-28T00-38-49.313Z-drill.json`, `2026-08-28T00-38-57.582Z-drill.json` —
   each with `peakConcurrentConnections=2`, `evictions=0`, no split-lease
   observation, cancel exactly-once across P1/P2 sockets, and step-11 shutdown
-  while polling ≤ 3 s. The box is ticked only after independent (Codex)
-  re-execution of the drill.
+  while polling ≤ 3 s. Independent re-execution (Codex, 2026-08-28, HEAD
+  `775d469`): all gates green and 3 consecutive drill runs —
+  `2026-08-28T02-18-59.973Z`, `02-19-11.153Z`, `02-19-20.975Z` — each with
+  `peakConcurrentConnections=2`, `evictions=0`. Known: under whole-monorepo
+  parallel `pnpm test` load the 100 ms split-lease sampler once caught the
+  surviving-lease release window of a re-electing process (harmless — that
+  process holds no provider connection); rerun the drill alone to confirm.
   **Blocker:** the production provider/leader/outbox composition is not wired.
   Owner is unassigned; no exception or expiry is granted, so release remains
   blocked.
