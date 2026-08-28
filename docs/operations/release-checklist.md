@@ -53,6 +53,12 @@ handoff therefore remains unchecked below.
   the forward-compatible restored schema without rolling migrations back.
 - [ ] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
+  Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`
+  passed 3 consecutive runs — `2026-08-28T00-38-41.009Z-drill.json`, `2026-08-28T00-38-49.313Z-drill.json`, `2026-08-28T00-38-57.582Z-drill.json` —
+  each with `peakConcurrentConnections=2`, `evictions=0`, no split-lease
+  observation, cancel exactly-once across P1/P2 sockets, and step-11 shutdown
+  while polling ≤ 3 s. The box is ticked only after independent (Codex)
+  re-execution of the drill.
   **Blocker:** the production provider/leader/outbox composition is not wired.
   Owner is unassigned; no exception or expiry is granted, so release remains
   blocked.
