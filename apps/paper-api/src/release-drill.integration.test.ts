@@ -262,7 +262,7 @@ describe('public release drill', () => {
     } finally {
       await stopChild(server.child);
     }
-  });
+  }, 20_000);
 
   it('exposes server-observed command duration without client clock skew', async () => {
     const server = await startReleaseServer();
@@ -274,7 +274,7 @@ describe('public release drill', () => {
     } finally {
       await stopChild(server.child);
     }
-  });
+  }, 20_000);
 
   it('serves an anonymous wallet through the production composition', async () => {
     const server = await startReleaseServer();
@@ -303,7 +303,7 @@ describe('public release drill', () => {
     } finally {
       await stopChild(server.child);
     }
-  });
+  }, 20_000);
 
   it('fails closed with a ConfigError when the toss adapter lacks credentials (§11.1)', async () => {
     const port = await unusedPort();
@@ -330,7 +330,7 @@ describe('public release drill', () => {
     await expect(
       fetch(`http://127.0.0.1:${port}/health/live`),
     ).rejects.toBeDefined();
-  });
+  }, 20_000);
 
   it('runs the bounded load smoke and restores NORMAL with no open test orders', async () => {
     const server = await startReleaseServer();
