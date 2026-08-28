@@ -138,3 +138,77 @@ describe('PaperEngine', () => {
     expect(after.filledQuantity).toBe('0');
   });
 });
+
+describe('PaperEngine.restoreOrder', () => {
+  it('registers a persisted order without matching and keeps its filled quantity', async () => {
+    const { createFeeModel } = await import('@skipjack/trading-core');
+    const fills: unknown[] = [];
+    const engine = new PaperEngine({
+      feeModel: createFeeModel({
+        version: 't',
+        market: 'US',
+        currency: 'USD',
+        commissionRate: '0',
+        sellTaxRate: '0',
+        roundingDecimals: 2,
+        roundingMode: 'HALF_UP',
+      }),
+      onFill: (order, match) => {
+        fills.push({
+          id: order.id,
+          filled: match.filledQuantity,
+          next: match.nextStatus,
+        });
+      },
+    });
+    engine.restoreOrder({
+      id: 'o1',
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '5',
+      limitPrice: '100',
+      status: 'PARTIALLY_FILLED',
+      version: 3n,
+      filledQuantity: '2',
+    });
+    engine.restoreOrder({
+      id: 'c1',
+      sessionId: 's1',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'STOP',
+      quantity: '1',
+      stopPrice: '300',
+      status: 'PENDING_TRIGGER',
+      version: 1n,
+      filledQuantity: '0',
+    });
+    expect(engine.getOrder('o1')).toMatchObject({
+      status: 'PARTIALLY_FILLED',
+      filledQuantity: '2',
+      version: 3n,
+    });
+    expect(engine.getOrder('c1')).toMatchObject({ status: 'PENDING_TRIGGER' });
+    expect(fills).toHaveLength(0);
+    await engine.onOrderBook({
+      recoveryEpoch: 2n,
+      leaderFencingToken: 2n,
+      marketDataVersion: 1n,
+      payload: {
+        market: 'US',
+        symbol: 'AAPL',
+        currency: 'USD',
+        asks: [{ price: '99', volume: '10' }],
+        bids: [{ price: '98', volume: '10' }],
+      },
+    });
+    expect(fills).toEqual([{ id: 'o1', filled: '5', next: 'FILLED' }]);
+    expect(engine.getOrder('o1')?.status).toBe('FILLED');
+  });
+});

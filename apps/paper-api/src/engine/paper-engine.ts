@@ -271,6 +271,20 @@ export class PaperEngine {
     this.#orders.set(order.id, order);
   }
 
+  /**
+   * Re-registers an order persisted by a previous leader (§6.1 RESTORING).
+   * Status, version, and filled quantity are kept verbatim and no matching
+   * happens here: the next book observed by this leader drives any fill, so a
+   * restored order never fills against a book this process has not seen.
+   */
+  restoreOrder(order: PaperOrder | ConditionalPaperOrder): void {
+    if (order.status === 'PENDING_TRIGGER') {
+      this.registerConditionalOrder(order as ConditionalPaperOrder);
+      return;
+    }
+    this.#orders.set(order.id, order as PaperOrder);
+  }
+
   #assertEnvelope(envelope: MarketEnvelope<unknown>): void {
     if (
       envelope.recoveryEpoch < 0n ||

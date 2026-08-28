@@ -757,4 +757,132 @@ describe('ProductionRuntime', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  it(
+    'RESTORING loads open and pending-trigger orders into the engine so a new leader keeps matching them (§6.1)',
+    async () => {
+      const first = await start();
+      const client = await anonymousSession(first.origin);
+      const headers = {
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+      };
+      const place = async (body: Record<string, unknown>) =>
+        json(`${first.origin}/api/v1/orders`, {
+          method: 'POST',
+          headers: { ...headers, 'idempotency-key': randomUUID() },
+          body: JSON.stringify(body),
+        });
+      // A resting LIMIT far below the book and a pending STOP.
+      first.bundle.streamFor('US').emitOrderBook({
+        market: 'US',
+        symbol: 'AAPL',
+        book: {
+          market: 'US',
+          symbol: 'AAPL',
+          currency: 'USD',
+          asks: [{ price: '190.30', volume: '100' }],
+          bids: [{ price: '190.20', volume: '100' }],
+        },
+        sourceTimestamp: null,
+      });
+      await sleep(200);
+      const limit = await place({
+        market: 'US',
+        symbol: 'AAPL',
+        side: 'BUY',
+        type: 'LIMIT',
+        quantity: '2',
+        limitPrice: '100.00',
+      });
+      expect(limit.status, JSON.stringify(limit.body)).toBeLessThan(300);
+      const stop = await place({
+        market: 'US',
+        symbol: 'AAPL',
+        side: 'BUY',
+        type: 'STOP',
+        quantity: '1',
+        stopPrice: '300.00',
+      });
+      expect(stop.status, JSON.stringify(stop.body)).toBeLessThan(300);
+      const limitId = String((limit.body as { id?: string }).id);
+      const stopId = String((stop.body as { id?: string }).id);
+      expect(
+        (
+          await observer.query('select status from orders where id = $1', [
+            limitId,
+          ])
+        ).rows[0]?.status,
+      ).toBe('OPEN');
+      expect(
+        (
+          await observer.query('select status from orders where id = $1', [
+            stopId,
+          ])
+        ).rows[0]?.status,
+      ).toBe('OPEN'); // a single STOP is persisted OPEN; the engine holds it as PENDING_TRIGGER
+      await first.runtime.stop();
+
+      const second = await start();
+      const engine = second.runtime.engineFor('US');
+      expect(engine.getOrder(limitId)).toMatchObject({
+        status: 'OPEN',
+        type: 'LIMIT',
+        quantity: '2',
+        filledQuantity: '0',
+      });
+      expect(engine.getOrder(stopId)).toMatchObject({
+        status: 'PENDING_TRIGGER',
+        type: 'STOP',
+      });
+      // A crossing book on the new leader fills the restored LIMIT under epoch 2.
+      second.bundle.streamFor('US').emitOrderBook({
+        market: 'US',
+        symbol: 'AAPL',
+        book: {
+          market: 'US',
+          symbol: 'AAPL',
+          currency: 'USD',
+          asks: [{ price: '99.00', volume: '100' }],
+          bids: [{ price: '98.00', volume: '100' }],
+        },
+        sourceTimestamp: null,
+      });
+      await vi.waitFor(
+        async () => {
+          const row = (
+            await observer.query(
+              'select status, filled_quantity::text as filled from orders where id = $1',
+              [limitId],
+            )
+          ).rows[0];
+          expect(row).toMatchObject({ status: 'FILLED', filled: '2' });
+        },
+        { timeout: 5_000 },
+      );
+      const fills = (
+        await observer.query(
+          'select recovery_epoch::text as epoch from fills where order_id = $1',
+          [limitId],
+        )
+      ).rows;
+      expect(fills.length).toBeGreaterThanOrEqual(1);
+      expect(fills.every((f) => f.epoch === '2')).toBe(true);
+      // Cancelling the restored STOP through the new leader works.
+      const cancel = await json(`${second.origin}/api/v1/orders/${stopId}`, {
+        method: 'DELETE',
+        headers: {
+          origin: 'http://127.0.0.1:0',
+          cookie: client.cookie,
+          'x-csrf-token': client.csrf,
+          'idempotency-key': randomUUID(),
+        },
+      });
+      expect(cancel.status, JSON.stringify(cancel.body)).toBeLessThan(300);
+      expect(engine.getOrder(stopId)?.status).toBe('CANCELLED');
+    },
+    TEST_TIMEOUT_MS,
+  );
 });

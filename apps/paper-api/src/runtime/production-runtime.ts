@@ -326,6 +326,13 @@ export class ProductionRuntime {
     options.phaseSpy?.('BOOTING');
   }
 
+  /** The market's paper engine (test/diagnostic access). */
+  engineFor(market: Market): PaperEngine {
+    const engine = this.#engines.get(market);
+    if (engine === undefined) throw new Error(`missing ${market} paper engine`);
+    return engine;
+  }
+
   /** Test seam: invoked synchronously on every outbox claim. */
   claimOutboxForTest(): void {
     /* spy hook */
@@ -360,7 +367,12 @@ export class ProductionRuntime {
         restore: async () => {
           this.state.transition('RESTORING');
           await this.#refreshIncidents();
-          return {};
+          const restored = await this.#restoreOpenOrders();
+          this.#log('runtime.restored', {
+            leaderId: this.leaderId,
+            ...restored,
+          });
+          return restored;
         },
         verifyInvariants: async () => {
           await (this.#o.verifyInvariants ?? defaultVerifyInvariants)(this.#db);
@@ -966,6 +978,84 @@ export class ProductionRuntime {
       });
       return { id: order.id, status: 'CANCELLED' };
     });
+  }
+
+  /**
+   * §6.1 RESTORING: every non-terminal order recorded by a previous leader is
+   * handed to this leader's engine so resting LIMITs keep matching and pending
+   * STOP/TAKE_PROFIT orders keep watching, each with its persisted fill state.
+   */
+  async #restoreOpenOrders(): Promise<{
+    open: number;
+    pendingTrigger: number;
+  }> {
+    const rows = await sql<{
+      id: string;
+      session_id: string;
+      market_code: Market;
+      symbol: string;
+      order_type: 'MARKET' | 'LIMIT' | 'STOP' | 'TAKE_PROFIT' | 'OCO';
+      side: 'BUY' | 'SELL';
+      limit_price: string | null;
+      stop_price: string | null;
+      quantity: string;
+      filled_quantity: string;
+      status: string;
+      version: string;
+    }>`
+      select id::text, session_id::text, market_code, symbol, order_type, side,
+        limit_price::text, stop_price::text, quantity::text, filled_quantity::text, status, version::text
+      from orders
+      where status in ('RECEIVED', 'OPEN', 'PARTIALLY_FILLED', 'TRIGGERED', 'PENDING_TRIGGER')
+        and order_type <> 'OCO'
+      order by created_at, id
+    `.execute(this.#db);
+    let open = 0;
+    let pendingTrigger = 0;
+    for (const row of rows.rows) {
+      const engine = this.#engines.get(row.market_code);
+      if (engine === undefined) continue;
+      const base = {
+        id: row.id,
+        sessionId: row.session_id,
+        market: row.market_code,
+        symbol: row.symbol,
+        currency: (row.market_code === 'US' ? 'USD' : 'KRW') as 'USD' | 'KRW',
+        side: row.side,
+        quantity: row.quantity,
+        filledQuantity: row.filled_quantity,
+        version: BigInt(row.version),
+      };
+      const conditionalType =
+        row.order_type === 'STOP' || row.order_type === 'TAKE_PROFIT'
+          ? row.order_type
+          : undefined;
+      if (conditionalType !== undefined && row.status !== 'TRIGGERED') {
+        // Single STOP/TAKE_PROFIT rows are persisted as OPEN (OCO legs as
+        // PENDING_TRIGGER); both are still waiting for their trigger price.
+        if (row.stop_price === null) continue;
+        engine.restoreOrder({
+          ...base,
+          type: conditionalType,
+          stopPrice: row.stop_price,
+          status: 'PENDING_TRIGGER',
+        });
+        pendingTrigger += 1;
+        continue;
+      }
+      if (row.status === 'PENDING_TRIGGER') continue;
+      const type = row.order_type === 'LIMIT' ? 'LIMIT' : 'MARKET';
+      engine.restoreOrder({
+        ...base,
+        type,
+        ...(type === 'LIMIT' && row.limit_price !== null
+          ? { limitPrice: row.limit_price }
+          : {}),
+        status: row.status === 'PARTIALLY_FILLED' ? 'PARTIALLY_FILLED' : 'OPEN',
+      });
+      open += 1;
+    }
+    return { open, pendingTrigger };
   }
 
   async #refreshIncidents(): Promise<void> {
