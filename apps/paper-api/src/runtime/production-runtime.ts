@@ -62,6 +62,7 @@ import { ReconnectSupervisor } from './reconnect-supervisor.js';
 import { RequestAdmissionGate } from './request-admission-gate.js';
 import { type RuntimeState, RuntimeStateMachine } from './runtime-state.js';
 import { TradingCapabilities } from './trading-capabilities.js';
+import { createTriggerPersistence } from './trigger-persistence.js';
 
 export type RuntimePhaseSpy = (phase: RuntimeState) => void;
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
@@ -655,16 +656,23 @@ export class ProductionRuntime {
       log: this.#log,
       onTransaction: (work) => this.#uow.track(work),
     });
+    const feeModel = createFeeModel({
+      version: `runtime-${market}`,
+      market,
+      currency: market === 'US' ? 'USD' : 'KRW',
+      commissionRate: '0',
+      sellTaxRate: '0',
+      roundingDecimals: 2,
+      roundingMode: 'HALF_UP',
+    });
+    const persistTrigger = createTriggerPersistence({
+      db: this.#db,
+      feeModelFor: () => feeModel,
+      log: this.#log,
+      onTransaction: (work) => this.#uow.track(work),
+    });
     const engine = new PaperEngine({
-      feeModel: createFeeModel({
-        version: `runtime-${market}`,
-        market,
-        currency: market === 'US' ? 'USD' : 'KRW',
-        commissionRate: '0',
-        sellTaxRate: '0',
-        roundingDecimals: 2,
-        roundingMode: 'HALF_UP',
-      }),
+      feeModel,
       isGateExclusive: () => this.#matching.get(market)?.isClosed === true,
       currentFencingToken: (m) => {
         try {
@@ -674,6 +682,7 @@ export class ProductionRuntime {
         }
       },
       onFill: persistFill,
+      onConditionalTrigger: persistTrigger,
     });
     this.#engines.set(market, engine);
     const health = new MarketHealthMachine({

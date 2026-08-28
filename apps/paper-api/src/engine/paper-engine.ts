@@ -189,6 +189,7 @@ export class PaperEngine {
         });
         const triggered = { ...order, status: 'TRIGGERED' as const };
         this.#conditional.set(order.id, triggered);
+        this.#orders.set(order.id, triggered);
         await this.#options.onConditionalTrigger?.(triggered, pricing);
       }
     });

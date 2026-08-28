@@ -822,7 +822,7 @@ describe('ProductionRuntime', () => {
             stopId,
           ])
         ).rows[0]?.status,
-      ).toBe('OPEN'); // a single STOP is persisted OPEN; the engine holds it as PENDING_TRIGGER
+      ).toBe('PENDING_TRIGGER'); // a single STOP waits for its trigger in the engine
       await first.runtime.stop();
 
       const second = await start();
@@ -999,6 +999,192 @@ describe('ProductionRuntime', () => {
           )
         ).rows[0]?.n,
       ).toBe(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'persists STOP triggers and resolves OCO groups from the production engine (Codex BLOCKER)',
+    async () => {
+      const { runtime, origin, bundle } = await start();
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      const place = (body: Record<string, unknown>) =>
+        json(`${origin}/api/v1/orders`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+      const book = (ask: string, bid: string) =>
+        bundle.streamFor('US').emitOrderBook({
+          market: 'US',
+          symbol: 'AAPL',
+          book: {
+            market: 'US',
+            symbol: 'AAPL',
+            currency: 'USD',
+            asks: [{ price: ask, volume: '100' }],
+            bids: [{ price: bid, volume: '100' }],
+          },
+          sourceTimestamp: null,
+        });
+      book('190.30', '190.20');
+      await sleep(200);
+      const fx = await json(`${origin}/api/v1/fx/quotes`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '10000000' }),
+      });
+      expect(fx.status, JSON.stringify(fx.body)).toBeLessThan(300);
+      const conversion = await json(`${origin}/api/v1/fx/conversions`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ quoteId: fx.body.quoteId }),
+      });
+      expect(conversion.status, JSON.stringify(conversion.body)).toBeLessThan(
+        300,
+      );
+      // Single STOP BUY above the market.
+      const stop = await place({
+        market: 'US',
+        symbol: 'AAPL',
+        side: 'BUY',
+        type: 'STOP',
+        quantity: '1',
+        stopPrice: '200.00',
+      });
+      expect(stop.status, JSON.stringify(stop.body)).toBeLessThan(300);
+      const stopId = String((stop.body as { id?: string }).id);
+      // OCO BUY: TAKE_PROFIT leg (LIMIT 180) + STOP leg (200).
+      const oco = await place({
+        market: 'US',
+        symbol: 'AAPL',
+        side: 'BUY',
+        type: 'OCO',
+        quantity: '1',
+        legs: [
+          {
+            market: 'US',
+            symbol: 'AAPL',
+            side: 'BUY',
+            type: 'LIMIT',
+            quantity: '1',
+            limitPrice: '180.00',
+          },
+          {
+            market: 'US',
+            symbol: 'AAPL',
+            side: 'BUY',
+            type: 'STOP',
+            quantity: '1',
+            stopPrice: '200.00',
+          },
+        ],
+      });
+      expect(oco.status, JSON.stringify(oco.body)).toBeLessThan(300);
+      const ocoLegId = String((oco.body as { id?: string }).id);
+      const group = (
+        await observer.query(
+          'select oco_group_id::text as g from orders where id = $1',
+          [ocoLegId],
+        )
+      ).rows[0]?.g as string;
+      expect(group).toBeTypeOf('string');
+
+      bundle.streamFor('US').emitTrade({
+        market: 'US',
+        symbol: 'AAPL',
+        price: '201.00',
+        volume: '5',
+        sourceTimestamp: null,
+      });
+      await vi.waitFor(
+        async () => {
+          const row = (
+            await observer.query(
+              'select status, filled_quantity::text as filled from orders where id = $1',
+              [stopId],
+            )
+          ).rows[0];
+          expect(row).toMatchObject({ status: 'FILLED', filled: '1' });
+        },
+        { timeout: 5_000 },
+      );
+      const fill = (
+        await observer.query(
+          'select price::text as price, recovery_epoch::text as epoch from fills where order_id = $1',
+          [stopId],
+        )
+      ).rows[0];
+      expect(fill).toMatchObject({ price: '201.00', epoch: '1' });
+      expect(runtime.engineFor('US').getOrder(stopId)?.status).toBe(
+        'TRIGGERED',
+      );
+
+      await vi.waitFor(
+        async () => {
+          const legs = (
+            await observer.query(
+              'select order_type, status, is_oco_winner from orders where oco_group_id = $1 order by order_type',
+              [group],
+            )
+          ).rows;
+          expect(legs).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                order_type: 'STOP',
+                status: 'FILLED',
+                is_oco_winner: true,
+              }),
+              expect.objectContaining({
+                order_type: 'LIMIT',
+                status: 'CANCELLED',
+                is_oco_winner: false,
+              }),
+            ]),
+          );
+        },
+        { timeout: 5_000 },
+      );
+      expect(
+        (
+          await observer.query('select status from oco_groups where id = $1', [
+            group,
+          ])
+        ).rows[0]?.status,
+      ).toBe('RESOLVED');
+      expect(
+        (
+          await observer.query(
+            'select count(*)::int as n from reservations where oco_group_id = $1 and released = false',
+            [group],
+          )
+        ).rows[0]?.n,
+      ).toBe(0);
+      const events = (
+        await observer.query(
+          'select event_type from outbox_events where session_id = $1 order by stream_sequence',
+          [client.id],
+        )
+      ).rows.map((r) => r.event_type);
+      expect(events.filter((e) => e === 'ORDER_FILLED')).toHaveLength(2);
+      expect(events).toContain('ORDER_CANCELLED');
+      expect(events).toContain('OCO_RESOLVED');
+      // The audit trail names each fill and the cancelled sibling.
+      expect(
+        (
+          await observer.query(
+            "select count(*)::int as n from audit_events where session_reference = $1 and event_type in ('ORDER_FILLED','ORDER_CANCELLED','OCO_RESOLVED')",
+            [client.id],
+          )
+        ).rows[0]?.n,
+      ).toBe(4);
     },
     TEST_TIMEOUT_MS,
   );

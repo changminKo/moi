@@ -211,4 +211,51 @@ describe('PaperEngine.restoreOrder', () => {
     expect(fills).toEqual([{ id: 'o1', filled: '5', next: 'FILLED' }]);
     expect(engine.getOrder('o1')?.status).toBe('FILLED');
   });
+
+  describe('PaperEngine conditional trigger bookkeeping', () => {
+    it('marks the triggered order in both maps and hands it to onConditionalTrigger', async () => {
+      const triggered: string[] = [];
+      const engine = new PaperEngine({
+        feeModel: createFeeModel({
+          version: 't',
+          market: 'US',
+          currency: 'USD',
+          commissionRate: '0',
+          sellTaxRate: '0',
+          roundingDecimals: 2,
+          roundingMode: 'HALF_UP',
+        }),
+        onConditionalTrigger: (order) => {
+          triggered.push(`${order.id}:${order.status}`);
+        },
+      });
+      engine.registerConditionalOrder({
+        id: 'stop-1',
+        sessionId: 's',
+        market: 'US',
+        symbol: 'AAPL',
+        currency: 'USD',
+        side: 'BUY',
+        type: 'STOP',
+        quantity: '1',
+        stopPrice: '200',
+        status: 'PENDING_TRIGGER',
+        version: 0n,
+        filledQuantity: '0',
+      });
+      await engine.onTrade({
+        recoveryEpoch: 1n,
+        leaderFencingToken: 1n,
+        marketDataVersion: 1n,
+        payload: {
+          market: 'US',
+          symbol: 'AAPL',
+          price: '201',
+          sourceTimestamp: null,
+        },
+      });
+      expect(triggered).toEqual(['stop-1:TRIGGERED']);
+      expect(engine.getOrder('stop-1')?.status).toBe('TRIGGERED');
+    });
+  });
 });

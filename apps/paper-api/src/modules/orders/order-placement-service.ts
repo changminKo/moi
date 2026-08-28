@@ -85,9 +85,11 @@ export class OrderPlacementService {
     input: Exclude<PlaceOrderInput, { type: 'OCO' }>,
   ): Promise<unknown> {
     const id = this.#id();
+    const isConditional = input.type === 'STOP' || input.type === 'TAKE_PROFIT';
+    const initialStatus = isConditional ? 'PENDING_TRIGGER' : 'OPEN';
     const response = {
       id,
-      status: 'OPEN',
+      status: initialStatus,
       filledQuantity: '0',
       quantity: input.quantity,
     };
@@ -103,7 +105,7 @@ export class OrderPlacementService {
         orderType: input.type,
         side: input.side,
         quantity: input.quantity,
-        status: 'OPEN',
+        status: initialStatus,
         ...(input.limitPrice === undefined
           ? {}
           : { limitPrice: input.limitPrice }),
@@ -134,6 +136,23 @@ export class OrderPlacementService {
         ...(input.limitPrice === undefined
           ? {}
           : { limitPrice: input.limitPrice }),
+      });
+    } else if (input.type === 'STOP' || input.type === 'TAKE_PROFIT') {
+      // Conditional singles wait in the engine for their trigger price
+      // (§6.1); without this the persisted order would never match.
+      this.#engine(input.market).registerConditionalOrder({
+        id,
+        sessionId: command.sessionId,
+        market: input.market,
+        symbol: input.symbol,
+        currency: currencyFor(input.market),
+        side: input.side,
+        type: input.type,
+        quantity: input.quantity,
+        stopPrice: String(input.stopPrice ?? input.limitPrice),
+        status: 'PENDING_TRIGGER',
+        version: 0n,
+        filledQuantity: '0',
       });
     }
     await this.#deps.afterPlacement?.(command.sessionId, sequence);
