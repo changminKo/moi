@@ -27,6 +27,7 @@ Every error response is JSON with `code`, `message`, `retryable`, and `requestId
 | `FORBIDDEN` | 403 | no | no |
 | `NOT_FOUND` | 404 | no | no |
 | `QUOTE_EXPIRED` | 409 | no | no |
+| `QUOTE_CONSUMED` | 409 | no | no |
 | `PAYLOAD_TOO_LARGE` | 413 | no | no |
 | `INTERNAL_ERROR` | 500 | no | no |
 

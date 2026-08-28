@@ -184,6 +184,23 @@ describe('published surface', () => {
   });
 });
 
+describe('oneTickBelow', () => {
+  it('steps one unit of the last decimal place, borrowing across the point', async () => {
+    const { oneTickBelow } = await import('./fake-snapshot-source.js');
+    expect(oneTickBelow('10.00')).toBe('9.99');
+    expect(oneTickBelow('0.10')).toBe('0.09');
+    expect(oneTickBelow('1000')).toBe('999');
+    expect(oneTickBelow('0.02')).toBe('0.01');
+    expect(oneTickBelow('2')).toBe('1');
+  });
+  it('refuses to step to or below zero', async () => {
+    const { oneTickBelow } = await import('./fake-snapshot-source.js');
+    expect(() => oneTickBelow('0.01')).toThrow(/cannot step below 0\.01/);
+    expect(() => oneTickBelow('1')).toThrow(/cannot step below 1/);
+    expect(() => oneTickBelow('0.00')).toThrow(/cannot step below/);
+  });
+});
+
 describe('FakeSnapshotSource.seedDefault', () => {
   it('never seeds a locked book', async () => {
     const { FakeSnapshotSource, oneTickBelow } = await import(

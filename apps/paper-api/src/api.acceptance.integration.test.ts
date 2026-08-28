@@ -36,6 +36,7 @@ const ERROR_CATALOG = [
   ['FORBIDDEN', 403, false],
   ['NOT_FOUND', 404, false],
   ['QUOTE_EXPIRED', 409, false],
+  ['QUOTE_CONSUMED', 409, false],
   ['PAYLOAD_TOO_LARGE', 413, false],
   ['INTERNAL_ERROR', 500, false],
 ] as const;

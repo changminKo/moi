@@ -1,5 +1,40 @@
 import type { FastifyError, FastifyInstance } from 'fastify';
 
+/**
+ * Public error codes from `docs/api/error-contract.md`. Only these may reach a
+ * client verbatim; any other 4xx/5xx collapses to INTERNAL_ERROR so driver or
+ * framework codes never leak. `error-handler.test.ts` keeps this list equal to
+ * the contract table.
+ */
+export const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ACCOUNT_READ_ONLY',
+  'CANCEL_ONLY',
+  'CAPACITY_REACHED',
+  'FORBIDDEN',
+  'IDEMPOTENCY_CONFLICT',
+  'INSUFFICIENT_AVAILABLE_CASH',
+  'INSUFFICIENT_AVAILABLE_POSITION',
+  'INTERNAL_ERROR',
+  'INVALID_ORDER',
+  'INVALID_PRICE',
+  'INVALID_QUANTITY',
+  'INVARIANT_VIOLATION',
+  'MARKET_CLOSED',
+  'MARKET_DATA_DEGRADED',
+  'NOT_FOUND',
+  'ORDER_STATE_CONFLICT',
+  'PAYLOAD_TOO_LARGE',
+  'PRICE_PROTECTION',
+  'QUOTE_CONSUMED',
+  'QUOTE_EXPIRED',
+  'RATE_LIMITED',
+  'RECOVERY_IN_PROGRESS',
+  'SERVICE_UNAVAILABLE',
+  'SESSION_EXPIRED',
+  'SYMBOL_NOT_TRADABLE',
+  'VALIDATION_ERROR',
+]);
+
 interface StableError {
   readonly code: string;
   readonly message: string;
@@ -45,14 +80,14 @@ function stableError(
       },
     };
   }
-  // Domain and route errors that already carry a stable public code (for
-  // example `CANCEL_ONLY` with 409) keep it; only unknown failures collapse to
-  // INTERNAL_ERROR so nothing internal leaks.
+  // Domain and route errors that carry a contract code (for example
+  // `CANCEL_ONLY` with 409) keep it; anything outside the whitelist collapses
+  // to INTERNAL_ERROR so nothing internal leaks.
   if (
     status >= 400 &&
     status < 500 &&
     typeof error.code === 'string' &&
-    /^[A-Z][A-Z_]*$/.test(error.code)
+    PUBLIC_ERROR_CODES.has(error.code)
   ) {
     return {
       status,

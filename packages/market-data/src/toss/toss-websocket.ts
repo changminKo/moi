@@ -115,7 +115,6 @@ export class TossWebSocketMarketData implements MarketDataStream {
   private readonly clearTimeoutFn: typeof clearTimeout;
   private readonly random: () => number;
   private readonly socketFactory: TossSocketFactory;
-  private lastToken: string | undefined;
 
   constructor(private readonly options: TossWebSocketOptions) {
     this.now = options.now ?? (() => new Date().toISOString());
@@ -136,8 +135,9 @@ export class TossWebSocketMarketData implements MarketDataStream {
 
   async connect(signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw abortError();
+    const token = await this.options.tokenProvider.getAccessToken(signal);
     try {
-      await this.handshake(signal);
+      await this.handshake(token, signal);
     } catch (error) {
       // One retry after the provider rejects the token (§5.5): invalidate, reissue.
       if (
@@ -146,17 +146,18 @@ export class TossWebSocketMarketData implements MarketDataStream {
         error.statusCode === 401 &&
         this.options.tokenProvider.invalidate
       ) {
-        this.options.tokenProvider.invalidate(this.lastToken);
-        await this.handshake(signal);
+        this.options.tokenProvider.invalidate(token);
+        await this.handshake(
+          await this.options.tokenProvider.getAccessToken(signal),
+          signal,
+        );
         return;
       }
       throw error;
     }
   }
 
-  private async handshake(signal: AbortSignal): Promise<void> {
-    const token = await this.options.tokenProvider.getAccessToken(signal);
-    this.lastToken = token;
+  private async handshake(token: string, signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw abortError();
     this.closed = false;
     this.controlQueue = [];
