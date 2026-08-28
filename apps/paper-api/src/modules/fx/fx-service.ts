@@ -115,9 +115,11 @@ export class FxService {
     const locks = [quote.from, quote.to].sort(
       (a, b) => currencyOrder[a] - currencyOrder[b],
     );
+    // The ledger is the source of truth: fills and reservations move cash
+    // outside this service, so a loader always wins over the in-memory copy.
     const wallet =
-      this.#wallets.get(sessionId) ??
       (await this.#loadWallets?.(sessionId)) ??
+      this.#wallets.get(sessionId) ??
       new Map<Currency, DecimalString>();
     this.#wallets.set(sessionId, wallet);
     for (const currency of locks) {

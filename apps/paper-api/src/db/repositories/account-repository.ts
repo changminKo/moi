@@ -5,6 +5,7 @@ import {
   type Market,
   type PositionSnapshot,
   type Quantity,
+  releaseReservation,
   reserveCash,
   reservePosition,
   type WalletSnapshot,
@@ -61,12 +62,52 @@ export interface ReservationInput {
   readonly symbol?: string;
 }
 
+export interface OrderReservationsKey {
+  readonly sessionId: string;
+  readonly orderId: string;
+}
+
+/** An unreleased reservation the order (or its whole OCO group) still holds. */
+export interface OpenReservation {
+  readonly id: string;
+  readonly kind: 'CASH' | 'POSITION';
+  readonly amount: DecimalString;
+  readonly currency: Currency | null;
+  readonly marketCode: Market | null;
+  readonly symbol: string | null;
+}
+
+export interface ReleaseCashInput {
+  readonly wallet: LockedWallet;
+  readonly amount: DecimalString;
+  readonly reservationId: string;
+}
+
+export interface ReleasePositionInput {
+  readonly position: LockedPosition;
+  readonly quantity: Quantity;
+  readonly reservationId: string;
+}
+
+const TERMINAL_STATUSES = ['FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'];
+
 export interface AccountRepository {
   lockWallet(key: WalletKey): Promise<LockedWallet | undefined>;
   lockPosition(key: PositionKey): Promise<LockedPosition | undefined>;
   reserveCash(input: ReserveCashInput): Promise<WalletSnapshot>;
   reservePosition(input: ReservePositionInput): Promise<PositionSnapshot>;
   recordReservation(input: ReservationInput): Promise<void>;
+  /**
+   * Lock-free read of what a cancellation must release: the order's own
+   * reservation, or its OCO group's shared one once every other leg is terminal.
+   */
+  findOrderReservations(
+    key: OrderReservationsKey,
+  ): Promise<readonly OpenReservation[]>;
+  /** Hands reserved cash back to `available` and retires the reservation row. */
+  releaseCash(input: ReleaseCashInput): Promise<WalletSnapshot>;
+  /** Hands reserved quantity back to `available` and retires the reservation row. */
+  releasePosition(input: ReleasePositionInput): Promise<PositionSnapshot>;
 }
 
 interface WalletRow {
@@ -360,6 +401,161 @@ export async function recordReservation(
   `.execute(connection.executor);
 }
 
+export async function findOrderReservations(
+  connection: LedgerConnection,
+  key: OrderReservationsKey,
+): Promise<readonly OpenReservation[]> {
+  const request = snapshotInput({
+    sessionId: key.sessionId,
+    orderId: key.orderId,
+  });
+  const rows = await sql<{
+    id: string;
+    kind: 'CASH' | 'POSITION';
+    amount: string;
+    currency: Currency | null;
+    market_code: Market | null;
+    symbol: string | null;
+  }>`
+    select r.id::text, r.kind, r.amount::text, r.currency, r.market_code, r.symbol
+    from reservations r
+    where r.released = false and r.session_id = ${request.sessionId}::uuid and (
+      r.order_id = ${request.orderId}::uuid
+      or (r.oco_group_id is not null
+          and r.oco_group_id = (select oco_group_id from orders where id = ${request.orderId}::uuid)
+          and not exists (
+            select 1 from orders o where o.oco_group_id = r.oco_group_id
+              and o.id <> ${request.orderId}::uuid and o.status <> all(${TERMINAL_STATUSES})))
+    )
+    order by r.id
+  `.execute(connection.executor);
+  return rows.rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    amount: row.amount,
+    currency: row.currency,
+    marketCode: row.market_code,
+    symbol: row.symbol,
+  }));
+}
+
+/**
+ * Retires one reservation row. Measured, not assumed: the update also pins the
+ * owning session row `for key share`, so the caller has to hold the session
+ * already — every cancellation does, as its first lock.
+ */
+async function retireReservation(
+  connection: LedgerConnection,
+  sessionId: string,
+  reservationId: string,
+): Promise<void> {
+  connection.acquireLock({
+    table: 'anonymous_sessions',
+    key: sessionId,
+    strength: 'KEY_SHARE',
+  });
+  connection.acquireLock({
+    table: 'reservations',
+    key: reservationId,
+    strength: 'NO_KEY_UPDATE',
+  });
+  const result = await sql<{ version: string }>`
+    update reservations set released = true, version = version + 1
+    where id = ${reservationId}::uuid and released = false
+    returning version
+  `.execute(connection.executor);
+  assertVersionedUpdate(result.rows, `reservation ${reservationId}`);
+}
+
+export async function releaseCash(
+  connection: LedgerConnection,
+  input: ReleaseCashInput,
+): Promise<WalletSnapshot> {
+  const wallet = input.wallet;
+  const request = snapshotInput({
+    walletId: wallet.id,
+    sessionId: wallet.sessionId,
+    currency: wallet.currency,
+    total: wallet.total,
+    available: wallet.available,
+    reserved: wallet.reserved,
+    version: wallet.version,
+    amount: input.amount,
+    reservationId: input.reservationId,
+  });
+  const released = releaseReservation(
+    {
+      currency: request.currency,
+      total: request.total,
+      available: request.available,
+      reserved: request.reserved,
+      version: request.version,
+    },
+    request.amount,
+  );
+  connection.acquireLock({
+    table: 'wallets',
+    key: walletLockKey(request),
+    strength: 'NO_KEY_UPDATE',
+  });
+  const result = await sql<{ version: string }>`
+    update wallets
+    set available = ${released.available},
+        reserved = ${released.reserved},
+        version = version + 1
+    where id = ${request.walletId} and version = ${request.version}
+    returning version
+  `.execute(connection.executor);
+  assertVersionedUpdate(result.rows, `wallet ${request.walletId}`);
+  await retireReservation(connection, request.sessionId, request.reservationId);
+  return released;
+}
+
+export async function releasePosition(
+  connection: LedgerConnection,
+  input: ReleasePositionInput,
+): Promise<PositionSnapshot> {
+  const position = input.position;
+  const request = snapshotInput({
+    positionId: position.id,
+    sessionId: position.sessionId,
+    marketCode: position.marketCode,
+    symbol: position.symbol,
+    total: position.total,
+    available: position.available,
+    reserved: position.reserved,
+    version: position.version,
+    quantity: input.quantity,
+    reservationId: input.reservationId,
+  });
+  const released = releaseReservation(
+    {
+      symbol: request.symbol,
+      total: request.total,
+      available: request.available,
+      reserved: request.reserved,
+      version: request.version,
+    },
+    request.quantity,
+  );
+  connection.acquireLock({
+    table: 'positions',
+    key: positionLockKey(request),
+    strength: 'NO_KEY_UPDATE',
+  });
+  const result = await sql<{ version: string }>`
+    update positions
+    set available_quantity = ${released.available},
+        reserved_quantity = ${released.reserved},
+        version = version + 1
+    where id = ${request.positionId} and version = ${request.version}
+    returning version
+  `.execute(connection.executor);
+  assertVersionedUpdate(result.rows, `position ${request.positionId}`);
+  await retireReservation(connection, request.sessionId, request.reservationId);
+  return released;
+}
+
 export function createAccountRepository(
   connection: LedgerConnection,
 ): AccountRepository {
@@ -372,5 +568,10 @@ export function createAccountRepository(
       reservePositionQuantity(connection, input),
     recordReservation: (input: ReservationInput) =>
       recordReservation(connection, input),
+    findOrderReservations: (key: OrderReservationsKey) =>
+      findOrderReservations(connection, key),
+    releaseCash: (input: ReleaseCashInput) => releaseCash(connection, input),
+    releasePosition: (input: ReleasePositionInput) =>
+      releasePosition(connection, input),
   });
 }

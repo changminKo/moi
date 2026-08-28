@@ -8,6 +8,7 @@ import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 import type { ConditionalPaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
+import { settleFill } from './fill-settlement.js';
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
 
@@ -87,26 +88,18 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
             ${pricing.recoveryEpoch}, ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true}
           )
         `.execute(trx);
-        if (order.side === 'BUY')
-          await sql`
-            insert into positions
-              (id, session_id, market_code, symbol, total_quantity, available_quantity, reserved_quantity, average_cost)
-            values (${randomUUID()}::uuid, ${order.sessionId}::uuid, ${order.market}, ${order.symbol}, ${quantity}, ${quantity}, 0, ${price})
-            on conflict (session_id, market_code, symbol) do update
-              set total_quantity = positions.total_quantity + excluded.total_quantity,
-                  available_quantity = positions.available_quantity + excluded.available_quantity,
-                  version = positions.version + 1
-          `.execute(trx);
-        else
-          await sql`
-            update positions
-              set total_quantity = total_quantity - ${quantity}::numeric,
-                  available_quantity = available_quantity - ${quantity}::numeric,
-                  version = version + 1
-            where session_id = ${order.sessionId}::uuid and market_code = ${order.market} and symbol = ${order.symbol}
-              and available_quantity >= ${quantity}::numeric
-          `.execute(trx);
-
+        await settleFill(trx, {
+          order: {
+            id: order.id,
+            sessionId: order.sessionId,
+            market: order.market,
+            symbol: order.symbol,
+            side: order.side,
+            ocoGroupId: row.oco_group_id,
+          },
+          fills: [{ price, quantity, fee }],
+          terminal: true,
+        });
         const events: {
           type: string;
           payload: Record<string, unknown>;
@@ -139,10 +132,6 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
               orderId: sibling.id,
               payload: { orderId: sibling.id, reason: 'OCO_SIBLING_FILLED' },
             });
-          await sql`
-            update reservations set released = true, version = version + 1
-            where oco_group_id = ${row.oco_group_id}::uuid and released = false
-          `.execute(trx);
           await sql`
             update oco_groups set status = 'RESOLVED', resolved_at = now(), version = version + 1
             where id = ${row.oco_group_id}::uuid and status = 'ACTIVE'

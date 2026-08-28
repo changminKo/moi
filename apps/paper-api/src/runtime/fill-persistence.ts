@@ -5,6 +5,7 @@ import type { Database } from '../db/database.js';
 import type { OrderMatch } from '../engine/match-orders.js';
 import type { PaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
+import { settleFill } from './fill-settlement.js';
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
 
@@ -57,17 +58,19 @@ export function createFillPersistence(deps: {
               ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true}
             )
           `.execute(trx);
-          if (order.side === 'BUY')
-            await sql`
-              insert into positions
-                (id, session_id, market_code, symbol, total_quantity, available_quantity, reserved_quantity, average_cost)
-              values (${randomUUID()}::uuid, ${order.sessionId}::uuid, ${order.market}, ${order.symbol}, ${fill.quantity}, ${fill.quantity}, 0, ${fill.price})
-              on conflict (session_id, market_code, symbol) do update
-                set total_quantity = positions.total_quantity + excluded.total_quantity,
-                    available_quantity = positions.available_quantity + excluded.available_quantity,
-                    version = positions.version + 1
-            `.execute(trx);
         }
+        await settleFill(trx, {
+          order: {
+            id: order.id,
+            sessionId: order.sessionId,
+            market: order.market as Market,
+            symbol: order.symbol,
+            side: order.side,
+          },
+          fills: match.execution.fills,
+          terminal:
+            match.nextStatus === 'FILLED' || match.nextStatus === 'CANCELLED',
+        });
         const sequence = await sql<{ sequence: string }>`
           with next as (
             select coalesce(max(account_sequence), 0) + 1 as sequence

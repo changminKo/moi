@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   type Currency,
+  DomainError,
   type Market,
+  type OrderType,
   planOcoReservation,
+  planReservation,
   type Side,
 } from '@skipjack/trading-core';
 import {
@@ -48,6 +51,11 @@ export interface OrderPlacementEngine {
 export interface OrderPlacementServiceDependencies {
   readonly unitOfWork: UnitOfWork;
   readonly engine: (market: Market) => OrderPlacementEngine | undefined;
+  /** Current reference (ask) price used to size MARKET BUY cash reservations. */
+  readonly referencePrice?: (
+    market: Market,
+    symbol: string,
+  ) => string | undefined;
   readonly afterPlacement?: (
     sessionId: string,
     sequence: bigint,
@@ -80,6 +88,68 @@ export class OrderPlacementService {
       : this.#placeSingle(command, input);
   }
 
+  /**
+   * Sizes the ledger reservation a single order holds while it is open
+   * (§ledger): BUY reserves cash — limit notional, or reference price with the
+   * core's protection multiplier for MARKET / trigger orders — and SELL
+   * reserves the position quantity. The reservation row is recorded with the
+   * order in the same mutation so RESTORING can reconcile it.
+   */
+  #planSingleReservation(
+    input: Exclude<PlaceOrderInput, { type: 'OCO' }>,
+    orderId: string,
+    status: 'OPEN' | 'PENDING_TRIGGER',
+  ): Pick<
+    Parameters<typeof commitTradingMutation>[1],
+    'cash' | 'position' | 'reservationId'
+  > {
+    const currency = currencyFor(input.market);
+    const referencePrice =
+      input.type === 'MARKET'
+        ? this.#deps.referencePrice?.(input.market, input.symbol)
+        : input.type === 'LIMIT'
+          ? undefined
+          : (input.stopPrice ?? input.limitPrice);
+    if (
+      input.side === 'BUY' &&
+      input.type !== 'LIMIT' &&
+      referencePrice === undefined
+    )
+      throw new DomainError(
+        'MARKET_DATA_DEGRADED',
+        'no reference price is available to size the order',
+      );
+    const plan = planReservation({
+      id: orderId,
+      status,
+      side: input.side,
+      type: input.type as Exclude<OrderType, 'OCO'>,
+      currency,
+      symbol: input.symbol,
+      quantity: input.quantity,
+      ...(input.limitPrice === undefined
+        ? {}
+        : { limitPrice: input.limitPrice }),
+      ...(referencePrice === undefined ? {} : { referencePrice }),
+      estimatedFee: '0',
+    });
+    if (plan.cash !== undefined)
+      return {
+        cash: { currency: plan.cash.currency, amount: plan.cash.amount },
+        reservationId: this.#id(),
+      };
+    if (plan.position !== undefined)
+      return {
+        position: {
+          marketCode: input.market,
+          symbol: plan.position.symbol,
+          quantity: plan.position.quantity,
+        },
+        reservationId: this.#id(),
+      };
+    return {};
+  }
+
   async #placeSingle(
     command: PlaceOrderCommand,
     input: Exclude<PlaceOrderInput, { type: 'OCO' }>,
@@ -93,11 +163,13 @@ export class OrderPlacementService {
       filledQuantity: '0',
       quantity: input.quantity,
     };
+    const reservation = this.#planSingleReservation(input, id, initialStatus);
     const committed = await commitTradingMutation(this.#deps.unitOfWork, {
       sessionId: command.sessionId,
       idempotencyKey: command.idempotencyKey,
       requestHash: command.requestHash,
       mutationKind: 'ORDER_PLACED',
+      ...reservation,
       order: {
         id,
         marketCode: input.market,

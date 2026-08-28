@@ -713,6 +713,7 @@ describe('row locking', () => {
       'positions',
       'oco_groups',
       'orders',
+      'reservations',
       'outbox_events',
     ]);
 
@@ -2151,6 +2152,61 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
         symbol: 'AAPL',
       }),
   ],
+  'accounts.findOrderReservations': [
+    (tx, fixture) =>
+      tx.accounts.findOrderReservations({
+        sessionId: fixture.sessionId,
+        orderId: fixture.lowerOrderId,
+      }),
+  ],
+  // The fixture wallet reserves nothing, so each release probe reserves first
+  // and re-locks to pick up the new version — exactly the sequence a
+  // cancellation walks (session, balance, order, reservation). The session is
+  // held first because retiring a reservation pins it `for key share`.
+  'accounts.releaseCash': [
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: fixture.sessionId,
+        currency: 'KRW',
+      });
+      if (wallet === undefined) throw new Error('the wallet disappeared');
+      await tx.accounts.reserveCash({ wallet, amount: '1' });
+      const relocked = await tx.accounts.lockWallet({
+        sessionId: fixture.sessionId,
+        currency: 'KRW',
+      });
+      if (relocked === undefined) throw new Error('the wallet disappeared');
+      return await tx.accounts.releaseCash({
+        wallet: relocked,
+        amount: '1',
+        reservationId: fixture.reservationId,
+      });
+    },
+  ],
+  'accounts.releasePosition': [
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      const position = await tx.accounts.lockPosition({
+        sessionId: fixture.sessionId,
+        marketCode: 'US',
+        symbol: 'AAPL',
+      });
+      if (position === undefined) throw new Error('the position disappeared');
+      await tx.accounts.reservePosition({ position, quantity: '1' });
+      const relocked = await tx.accounts.lockPosition({
+        sessionId: fixture.sessionId,
+        marketCode: 'US',
+        symbol: 'AAPL',
+      });
+      if (relocked === undefined) throw new Error('the position disappeared');
+      return await tx.accounts.releasePosition({
+        position: relocked,
+        quantity: '1',
+        reservationId: fixture.reservationId,
+      });
+    },
+  ],
   'orders.insertOcoGroup': [
     (tx, fixture) =>
       tx.orders.insertOcoGroup({
@@ -2286,6 +2342,9 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'accounts.reservePosition#1': [],
   'accounts.recordReservation#0': [],
   'accounts.recordReservation#1': [],
+  'accounts.findOrderReservations#0': [],
+  'accounts.releaseCash#0': [],
+  'accounts.releasePosition#0': [],
   'orders.insertOcoGroup#0': [],
   'orders.insert#0': [],
   'orders.lock#0': [],

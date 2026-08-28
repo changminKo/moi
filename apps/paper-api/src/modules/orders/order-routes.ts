@@ -1,5 +1,6 @@
 import { DomainError } from '@skipjack/trading-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { httpStatusFor } from '../../plugins/error-handler.js';
 import { canonicalRequestHash } from './canonical-request.js';
 import {
   IdempotencyService,
@@ -125,10 +126,7 @@ export async function registerOrderRoutes(
         } catch (error) {
           if (error instanceof DomainError) {
             return {
-              statusCode:
-                error.code === 'MARKET_CLOSED' || error.code === 'CANCEL_ONLY'
-                  ? 409
-                  : 400,
+              statusCode: httpStatusFor(error.code),
               headers: {},
               body: JSON.stringify({
                 code: error.code,
@@ -144,7 +142,7 @@ export async function registerOrderRoutes(
     } catch (error) {
       if (error instanceof DomainError) {
         return {
-          statusCode: error.code === 'IDEMPOTENCY_CONFLICT' ? 409 : 400,
+          statusCode: httpStatusFor(error.code),
           headers: {},
           body: JSON.stringify({
             code: error.code,

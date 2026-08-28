@@ -789,6 +789,18 @@ describe('ProductionRuntime', () => {
         sourceTimestamp: null,
       });
       await sleep(200);
+      const fxQuote = await json(`${first.origin}/api/v1/fx/quotes`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': randomUUID() },
+        body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '10000000' }),
+      });
+      expect(fxQuote.status, JSON.stringify(fxQuote.body)).toBeLessThan(300);
+      const fxDone = await json(`${first.origin}/api/v1/fx/conversions`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': randomUUID() },
+        body: JSON.stringify({ quoteId: fxQuote.body.quoteId }),
+      });
+      expect(fxDone.status, JSON.stringify(fxDone.body)).toBeLessThan(300);
       const limit = await place({
         market: 'US',
         symbol: 'AAPL',
@@ -1185,6 +1197,190 @@ describe('ProductionRuntime', () => {
           )
         ).rows[0]?.n,
       ).toBe(4);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'reserves cash for single orders, settles fills against the wallet, and releases on cancel',
+    async () => {
+      const { runtime, origin, bundle } = await start();
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      const place = (body: Record<string, unknown>) =>
+        json(`${origin}/api/v1/orders`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+      const wallet = async (currency: string) =>
+        (
+          await observer.query(
+            'select total::text as total, available::text as available, reserved::text as reserved from wallets where session_id = $1 and currency = $2',
+            [client.id, currency],
+          )
+        ).rows[0];
+      bundle.streamFor('KR').emitOrderBook({
+        market: 'KR',
+        symbol: '005930',
+        book: {
+          market: 'KR',
+          symbol: '005930',
+          currency: 'KRW',
+          asks: [{ price: '70000', volume: '10' }],
+          bids: [{ price: '69900', volume: '10' }],
+        },
+        sourceTimestamp: null,
+      });
+      await sleep(200);
+
+      // A resting LIMIT BUY below the ask reserves its notional.
+      const resting = await place({
+        market: 'KR',
+        symbol: '005930',
+        side: 'BUY',
+        type: 'LIMIT',
+        quantity: '2',
+        limitPrice: '69000',
+      });
+      expect(resting.status, JSON.stringify(resting.body)).toBe(201);
+      const restingId = String((resting.body as { id?: string }).id);
+      expect(await wallet('KRW')).toEqual({
+        total: '10000000',
+        available: '9862000',
+        reserved: '138000',
+      });
+      expect(
+        (
+          await observer.query(
+            'select kind, amount::text as amount, released from reservations where order_id = $1',
+            [restingId],
+          )
+        ).rows,
+      ).toEqual([{ kind: 'CASH', amount: '138000', released: false }]);
+
+      // Selling without a position is refused before anything is written.
+      const shortSell = await place({
+        market: 'KR',
+        symbol: '005930',
+        side: 'SELL',
+        type: 'LIMIT',
+        quantity: '1',
+        limitPrice: '71000',
+      });
+      expect(shortSell.status).toBe(409);
+      expect(shortSell.body.code).toBe('INSUFFICIENT_AVAILABLE_POSITION');
+
+      // A marketable LIMIT BUY fills at the ask and settles: cash leaves total,
+      // the reservation is consumed and released, the position carries its cost.
+      const filled = await place({
+        market: 'KR',
+        symbol: '005930',
+        side: 'BUY',
+        type: 'LIMIT',
+        quantity: '1',
+        limitPrice: '70000',
+      });
+      expect(filled.status, JSON.stringify(filled.body)).toBe(201);
+      const filledId = String((filled.body as { id?: string }).id);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (
+              await observer.query('select status from orders where id = $1', [
+                filledId,
+              ])
+            ).rows[0]?.status,
+          ).toBe('FILLED');
+        },
+        { timeout: 5_000 },
+      );
+      expect(await wallet('KRW')).toEqual({
+        total: '9930000',
+        available: '9792000',
+        reserved: '138000',
+      });
+      expect(
+        (
+          await observer.query(
+            'select released from reservations where order_id = $1',
+            [filledId],
+          )
+        ).rows[0]?.released,
+      ).toBe(true);
+      expect(
+        (
+          await observer.query(
+            'select total_quantity::text as q, available_quantity::text as a, average_cost::text as c from positions where session_id = $1 and symbol = $2',
+            [client.id, '005930'],
+          )
+        ).rows[0],
+      ).toEqual({ q: '1', a: '1', c: '70000' });
+
+      // Cancelling the resting order hands its reservation back.
+      const { 'content-type': _json, ...cancelHeaders } = headers();
+      const cancel = await json(`${origin}/api/v1/orders/${restingId}`, {
+        method: 'DELETE',
+        headers: cancelHeaders,
+      });
+      expect(cancel.status, JSON.stringify(cancel.body)).toBeLessThan(300);
+      expect(await wallet('KRW')).toEqual({
+        total: '9930000',
+        available: '9930000',
+        reserved: '0',
+      });
+      expect(
+        (
+          await observer.query(
+            'select count(*)::int as n from reservations where session_id = $1 and released = false',
+            [client.id],
+          )
+        ).rows[0]?.n,
+      ).toBe(0);
+
+      // A SELL now reserves the position and, when filled at the bid, credits proceeds.
+      const sell = await place({
+        market: 'KR',
+        symbol: '005930',
+        side: 'SELL',
+        type: 'LIMIT',
+        quantity: '1',
+        limitPrice: '69900',
+      });
+      expect(sell.status, JSON.stringify(sell.body)).toBe(201);
+      const sellId = String((sell.body as { id?: string }).id);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (
+              await observer.query('select status from orders where id = $1', [
+                sellId,
+              ])
+            ).rows[0]?.status,
+          ).toBe('FILLED');
+        },
+        { timeout: 5_000 },
+      );
+      expect(await wallet('KRW')).toEqual({
+        total: '9999900',
+        available: '9999900',
+        reserved: '0',
+      });
+      expect(
+        (
+          await observer.query(
+            'select total_quantity::text as q, reserved_quantity::text as r from positions where session_id = $1 and symbol = $2',
+            [client.id, '005930'],
+          )
+        ).rows[0],
+      ).toEqual({ q: '0', r: '0' });
+      expect(runtime.engineFor('KR').getOrder(sellId)?.status).toBe('FILLED');
     },
     TEST_TIMEOUT_MS,
   );

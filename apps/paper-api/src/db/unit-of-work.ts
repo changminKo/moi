@@ -337,6 +337,8 @@ export interface TradingMutationInput {
   readonly response: TradingMutationResponse;
   readonly cash?: TradingMutationCash;
   readonly position?: TradingMutationPosition;
+  /** Id of the reservation row recorded for `cash` / `position`. */
+  readonly reservationId?: string;
   readonly ocoGroupId?: string;
   /**
    * Orders that already exist and must be pinned by this mutation — the other
@@ -613,6 +615,7 @@ export async function commitTradingMutation(
     positionMarketCode: position?.marketCode,
     positionSymbol: position?.symbol,
     positionQuantity: position?.quantity,
+    reservationId: input.reservationId,
     ocoGroupId: input.ocoGroupId,
     siblingOrderIds: [...new Set(input.siblingOrderIds ?? [])].sort(),
   });
@@ -731,6 +734,36 @@ export async function commitTradingMutation(
         ? {}
         : { ocoGroupId: request.ocoGroupId }),
     });
+
+    if (
+      request.cashCurrency !== undefined &&
+      request.cashAmount !== undefined &&
+      request.reservationId !== undefined
+    ) {
+      await tx.accounts.recordReservation({
+        id: request.reservationId,
+        sessionId: request.sessionId,
+        orderId: request.orderId,
+        kind: 'CASH',
+        currency: request.cashCurrency,
+        amount: request.cashAmount,
+      });
+    } else if (
+      request.positionMarketCode !== undefined &&
+      request.positionSymbol !== undefined &&
+      request.positionQuantity !== undefined &&
+      request.reservationId !== undefined
+    ) {
+      await tx.accounts.recordReservation({
+        id: request.reservationId,
+        sessionId: request.sessionId,
+        orderId: request.orderId,
+        kind: 'POSITION',
+        marketCode: request.positionMarketCode,
+        symbol: request.positionSymbol,
+        amount: request.positionQuantity,
+      });
+    }
 
     await tx.audit.append({
       id: request.auditId,

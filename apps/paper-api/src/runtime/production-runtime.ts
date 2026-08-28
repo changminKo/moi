@@ -7,6 +7,10 @@ import { buildApp } from '../app.js';
 import type { AppConfig } from '../config.js';
 import { createDatabase, type Database } from '../db/database.js';
 import { migrateToLatest } from '../db/migrate.js';
+import type {
+  LockedPosition,
+  LockedWallet,
+} from '../db/repositories/account-repository.js';
 import { type TradingTransaction, UnitOfWork } from '../db/unit-of-work.js';
 import { PaperEngine } from '../engine/paper-engine.js';
 import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
@@ -780,6 +784,10 @@ export class ProductionRuntime {
     const placement = new OrderPlacementService({
       unitOfWork: this.#uow,
       engine: (market) => this.#engines.get(market),
+      referencePrice: (market, symbol) => {
+        const price = this.#quote(market, symbol).price;
+        return typeof price === 'string' ? price : undefined;
+      },
     });
     const orderService = new OrderService({
       placement,
@@ -1057,12 +1065,39 @@ export class ProductionRuntime {
       );
     const orderId = command.orderId;
     return await this.#uow.run(async (tx) => {
+      // Read what the cancellation must release before taking any lock, then
+      // walk LEDGER_LOCK_ORDER: session → wallet/position → order → reservation.
+      const reservations = await tx.accounts.findOrderReservations({
+        sessionId: command.sessionId,
+        orderId,
+      });
       const session = await tx.sessions.lock(command.sessionId);
       if (session === undefined || session.status !== 'ACTIVE')
         throw new DomainError(
           'ACCOUNT_READ_ONLY',
           'the session cannot accept cancellation',
         );
+      const wallets = new Map<string, LockedWallet>();
+      const positions = new Map<string, LockedPosition>();
+      for (const reservation of reservations) {
+        if (reservation.kind === 'CASH' && reservation.currency !== null) {
+          const wallet = await tx.accounts.lockWallet({
+            sessionId: command.sessionId,
+            currency: reservation.currency,
+          });
+          if (wallet !== undefined) wallets.set(reservation.id, wallet);
+        } else if (
+          reservation.marketCode !== null &&
+          reservation.symbol !== null
+        ) {
+          const position = await tx.accounts.lockPosition({
+            sessionId: command.sessionId,
+            marketCode: reservation.marketCode,
+            symbol: reservation.symbol,
+          });
+          if (position !== undefined) positions.set(reservation.id, position);
+        }
+      }
       const order = await tx.orders.lock(orderId);
       if (order === undefined || order.sessionId !== command.sessionId)
         throw new DomainError('INVALID_ORDER', 'order was not found');
@@ -1078,6 +1113,27 @@ export class ProductionRuntime {
           ? {}
           : { filledQuantity: order.filledQuantity }),
       });
+      for (const reservation of reservations) {
+        const wallet = wallets.get(reservation.id);
+        const position = positions.get(reservation.id);
+        if (wallet !== undefined)
+          await tx.accounts.releaseCash({
+            wallet,
+            amount: reservation.amount,
+            reservationId: reservation.id,
+          });
+        else if (position !== undefined)
+          await tx.accounts.releasePosition({
+            position,
+            quantity: reservation.amount,
+            reservationId: reservation.id,
+          });
+        else
+          throw new DomainError(
+            'INVARIANT_VIOLATION',
+            `reservation ${reservation.id} has no balance to release into`,
+          );
+      }
       await tx.audit.append({
         id: randomUUID(),
         eventType: 'ORDER_CANCELLED',

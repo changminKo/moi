@@ -35,6 +35,39 @@ export const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
   'VALIDATION_ERROR',
 ]);
 
+const CONFLICT_CODES = new Set([
+  'SYMBOL_NOT_TRADABLE',
+  'MARKET_CLOSED',
+  'CANCEL_ONLY',
+  'ACCOUNT_READ_ONLY',
+  'INSUFFICIENT_AVAILABLE_CASH',
+  'INSUFFICIENT_AVAILABLE_POSITION',
+  'PRICE_PROTECTION',
+  'ORDER_STATE_CONFLICT',
+  'IDEMPOTENCY_CONFLICT',
+  'CAPACITY_REACHED',
+  'QUOTE_EXPIRED',
+  'QUOTE_CONSUMED',
+]);
+const UNAVAILABLE_CODES = new Set([
+  'MARKET_DATA_DEGRADED',
+  'RECOVERY_IN_PROGRESS',
+  'SERVICE_UNAVAILABLE',
+]);
+
+/** HTTP status the error contract assigns to a domain error code. */
+export function httpStatusFor(code: string): number {
+  if (CONFLICT_CODES.has(code)) return 409;
+  if (UNAVAILABLE_CODES.has(code)) return 503;
+  if (code === 'RATE_LIMITED') return 429;
+  if (code === 'SESSION_EXPIRED') return 401;
+  if (code === 'FORBIDDEN') return 403;
+  if (code === 'NOT_FOUND') return 404;
+  if (code === 'PAYLOAD_TOO_LARGE') return 413;
+  if (code === 'INVARIANT_VIOLATION' || code === 'INTERNAL_ERROR') return 500;
+  return 400;
+}
+
 interface StableError {
   readonly code: string;
   readonly message: string;

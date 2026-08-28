@@ -89,6 +89,8 @@ describe('graceful leader handoff drill (§10.2)', () => {
       );
       emitBooks();
       await sleep(200);
+      const funded = await harness.fundUsd(p1, client);
+      expect(funded.status, JSON.stringify(funded.body)).toBeLessThan(300);
       const filled = await harness.placeOrder(
         p1,
         client,

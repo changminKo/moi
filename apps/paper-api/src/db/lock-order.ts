@@ -59,8 +59,8 @@ import { DomainError } from '@skipjack/trading-core';
  * The ranks are ordered from the most coarse-grained row to the most
  * fine-grained: a mutation starts by pinning the session that owns the ledger,
  * claims the idempotency key that identifies the request, then its balances,
- * then the grouping row, then individual orders, and last the outbox event it
- * publishes. Every mutation therefore enters the order at the top and moves
+ * then the grouping row, then individual orders, then the reservation each
+ * order holds, and last the outbox event it publishes. Every mutation therefore enters the order at the top and moves
  * down it.
  *
  * Every lock counts, not only an explicit `select … for update`. Three kinds of
@@ -81,14 +81,16 @@ import { DomainError } from '@skipjack/trading-core';
  * acquiring a rank-0 lock after a rank-5 lock without saying so.
  *
  * `audit_events` is absent because it references nothing: it is append-only and
- * carries no foreign key, so it locks nothing. `reservations` and
- * `account_sequences` are absent because nothing ever locks a row in them.
- * Account sequences are allocated only while the owning session is held for
- * update, so their computed unique key cannot contend; both tables are insert
- * only, and an insert locks its parents, not its own invisible new row. A future
- * `update` against one of them cannot be declared, because
- * `acquireLock` refuses a table with no rank, so the omission fails loudly
- * rather than silently.
+ * carries no foreign key, so it locks nothing. `account_sequences` is absent
+ * because nothing ever locks a row in it: sequences are allocated only while
+ * the owning session is held for update, so their computed unique key cannot
+ * contend, and an insert locks its parents, not its own invisible new row.
+ * `reservations` is ranked below `orders` because releasing a reservation
+ * (cancellation, terminal fill) updates its row after the order it belongs to
+ * has been locked, and above `outbox_events` because the release is published
+ * last. A future `update` against `account_sequences` cannot be declared,
+ * because `acquireLock` refuses a table with no rank, so the omission fails
+ * loudly rather than silently.
  */
 export const LEDGER_LOCK_ORDER = Object.freeze([
   'anonymous_sessions',
@@ -97,6 +99,7 @@ export const LEDGER_LOCK_ORDER = Object.freeze([
   'positions',
   'oco_groups',
   'orders',
+  'reservations',
   'outbox_events',
 ] as const);
 

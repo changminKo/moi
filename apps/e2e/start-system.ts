@@ -60,6 +60,7 @@ import {
 } from '../paper-api/src/modules/stream/stream-upgrade.js';
 import { LayeredRateLimiter } from '../paper-api/src/plugins/rate-limits.js';
 import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
+import { settleFill } from '../paper-api/src/runtime/fill-settlement.js';
 import { stateFilePath } from './state-file.js';
 
 const API_PORT = 3100;
@@ -240,21 +241,25 @@ function health(): JsonObject {
   };
 }
 
-async function upsertPosition(
-  session: string,
-  market: Market,
-  symbol: string,
-  quantity: string,
-): Promise<void> {
-  await pool.query(
-    `insert into positions
-       (id, session_id, market_code, symbol, total_quantity, available_quantity, reserved_quantity, average_cost)
-     values ($1, $2, $3, $4, $5, $5, 0, 1)
-     on conflict (session_id, market_code, symbol) do update
-       set total_quantity = positions.total_quantity + excluded.total_quantity,
-           available_quantity = positions.available_quantity + excluded.available_quantity`,
-    [randomUUID(), session, market, symbol, quantity],
-  );
+/**
+ * Production seeds USD at 0 until the user converts; the browser journeys
+ * place US orders directly, so the harness funds a USD balance per session.
+ */
+function fundedSessionStore(
+  store: ReturnType<typeof createUnitOfWorkSessionStore>,
+): ReturnType<typeof createUnitOfWorkSessionStore> {
+  return {
+    ...store,
+    bootstrap: async (input) => {
+      const principal = await store.bootstrap(input);
+      await pool.query(
+        `update wallets set total = 100000, available = 100000, version = version + 1
+          where session_id = $1 and currency = 'USD' and total = 0`,
+        [principal.id],
+      );
+      return principal;
+    },
+  };
 }
 
 async function persistEngineFill(
@@ -296,14 +301,22 @@ async function persistEngineFill(
         pricing.recoveryFill === true,
       ],
     );
-    if (order.side === 'BUY')
-      await upsertPosition(
-        order.sessionId,
-        order.market,
-        order.symbol,
-        fill.quantity,
-      );
   }
+  if (!database) throw new Error('database is not initialized');
+  await database.transaction().execute((trx) =>
+    settleFill(trx, {
+      order: {
+        id: order.id,
+        sessionId: order.sessionId,
+        market: order.market,
+        symbol: order.symbol,
+        side: order.side,
+      },
+      fills: match.execution.fills,
+      terminal:
+        match.nextStatus === 'FILLED' || match.nextStatus === 'CANCELLED',
+    }),
+  );
 }
 
 async function persistConditionalTrigger(
@@ -866,7 +879,7 @@ async function main(): Promise<void> {
   sessionService = new SessionService({
     keys: config.sessionHashKeys,
     csrfSecret: config.csrfSecret,
-    store: createUnitOfWorkSessionStore(unitOfWork),
+    store: fundedSessionStore(createUnitOfWorkSessionStore(unitOfWork)),
     secureCookie: false,
   });
   fakeMarketData = new FakeMarketData();

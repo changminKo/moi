@@ -21,5 +21,7 @@ test('converts KRW to USD and reloads the authoritative totals', async ({
   await expect(page.getByRole('button', { name: 'Get quote' })).toBeVisible();
   await page.reload();
   await expect(page.getByText('₩9,000,000').first()).toBeVisible();
-  await expect(page.getByText('$700').first()).toBeVisible();
+  // The harness funds each session with $100,000 (see start-system) so the
+  // browser journeys can place US orders; the conversion adds $700 on top.
+  await expect(page.getByText('$100,700').first()).toBeVisible();
 });

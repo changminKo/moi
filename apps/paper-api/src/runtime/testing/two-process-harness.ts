@@ -428,6 +428,29 @@ export class TwoProcessHarness {
       body: JSON.stringify(order),
     });
   }
+  /**
+   * Sessions start with KRW only; US orders need USD, so the drill converts
+   * through the public FX routes exactly as a browser session would.
+   */
+  async fundUsd(
+    api: ApiProcess,
+    client: DrillClient,
+    krwAmount = '10000000',
+  ): Promise<JsonResponse> {
+    const quote = await this.json(`${api.origin}/api/v1/fx/quotes`, {
+      method: 'POST',
+      headers: this.mutationHeaders(client),
+      body: JSON.stringify({ from: 'KRW', to: 'USD', amount: krwAmount }),
+    });
+    if (quote.status >= 300) return quote;
+    return this.json(`${api.origin}/api/v1/fx/conversions`, {
+      method: 'POST',
+      headers: this.mutationHeaders(client),
+      body: JSON.stringify({
+        quoteId: (quote.body as { quoteId?: string }).quoteId,
+      }),
+    });
+  }
   async cancelOrder(
     api: ApiProcess,
     client: DrillClient,
