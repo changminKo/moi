@@ -183,3 +183,24 @@ describe('published surface', () => {
     expect(buildConfig.exclude).toContain('src/**/*.test.ts');
   });
 });
+
+describe('FakeSnapshotSource.seedDefault', () => {
+  it('never seeds a locked book', async () => {
+    const { FakeSnapshotSource, oneTickBelow } = await import(
+      './fake-snapshot-source.js'
+    );
+    expect(oneTickBelow('190.25')).toBe('190.24');
+    expect(oneTickBelow('70000')).toBe('69999');
+    expect(oneTickBelow('1.00')).toBe('0.99');
+    const source = new FakeSnapshotSource();
+    source.seedDefault('US', 'AAPL', '190.25');
+    const snapshot = await source.getRecoverySnapshot(
+      'US',
+      'AAPL',
+      new AbortController().signal,
+    );
+    expect(snapshot.book.asks[0]?.price).toBe('190.25');
+    expect(snapshot.book.bids[0]?.price).toBe('190.24');
+    expect(snapshot.price).toBe('190.25');
+  });
+});
