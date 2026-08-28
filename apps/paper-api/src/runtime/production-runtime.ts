@@ -191,6 +191,7 @@ export class ProductionRuntime {
   #draining = false;
   #acquiring: Promise<void> | null = null;
   readonly #pendingAudits = new Set<Promise<void>>();
+  #databaseDestroyed = false;
 
   constructor(options: ProductionRuntimeOptions) {
     this.#o = options;
@@ -621,6 +622,7 @@ export class ProductionRuntime {
     }).catch(() => undefined);
     await this.#app?.close();
     await this.#o.bundle.close().catch(() => undefined);
+    this.#databaseDestroyed = true;
     await this.#db.destroy();
     return { forced };
   }
@@ -964,10 +966,14 @@ export class ProductionRuntime {
   }
 
   async #refreshIncidents(): Promise<void> {
+    if (this.#databaseDestroyed) return;
     this.#activeIncidents = await this.#incidents.active();
   }
 
   async #audit(eventType: string, payload: unknown): Promise<void> {
+    // Late asynchronous audits (health events, transitions) after stop() must
+    // not touch the destroyed driver.
+    if (this.#databaseDestroyed) return;
     await sql`
       insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
       values (${randomUUID()}::uuid, null, null, ${eventType}, ${JSON.stringify(payload, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}::jsonb, now())

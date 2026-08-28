@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { FakeConnectionLedger } from '@skipjack/market-data';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
@@ -616,6 +617,143 @@ describe('ProductionRuntime', () => {
       expect(metrics).toContain(
         'lease_lost_total{market="KR",phase="ACQUIRING"} 1',
       );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A15 variant 2: SIGTERM during RECOVERING aborts recovery with no new provider calls and exits cleanly',
+    async () => {
+      const { runtime, bundle, logs } = await start({
+        deferSnapshots: true,
+        awaitServing: false,
+      });
+      await vi.waitFor(() => expect(runtime.state.current).toBe('RECOVERING'), {
+        timeout: 10_000,
+      });
+      const startSpy = vi.spyOn(runtime.publisher, 'start');
+      const connectsBefore = bundle.connectCalls();
+      const snapshotsBefore = bundle.snapshotCalls();
+      const startedAt = Date.now();
+      const result = await runtime.stop();
+      expect(result.forced).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(bundle.connectCalls()).toBe(connectsBefore);
+      expect(bundle.snapshotCalls()).toBe(snapshotsBefore);
+      expect(startSpy).not.toHaveBeenCalled();
+      expect(logs.filter((l) => l.event === 'recovery.complete')).toHaveLength(
+        0,
+      );
+      expect(await auditRows('RECOVERY_COMPLETED')).toHaveLength(0);
+      expect(await auditRows('LEADER_RELEASED')).toHaveLength(2);
+      expect(
+        logs.find((l) => l.event === 'outbox.drain')?.fields,
+      ).toMatchObject({ skipped: true, leftFrom: 'RECOVERING' });
+      expect(bundle.connectionsOpen()).toBe(0);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A4b: losing a lease while RECOVERING re-elects once, aborts the in-flight recovery, then reaches SERVING',
+    async () => {
+      const { runtime, bundle, logs, phases, deferSnapshots } = await start({
+        deferSnapshots: true,
+        awaitServing: false,
+      });
+      await vi.waitFor(() => expect(runtime.state.current).toBe('RECOVERING'), {
+        timeout: 10_000,
+      });
+      const reelectSpy = vi.spyOn(runtime, 'reelect');
+      const pid = await leaseBackendPid(runtime.leaderId, 'KR');
+      const connectsAtLoss = bundle.connectCalls();
+      await observer.query('select pg_terminate_backend($1)', [pid]);
+      await vi.waitFor(() => expect(phases).toContain('RE_ELECTING'), {
+        timeout: 3_000,
+      });
+      expect(logs.filter((l) => l.event === 'recovery.complete')).toHaveLength(
+        0,
+      );
+      expect(reelectSpy).toHaveBeenCalledTimes(1);
+      // Nothing new is requested from the provider until the bundle is re-acquired.
+      await sleep(300);
+      expect(bundle.connectCalls()).toBe(connectsAtLoss);
+      deferSnapshots?.resolve();
+      await vi.waitFor(() => expect(runtime.state.current).toBe('SERVING'), {
+        timeout: 20_000,
+      });
+      expect(reelectSpy).toHaveBeenCalledTimes(1);
+      expect(
+        (await auditRows('LEADER_RELEASED')).filter(
+          (a) => a.payload.market === 'US',
+        ),
+      ).toHaveLength(1);
+      const rows = await epochs();
+      expect(Number(rows.KR?.epoch)).toBeGreaterThan(1);
+      expect(Number(rows.US?.epoch)).toBeGreaterThan(1);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'A16: a waiting second runtime wins the bundle after the leader loses one lease; no split bundle is ever observed',
+    async () => {
+      const ledger = new FakeConnectionLedger();
+      const r1 = await start({ bundle: createFakeProviderBundle({ ledger }) });
+      const r2 = await start({
+        bundle: createFakeProviderBundle({ ledger }),
+        awaitServing: false,
+      });
+      await vi.waitFor(() =>
+        expect(r2.runtime.state.current).toBe('ACQUIRING_LEASES'),
+      );
+      await vi.waitFor(() => expect(r2.runtime.leases.pending).toBe('KR'), {
+        timeout: 5_000,
+      });
+      let splitObserved = 0;
+      const poll = setInterval(() => {
+        void observer
+          .query(
+            'select leader_id from leader_epochs where released_at is null',
+          )
+          .then((r) => {
+            const ids = new Set(r.rows.map((row) => row.leader_id));
+            if (r.rows.length === 2 && ids.size === 2) splitObserved += 1;
+          })
+          .catch(() => undefined);
+      }, 100);
+      const pid = await leaseBackendPid(r1.runtime.leaderId, 'KR');
+      await observer.query('select pg_terminate_backend($1)', [pid]);
+      await vi.waitFor(() => expect(r1.phases).toContain('RE_ELECTING'), {
+        timeout: 3_000,
+      });
+      await vi.waitFor(() => expect(r2.runtime.state.current).toBe('SERVING'), {
+        timeout: 15_000,
+      });
+      clearInterval(poll);
+      expect(splitObserved).toBe(0);
+      expect(ledger.peak).toBeLessThanOrEqual(2);
+      const rows = await epochs();
+      expect(rows.KR?.leader_id).toBe(r2.runtime.leaderId);
+      expect(rows.US?.leader_id).toBe(r2.runtime.leaderId);
+      expect(Number(rows.KR?.epoch)).toBeGreaterThan(1);
+      expect(Number(rows.US?.epoch)).toBeGreaterThan(1);
+      expect(
+        (await auditRows('LEADER_RELEASED'))
+          .filter((a) => a.payload.leaderId === r1.runtime.leaderId)
+          .map((a) => a.payload.market),
+      ).toEqual(['US']);
+      // R1 keeps polling while R2 is alive, then stops fast with no provider calls.
+      await vi.waitFor(
+        () => expect(r1.runtime.state.current).toBe('ACQUIRING_LEASES'),
+        { timeout: 5_000 },
+      );
+      const connectsBefore = r1.bundle.connectCalls();
+      const startedAt = Date.now();
+      await r1.runtime.stop();
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(r1.bundle.connectCalls()).toBe(connectsBefore);
+      expect(r2.runtime.state.current).toBe('SERVING');
     },
     TEST_TIMEOUT_MS,
   );
