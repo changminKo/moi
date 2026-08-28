@@ -68,3 +68,44 @@ jobs:
             apps/e2e/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  handoff-drill:
+    name: Leader handoff drill
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Runs alone: the drill spawns two production processes against loopback
+      # fakes and samples lease state every 100 ms, so it never shares the
+      # parallel test job's CPU/Docker budget.
+      - name: Two-process leader handoff drill (3 consecutive runs)
+        run: |
+          for run in 1 2 3; do
+            pnpm --filter @skipjack/paper-api test:drill
+          done
+
+      - name: Upload drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leader-handoff-evidence
+          path: apps/paper-api/test-results/leader-handoff
+          retention-days: 14
+          if-no-files-found: ignore

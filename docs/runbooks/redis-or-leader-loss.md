@@ -87,7 +87,7 @@ Run all four before declaring the incident over. Every query is read-only.
 5. **Leader handoff drill** — proves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` with two real `dist/main.js` processes against the loopback fake provider (never live Toss):
    ```bash
    pnpm --filter @skipjack/paper-api build
-   pnpm --filter @skipjack/paper-api exec vitest run src/runtime/leader-handoff.drill
+   pnpm --filter @skipjack/paper-api test:drill
    ```
    Evidence lands in `apps/paper-api/test-results/leader-handoff/<utc>-drill.json` (`summary.peakConcurrentConnections === 2`, `summary.evictions === 0`). Docker is required; the drill fails (never skips) without it.
 

@@ -116,8 +116,7 @@ after `SESSION_MAX_AGE_SECONDS` has elapsed.
    - `web` may roll normally; it is stateless.
 4. **Verify** — before a release, run the two-process handoff drill (loopback
    fake provider, Docker required): `pnpm --filter @skipjack/paper-api build &&
-   pnpm --filter @skipjack/paper-api exec vitest run
-   src/runtime/leader-handoff.drill`. It must pass three consecutive times
+   pnpm --filter @skipjack/paper-api test:drill`. It must pass three consecutive times
    with `peakConcurrentConnections === 2` and `evictions === 0`; evidence is
    written to `apps/paper-api/test-results/leader-handoff/`. Then verify with
    the checks in any runbook's *Verification* section:
