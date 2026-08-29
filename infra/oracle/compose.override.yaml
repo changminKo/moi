@@ -1,0 +1,43 @@
+# Oracle Cloud reference production overlay for infra/compose.yaml.
+#
+#   docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml up -d
+#
+# Adds a Caddy edge that terminates TLS for the two public origins and proxies
+# to the web and paper-api services (WebSocket upgrades pass through). The
+# application ports stop being published on the host: only 80/443 face the
+# internet, so the VCN security list and the OS firewall open exactly those.
+services:
+  caddy:
+    image: caddy:2.10.0-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WEB_DOMAIN: "${WEB_DOMAIN:?public web host, e.g. app.example.com}"
+      API_DOMAIN: "${API_DOMAIN:?public API host, e.g. api.example.com}"
+    volumes:
+      - ./oracle/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+      paper-api:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      moi.role: tls-edge
+
+  web:
+    ports: !override []
+    expose:
+      - "8080"
+
+  paper-api:
+    ports: !override []
+    expose:
+      - "3000"
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}
