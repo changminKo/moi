@@ -1,4 +1,5 @@
 import type { QuoteSnapshot } from '../../lib/api-types';
+import { formatDecimal } from '../../lib/format-number';
 import { OrderBook } from './order-book';
 import './quote-panel.css';
 
@@ -18,7 +19,7 @@ export function QuotePanel({ quote }: { quote: QuoteSnapshot | null }) {
         </h2>
         <span className={`status-badge status-${health}`}>{health}</span>
       </div>
-      <p className="quote-price">{quote.price ?? '—'}</p>
+      <p className="quote-price">{formatDecimal(quote.price ?? '—')}</p>
       <p className="quote-asof">Timestamp: {quote.asOf}</p>
       <OrderBook
         {...(quote.bids ? { bids: quote.bids } : {})}

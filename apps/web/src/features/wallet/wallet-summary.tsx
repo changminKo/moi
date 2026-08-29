@@ -1,10 +1,9 @@
 import type { Wallet } from '../../lib/api-types';
+import { formatDecimal } from '../../lib/format-number';
 import './wallet.css';
 
 function displayAmount(currency: Wallet['currency'], value: string): string {
-  const [whole, fraction] = value.split('.');
-  const grouped = (whole ?? '0').replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  const amount = fraction ? `${grouped}.${fraction}` : grouped;
+  const amount = formatDecimal(value || '0');
   return currency === 'KRW' ? `₩${amount}` : `$${amount}`;
 }
 

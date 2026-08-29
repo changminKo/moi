@@ -1,5 +1,6 @@
 import Decimal from 'decimal.js';
 import type { BookLevel } from '../../lib/api-types';
+import { formatDecimal } from '../../lib/format-number';
 
 export function depthPercent(size: string, maxSize: string): number {
   if (maxSize === '0') return 0;
@@ -21,8 +22,8 @@ function BookSide({
       {levels.map((level) => (
         <li key={`${side}-${level.price}-${level.size}`} className="book-level">
           <span className="sr-only">{side}</span>
-          <span className="book-price">{level.price}</span>
-          <span className="book-size">{level.size}</span>
+          <span className="book-price">{formatDecimal(level.price)}</span>
+          <span className="book-size">{formatDecimal(level.size)}</span>
           <span
             className="depth-bar"
             aria-hidden="true"
