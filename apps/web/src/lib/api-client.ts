@@ -58,9 +58,13 @@ async function parseJson(response: Response): Promise<unknown> {
 }
 
 export function createApiClient(options: ClientOptions = {}): ApiClient {
-  const config = readRuntimeConfig({
-    apiOrigin: options.origin ?? window.location.origin,
-  });
+  // An explicit origin (tests, tooling) wins; otherwise the runtime config the
+  // web server injects (`/runtime-config.js`) decides, falling back to the
+  // page origin only for same-origin setups such as the Vite dev proxy.
+  const config =
+    options.origin === undefined
+      ? readRuntimeConfig()
+      : readRuntimeConfig({ apiOrigin: options.origin });
   const fetchImpl = options.fetchImpl ?? fetch;
   const getCsrfToken = options.getCsrfToken ?? (() => currentCsrfToken);
 

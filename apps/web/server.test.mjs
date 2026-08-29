@@ -38,6 +38,8 @@ beforeAll(async () => {
   );
   await writeFile(join(distDir, 'assets', 'index-C0hp302H.css'), 'body{}');
   await writeFile(join(distDir, 'secret.txt'), 'not served');
+  await mkdir(join(distDir, 'fonts'), { recursive: true });
+  await writeFile(join(distDir, 'fonts', 'bm-hanna-pro.woff2'), 'wOF2');
   await writeFile(join(distDir, '..', 'outside.txt'), 'outside dist').catch(
     () => {},
   );
@@ -83,6 +85,17 @@ describe('static assets', () => {
     );
     const css = await request('/assets/index-C0hp302H.css');
     expect(css.headers.get('content-type')).toBe('text/css; charset=utf-8');
+  });
+
+  it('serves the self-hosted fonts with a day of caching', async () => {
+    const font = await request('/fonts/bm-hanna-pro.woff2');
+    expect(font.status).toBe(200);
+    expect(font.headers.get('content-type')).toBe('font/woff2');
+    expect(font.headers.get('cache-control')).toBe('public, max-age=86400');
+    const unknown = await request('/fonts/../secret.txt');
+    expect(unknown.status).toBe(404);
+    const other = await request('/fonts/evil.js');
+    expect(other.status).toBe(404);
   });
 
   it('serves index.html with no-store', async () => {
