@@ -246,9 +246,15 @@ requires, and the artefacts are the same ones the local smoke uses.
 2. **Network.** In the VCN security list allow ingress TCP 22 (your IP only),
    80 and 443 from `0.0.0.0/0`. Nothing else: PostgreSQL and Redis stay on the
    compose network. The OS firewall is opened by the bootstrap script.
-3. **DNS.** Point two A records at the reserved IP, e.g. `app.<domain>` and
-   `api.<domain>` (`WEB_DOMAIN` / `API_DOMAIN`). Caddy obtains certificates
-   from Let's Encrypt on first start.
+3. **DNS.** Point one A record at the reserved IP, e.g. `moi.<domain>`
+   (`WEB_DOMAIN`), and set `API_DOMAIN` to the same value: the Caddy edge
+   serves the app and the API from **one origin** and routes `/api/*`,
+   `/health/*` and `/admin/*` to `paper-api`, everything else to `web`
+   (`infra/oracle/Caddyfile`). This is deliberate — free DNS providers such as
+   DuckDNS are on the Public Suffix List, so two subdomains there are different
+   *sites* and the `SameSite=Lax` session cookie would never reach the API
+   (spec §16.29). Caddy obtains certificates from Let's Encrypt on first
+   start.
 4. **Bootstrap** (once, as the default `ubuntu` user):
 
    ```bash
@@ -270,7 +276,8 @@ requires, and the artefacts are the same ones the local smoke uses.
      ssh ubuntu@<ip> 'sudo install -m 0600 /tmp/secrets.prod.enc.env /etc/moi/secrets.enc.env && rm /tmp/secrets.prod.enc.env'
    ```
 
-   `PUBLIC_ORIGIN=https://app.<domain>`, `PUBLIC_API_ORIGIN=https://api.<domain>`,
+   `PUBLIC_ORIGIN=https://moi.<domain>`, `PUBLIC_API_ORIGIN=https://moi.<domain>`
+   (same origin, see step 3),
    `DATABASE_URL=postgres://moi:<pw>@postgres:5432/moi`. Set `WEB_DOMAIN` /
    `API_DOMAIN` in `/etc/moi/moi.env`.
 6. **Egress registration.** Register the reserved IP in the Toss developer
