@@ -225,11 +225,30 @@ cycles; readiness never turns green within `start_period`.
 
 ## Local run
 
+The compose file is the production shape (`MARKET_DATA_ADAPTER=toss`, secrets
+by required interpolation), so a local run is the production run pointed at a
+local Docker daemon. Resolve the secrets with the manager of your choice —
+the sops/age flow below is what the release checklist's live smoke used:
+
 ```bash
-export PUBLIC_ORIGIN=http://localhost:8080 PUBLIC_API_ORIGIN=http://localhost:3000 \
-  POSTGRES_PASSWORD=$(openssl rand -hex 16) CSRF_SECRET=$(openssl rand -hex 32) \
-  ADMIN_API_KEY=$(openssl rand -hex 32) SESSION_HASH_KEYS=$(openssl rand -hex 32)
-export DATABASE_URL="postgres://moi:${POSTGRES_PASSWORD}@postgres:5432/moi"
-docker compose -f infra/compose.yaml config --quiet
-docker compose -f infra/compose.yaml up --build
+brew install sops age && age-keygen -o ~/.config/sops/age/keys.txt
+# fill ~/.config/moi/secrets.env with the variables of infra/secrets.env.tpl
+# (PUBLIC_ORIGIN / PUBLIC_API_ORIGIN as https origins, DATABASE_URL using the
+# compose host `postgres`, generated CSRF_SECRET / ADMIN_API_KEY / SESSION_HASH_KEYS
+# / POSTGRES_PASSWORD, and the Toss client id / secret), then encrypt it:
+sops --encrypt --age <age public key> --input-type dotenv --output-type dotenv \
+  ~/.config/moi/secrets.env > ~/.config/moi/secrets.enc.env && rm ~/.config/moi/secrets.env
+
+# register this machine's egress address in the Toss console and in
+# infra/provider-allowlist.yaml (environment `local`), then:
+sops exec-env ~/.config/moi/secrets.enc.env 'pnpm preflight:deploy --environment local'
+API_PORT=3001 WEB_PORT=8081 \
+  sops exec-env ~/.config/moi/secrets.enc.env 'docker compose -f infra/compose.yaml up -d --build'
+curl -s http://127.0.0.1:3001/health/market-data   # runtime: SERVING once recovery completes
+sops exec-env ~/.config/moi/secrets.enc.env 'docker compose -f infra/compose.yaml down -v'
 ```
+
+The age private key is the single secret that unlocks everything else: keep
+it out of the repository and back it up. Deterministic development and every
+automated test use the in-process fake feed instead (`pnpm test`,
+`pnpm --filter @moi/e2e test:e2e`); nothing here contacts Toss.

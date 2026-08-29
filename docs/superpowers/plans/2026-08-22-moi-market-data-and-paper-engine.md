@@ -1,5 +1,7 @@
 # Moi Market Data and Paper Engine Implementation Plan
 
+> **Status:** implemented and merged into `portfolio-project-ideas` (PR #1). The step checkboxes below are the original authoring artefacts and were not ticked retroactively; the spec's §16 implementation-deviation table and the release checklist are the record of what shipped and how it was verified.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Connect the normalized trading domain to Toss REST/WebSocket data, implement deterministic paper matching, conditional/OCO execution, LOSSY-feed recovery, leader fencing, and fail-closed safety incidents.

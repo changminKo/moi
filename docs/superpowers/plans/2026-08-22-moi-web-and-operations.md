@@ -1,5 +1,7 @@
 # Moi Web and Operations Implementation Plan
 
+> **Status:** implemented and merged into `portfolio-project-ideas` (PR #1). The step checkboxes below are the original authoring artefacts and were not ticked retroactively; the spec's §16 implementation-deviation table and the release checklist are the record of what shipped and how it was verified.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the anonymous paper-trading web application, prove the complete browser-to-ledger flow with Playwright, and package the system with reproducible CI, container, deployment, and incident runbooks.

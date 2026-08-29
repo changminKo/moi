@@ -42,11 +42,19 @@ Playwright 테스트 하네스는 일회용 PostgreSQL 및 Redis 컨테이너와
 pnpm --filter @moi/e2e test:e2e
 ```
 
-특정 프로바이더에 종속되지 않는 컨테이너 구성을 실행하려면, 배포 가이드에 설명된 필수 런타임 시크릿을 설정한 후 다음을 실행합니다:
+컨테이너 구성(`infra/compose.yaml`)은 프로덕션 형상이라 `MARKET_DATA_ADAPTER=toss`가 리터럴로 고정돼 있고, 시크릿은 secret manager가 실행 시점에 주입합니다. 로컬에서는 sops + age를 사용합니다(값은 파일에만, 셸 히스토리·저장소에 남기지 않음):
 
 ```bash
-docker compose -f infra/compose.yaml up --build
+brew install sops age && age-keygen -o ~/.config/sops/age/keys.txt
+# infra/secrets.env.tpl의 변수 목록대로 ~/.config/moi/secrets.env를 채운 뒤 암호화
+sops --encrypt --age <age 공개키> --input-type dotenv --output-type dotenv \
+  ~/.config/moi/secrets.env > ~/.config/moi/secrets.enc.env && rm ~/.config/moi/secrets.env
+# 배포 전 점검: 변수 형식, docker compose config, egress IP 등록 여부 (값은 출력되지 않음)
+sops exec-env ~/.config/moi/secrets.enc.env 'pnpm preflight:deploy --environment local'
+sops exec-env ~/.config/moi/secrets.enc.env 'docker compose -f infra/compose.yaml up -d --build'
 ```
+
+토스 Open API는 등록된 egress IP만 허용하므로, 사용하는 주소를 토스 개발자 콘솔에 등록하고 `infra/provider-allowlist.yaml`에 기록해야 preflight가 통과합니다. 자세한 절차와 1Password/PaaS 대안은 [배포 가이드](docs/operations/deployment.md)를 참조하세요.
 
 `MARKET_DATA_ADAPTER`는 시세 제공자를 선택하며, 프로덕션 환경에서는 암묵적인 기본값이 없습니다: `infra/compose.yaml`은 `toss`로 명시되어 있으며, 프로덕션 프로세스는 `fake`로 설정되거나 해당 환경 변수가 누락된 경우 시작을 거부합니다.
 `MARKET_DATA_ADAPTER=fake`는 결정론적 테스트 및 개발 전용입니다.

@@ -1,5 +1,7 @@
 # Moi Production Runtime and Provider Handoff Implementation Plan (Task 10 A → B → C)
 
+> **Status:** implemented and merged into `portfolio-project-ideas` (PR #1). The step checkboxes below are the original authoring artefacts and were not ticked retroactively; the spec's §16 implementation-deviation table and the release checklist are the record of what shipped and how it was verified.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Assemble the existing lifecycle, lease, recovery, engine, outbox, and stream parts into one `ProductionRuntime` behind `apps/paper-api/src/main.ts`, add the Toss OAuth/REST/WS adapters verified only against loopback fake servers, and prove the `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` handoff with two real API processes.
