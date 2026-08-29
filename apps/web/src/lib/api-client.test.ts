@@ -11,6 +11,21 @@ const response = (body: unknown, init: ResponseInit = {}) =>
 describe('api client', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('reads the API origin from the injected runtime config when no origin is given', async () => {
+    window.__MOI_RUNTIME_CONFIG__ = { apiOrigin: 'https://api.runtime.test' };
+    const fetchMock = vi.fn().mockResolvedValue(response({ ok: true }));
+    try {
+      const client = createApiClient({ fetchImpl: fetchMock });
+      await client.get('/api/v1/sessions/anonymous');
+    } finally {
+      delete window.__MOI_RUNTIME_CONFIG__;
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.runtime.test/api/v1/sessions/anonymous',
+      expect.anything(),
+    );
+  });
+
   it('includes credentials, csrf, and caller idempotency key for a trade mutation', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ price: '12.3400' }));
     const client = createApiClient({

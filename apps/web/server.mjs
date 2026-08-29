@@ -16,6 +16,9 @@ import { fileURLToPath } from 'node:url';
 const ALLOWED_METHODS = 'GET, HEAD';
 const HASHED_ASSET_PATTERN =
   /^\/assets\/[A-Za-z0-9_.-]+-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$/;
+// Self-hosted fonts are copied from public/ unhashed; only woff2 under /fonts.
+const FONT_PATTERN = /^\/fonts\/[a-z0-9-]+\.woff2$/;
+const FONT_CACHE = 'public, max-age=86400';
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const NO_STORE = 'no-store';
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -244,8 +247,9 @@ export function createWebServer({ distDir, publicApiOrigin }) {
     }
 
     const isHashedAsset = HASHED_ASSET_PATTERN.test(pathname);
+    const isFont = FONT_PATTERN.test(pathname);
     const isPublicFile = PUBLIC_FILES.has(pathname);
-    if (isHashedAsset || isPublicFile) {
+    if (isHashedAsset || isFont || isPublicFile) {
       const filePath = resolveInsideDist(root, pathname);
       const type = filePath
         ? MIME_TYPES[extname(filePath).toLowerCase()]
@@ -255,7 +259,11 @@ export function createWebServer({ distDir, publicApiOrigin }) {
         notFound(response, method);
         return;
       }
-      const cache = isHashedAsset ? IMMUTABLE_CACHE : 'public, max-age=3600';
+      const cache = isHashedAsset
+        ? IMMUTABLE_CACHE
+        : isFont
+          ? FONT_CACHE
+          : 'public, max-age=3600';
       streamFile(
         response,
         method,
