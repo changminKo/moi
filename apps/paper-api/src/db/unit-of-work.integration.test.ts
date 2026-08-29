@@ -2169,6 +2169,28 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
   // and re-locks to pick up the new version — exactly the sequence a
   // cancellation walks (session, balance, order, reservation). The session is
   // held first because retiring a reservation pins it `for key share`.
+  'accounts.debitCash': [
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: fixture.sessionId,
+        currency: 'KRW',
+      });
+      if (wallet === undefined) throw new Error('the wallet disappeared');
+      return await tx.accounts.debitCash({ wallet, amount: '1' });
+    },
+  ],
+  'accounts.creditCash': [
+    async (tx, fixture) => {
+      await tx.sessions.lock(fixture.sessionId);
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: fixture.sessionId,
+        currency: 'USD',
+      });
+      if (wallet === undefined) throw new Error('the wallet disappeared');
+      return await tx.accounts.creditCash({ wallet, amount: '1' });
+    },
+  ],
   'accounts.lockReservation': [
     (tx, fixture) => tx.accounts.lockReservation(fixture.reservationId),
   ],
@@ -2356,6 +2378,8 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'accounts.recordReservation#1': [],
   'accounts.findOrderReservations#0': [],
   'accounts.findOrderReservations#1': [],
+  'accounts.debitCash#0': [],
+  'accounts.creditCash#0': [],
   'accounts.lockReservation#0': [],
   'accounts.releaseCash#0': [],
   'accounts.releasePosition#0': [],

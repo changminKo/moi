@@ -167,13 +167,13 @@ export async function lockBalances(
   executor: LedgerExecutor,
   order: Pick<SettlementOrder, 'sessionId' | 'market' | 'symbol' | 'side'>,
 ): Promise<void> {
-  if (order.side === 'BUY') {
-    await sql`
-      select id from wallets where session_id = ${order.sessionId}::uuid
-        and currency = ${currencyFor(order.market)} for update
-    `.execute(executor);
-    return;
-  }
+  // Both sides touch both balances (a BUY grows the position, a SELL credits
+  // the wallet), so both rows are locked up front in rank order — wallets
+  // before positions — whatever the side; opposing fills cannot cycle.
+  await sql`
+    select id from wallets where session_id = ${order.sessionId}::uuid
+      and currency = ${currencyFor(order.market)} for update
+  `.execute(executor);
   await sql`
     select id from positions where session_id = ${order.sessionId}::uuid
       and market_code = ${order.market} and symbol = ${order.symbol} for update
@@ -227,6 +227,8 @@ function remainingExposure(
     'Remaining quantity',
   );
   if (remaining.isNegative() || remaining.isZero()) return '0';
+  // A SELL reservation is denominated in shares: no notional is involved.
+  if (order.side === 'SELL') return remaining.toString();
   const notional = assertExactMoney(
     remaining.mul(order.limitPrice),
     'Remaining notional',
@@ -329,17 +331,7 @@ export async function settleFill(
       reservationRemaining: remaining,
       consumed: quantity,
       terminal: input.terminal,
-      ...(desiredRemaining === undefined
-        ? {}
-        : {
-            // A SELL reservation is denominated in shares: keep the unfilled quantity.
-            desiredRemaining: assertExactMoney(
-              moneyDecimal(order.quantity ?? '0').minus(
-                order.filledQuantityAfter ?? '0',
-              ),
-              'Remaining quantity',
-            ).toString(),
-          }),
+      ...(desiredRemaining === undefined ? {} : { desiredRemaining }),
     },
     'INSUFFICIENT_AVAILABLE_POSITION',
   );

@@ -37,8 +37,12 @@ export async function runSessionTransaction<T>(
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await db.transaction().execute(async (trx) => {
+        // FOR UPDATE, not FOR KEY SHARE: key-share holders are mutually
+        // compatible and would not serialise two markets filling for one
+        // account, whose sequence allocation relies on the session being held
+        // exclusively (lock-order.ts).
         const pinned = await sql<{ id: string }>`
-          select id::text from anonymous_sessions where id = ${sessionId}::uuid for key share
+          select id::text from anonymous_sessions where id = ${sessionId}::uuid for update
         `.execute(trx);
         if (pinned.rows.length === 0)
           throw new DomainError(

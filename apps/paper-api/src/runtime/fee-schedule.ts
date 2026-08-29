@@ -65,46 +65,44 @@ export async function publishFeeModelVersions(
   const ids = new Map<Market, string>();
   for (const market of ['KR', 'US'] as const) {
     const schedule = scheduleFor(fees, market);
-    const existing = await sql<{
-      id: string;
-      schedule: unknown;
-      status: string;
-    }>`
-      select id::text, schedule, status from fee_model_versions
-      where market_code = ${market} and version_number = ${fees.version}
-    `.execute(db);
-    const row = existing.rows[0];
-    if (row !== undefined) {
-      // jsonb normalises key order, so compare field by field.
-      if (!sameSchedule(row.schedule, schedule))
-        throw new DomainError(
-          'INVARIANT_VIOLATION',
-          `fee schedule ${feeModelVersionName(fees.version)} for ${market} is already published with different rates; bump FEE_SCHEDULE_VERSION`,
-        );
-      if (row.status !== 'PUBLISHED')
-        await sql`
-          update fee_model_versions set status = 'PUBLISHED', published_at = now(), version = version + 1
-          where id = ${row.id}::uuid
-        `.execute(db);
-      ids.set(market, row.id);
-      continue;
-    }
-    const id = randomUUID();
+    // Insert-or-ignore first, then validate whatever row now exists — the
+    // winner's or ours — so two processes booting together (a leader handoff)
+    // with different rates under one version cannot both proceed.
     await sql`
       insert into fee_model_versions (id, market_code, version_number, status, schedule, rounding_mode, published_at)
-      values (${id}::uuid, ${market}, ${fees.version}, 'PUBLISHED', ${JSON.stringify(schedule)}::jsonb, ${ROUNDING_MODE}, now())
+      values (${randomUUID()}::uuid, ${market}, ${fees.version}, 'PUBLISHED', ${JSON.stringify(schedule)}::jsonb, ${ROUNDING_MODE}, now())
       on conflict (market_code, version_number) do nothing
     `.execute(db);
-    const settled = await sql<{ id: string }>`
-      select id::text from fee_model_versions where market_code = ${market} and version_number = ${fees.version}
-    `.execute(db);
-    const settledId = settled.rows[0]?.id;
-    if (settledId === undefined)
+    const row = (
+      await sql<{
+        id: string;
+        schedule: unknown;
+        status: string;
+        rounding_mode: string;
+      }>`
+        select id::text, schedule, status, rounding_mode from fee_model_versions
+        where market_code = ${market} and version_number = ${fees.version}
+      `.execute(db)
+    ).rows[0];
+    if (row === undefined)
       throw new DomainError(
         'INVARIANT_VIOLATION',
         `fee schedule row for ${market} vanished`,
       );
-    ids.set(market, settledId);
+    if (
+      !sameSchedule(row.schedule, schedule) ||
+      row.rounding_mode !== ROUNDING_MODE
+    )
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        `fee schedule ${feeModelVersionName(fees.version)} for ${market} is already published with different rates; bump FEE_SCHEDULE_VERSION`,
+      );
+    if (row.status !== 'PUBLISHED')
+      await sql`
+        update fee_model_versions set status = 'PUBLISHED', published_at = now(), version = version + 1
+        where id = ${row.id}::uuid and status <> 'PUBLISHED'
+      `.execute(db);
+    ids.set(market, row.id);
   }
   return ids;
 }

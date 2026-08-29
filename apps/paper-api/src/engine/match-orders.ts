@@ -37,10 +37,12 @@ export function matchOrder(
   const filled =
     BigInt(order.filledQuantity ?? '0') + BigInt(execution.filledQuantity);
   const total = BigInt(order.quantity);
+  // A MARKET order is immediate-or-cancel: whatever the book (or price
+  // protection) leaves unfilled is cancelled now, never left resting.
   const nextStatus =
     filled >= total
       ? 'FILLED'
-      : execution.terminalReason === 'IOC_REMAINDER'
+      : execution.terminalReason !== undefined || order.type === 'MARKET'
         ? 'CANCELLED'
         : execution.filledQuantity === '0'
           ? 'OPEN'

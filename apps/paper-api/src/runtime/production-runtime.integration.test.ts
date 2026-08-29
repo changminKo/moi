@@ -23,6 +23,7 @@ import WebSocket from 'ws';
 import type { AppConfig } from '../config.js';
 import { DEFAULT_FEE_SCHEDULES, ZERO_FEE_SCHEDULES } from '../config.js';
 import { OutboxPublisherLoop } from '../modules/stream/outbox-publisher-loop.js';
+import { publishFeeModelVersions } from './fee-schedule.js';
 import {
   ProductionRuntime,
   type RuntimePhaseSpy,
@@ -2014,6 +2015,357 @@ describe('ProductionRuntime', () => {
           reserved: '0',
         });
         await invariantsHold(c);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  });
+
+  describe('ledger discipline across markets, admin, and FX (Codex lane A3)', () => {
+    const sessionFor = async (origin: string) => {
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      const post = (path: string, body: Record<string, unknown>) =>
+        json(`${origin}${path}`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+      const wallet = async (currency: string) =>
+        (
+          await observer.query(
+            'select total::text as total, available::text as available, reserved::text as reserved from wallets where session_id = $1 and currency = $2',
+            [client.id, currency],
+          )
+        ).rows[0];
+      return { client, headers, post, wallet };
+    };
+    const fund = async (s: Awaited<ReturnType<typeof sessionFor>>) => {
+      const quote = await s.post('/api/v1/fx/quotes', {
+        from: 'KRW',
+        to: 'USD',
+        amount: '5000000',
+      });
+      expect(quote.status, JSON.stringify(quote.body)).toBeLessThan(300);
+      const done = await s.post('/api/v1/fx/conversions', {
+        quoteId: quote.body.quoteId,
+      });
+      expect(done.status, JSON.stringify(done.body)).toBeLessThan(300);
+    };
+    const books = (bundle: FakeProviderBundle) => {
+      bundle.streamFor('KR').emitOrderBook({
+        market: 'KR',
+        symbol: '005930',
+        book: {
+          market: 'KR',
+          symbol: '005930',
+          currency: 'KRW',
+          asks: [{ price: '70000', volume: '10' }],
+          bids: [{ price: '69900', volume: '10' }],
+        },
+        sourceTimestamp: null,
+      });
+      bundle.streamFor('US').emitOrderBook({
+        market: 'US',
+        symbol: 'AAPL',
+        book: {
+          market: 'US',
+          symbol: 'AAPL',
+          currency: 'USD',
+          asks: [{ price: '190.30', volume: '100' }],
+          bids: [{ price: '190.20', volume: '100' }],
+        },
+        sourceTimestamp: null,
+      });
+    };
+
+    it(
+      'fills for one account in both markets at once commit with consecutive account sequences',
+      async () => {
+        const { origin, bundle } = await start();
+        const s = await sessionFor(origin);
+        books(bundle);
+        await sleep(200);
+        await fund(s);
+        // Two resting orders, then both books move at the same instant.
+        const kr = await s.post('/api/v1/orders', {
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '69000',
+        });
+        const us = await s.post('/api/v1/orders', {
+          market: 'US',
+          symbol: 'AAPL',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '185.00',
+        });
+        expect(kr.status, JSON.stringify(kr.body)).toBe(201);
+        expect(us.status, JSON.stringify(us.body)).toBe(201);
+        bundle.streamFor('KR').emitOrderBook({
+          market: 'KR',
+          symbol: '005930',
+          book: {
+            market: 'KR',
+            symbol: '005930',
+            currency: 'KRW',
+            asks: [{ price: '69000', volume: '10' }],
+            bids: [{ price: '68900', volume: '10' }],
+          },
+          sourceTimestamp: null,
+        });
+        bundle.streamFor('US').emitOrderBook({
+          market: 'US',
+          symbol: 'AAPL',
+          book: {
+            market: 'US',
+            symbol: 'AAPL',
+            currency: 'USD',
+            asks: [{ price: '185.00', volume: '100' }],
+            bids: [{ price: '184.90', volume: '100' }],
+          },
+          sourceTimestamp: null,
+        });
+        await vi.waitFor(
+          async () => {
+            const rows = (
+              await observer.query(
+                'select status from orders where session_id = $1 and order_type = $2',
+                [s.client.id, 'LIMIT'],
+              )
+            ).rows;
+            expect(rows.map((r) => r.status)).toEqual(['FILLED', 'FILLED']);
+          },
+          { timeout: 5_000 },
+        );
+        const sequences = (
+          await observer.query(
+            'select account_sequence::text as seq from account_sequences where session_id = $1 order by account_sequence',
+            [s.client.id],
+          )
+        ).rows.map((r) => Number(r.seq));
+        expect(sequences).toEqual(sequences.map((_, i) => i + 1)); // dense, no gap, no duplicate
+        const filledEvents = (
+          await observer.query(
+            "select payload, stream_sequence::text as seq from outbox_events where session_id = $1 and event_type = 'ORDER_FILLED' order by stream_sequence",
+            [s.client.id],
+          )
+        ).rows;
+        const fillRows = (
+          await observer.query(
+            'select order_id::text as o, count(*)::int as n from fills f join orders x on x.id = f.order_id where x.session_id = $1 group by order_id',
+            [s.client.id],
+          )
+        ).rows;
+        expect(
+          filledEvents,
+          JSON.stringify({ filledEvents, fillRows }),
+        ).toHaveLength(2);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'admin cancel-all releases every reservation, resolves OCO groups, and empties the engines',
+      async () => {
+        const { origin, bundle, runtime } = await start();
+        const s = await sessionFor(origin);
+        books(bundle);
+        await sleep(200);
+        const resting = await s.post('/api/v1/orders', {
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '2',
+          limitPrice: '60000',
+        });
+        const oco = await s.post('/api/v1/orders', {
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'OCO',
+          quantity: '1',
+          legs: [
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'LIMIT',
+              quantity: '1',
+              limitPrice: '60000',
+            },
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'STOP',
+              quantity: '1',
+              stopPrice: '80000',
+            },
+          ],
+        });
+        expect(resting.status, JSON.stringify(resting.body)).toBe(201);
+        expect(oco.status, JSON.stringify(oco.body)).toBe(201);
+        expect(Number((await s.wallet('KRW'))?.reserved)).toBeGreaterThan(0);
+        const admin = await json(`${origin}/admin/cancel-all`, {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer runtime-admin-key-at-least-32-bytes!',
+            'content-type': 'application/json',
+          },
+          body: '{}',
+        });
+        expect(admin.status, JSON.stringify(admin.body)).toBe(200);
+        expect(
+          (admin.body as { result?: { cancelled?: number; failed?: number } })
+            .result,
+        ).toEqual({ cancelled: 3, failed: 0 });
+        expect(
+          (
+            await observer.query(
+              "select count(*)::int as n from orders where session_id = $1 and status <> 'CANCELLED'",
+              [s.client.id],
+            )
+          ).rows[0]?.n,
+        ).toBe(0);
+        expect(
+          (
+            await observer.query(
+              "select count(*)::int as n from oco_groups where session_id = $1 and status <> 'RESOLVED'",
+              [s.client.id],
+            )
+          ).rows[0]?.n,
+        ).toBe(0);
+        expect(await s.wallet('KRW')).toEqual({
+          total: '10000000',
+          available: '10000000',
+          reserved: '0',
+        });
+        expect(
+          (
+            await observer.query(
+              'select count(*)::int as n from reservations where session_id = $1 and released = false',
+              [s.client.id],
+            )
+          ).rows[0]?.n,
+        ).toBe(0);
+        expect(
+          runtime
+            .engineFor('KR')
+            .getOrder(String((resting.body as { id?: string }).id))?.status,
+        ).toBe('CANCELLED');
+        expect(
+          (
+            await observer.query(
+              "select count(*)::int as n from outbox_events where session_id = $1 and event_type = 'ORDER_CANCELLED'",
+              [s.client.id],
+            )
+          ).rows[0]?.n,
+        ).toBe(3);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'opposite-direction FX conversions racing each other both commit without deadlock',
+      async () => {
+        const { origin } = await start();
+        const s = await sessionFor(origin);
+        await fund(s); // KRW 5,000,000 → USD 3,500
+        const toUsd = await s.post('/api/v1/fx/quotes', {
+          from: 'KRW',
+          to: 'USD',
+          amount: '1000000',
+        });
+        const toKrw = await s.post('/api/v1/fx/quotes', {
+          from: 'USD',
+          to: 'KRW',
+          amount: '700',
+        });
+        expect(toUsd.status).toBeLessThan(300);
+        expect(toKrw.status).toBeLessThan(300);
+        const [a, b] = await Promise.all([
+          s.post('/api/v1/fx/conversions', { quoteId: toUsd.body.quoteId }),
+          s.post('/api/v1/fx/conversions', { quoteId: toKrw.body.quoteId }),
+        ]);
+        expect(a.status, JSON.stringify(a.body)).toBeLessThan(300);
+        expect(b.status, JSON.stringify(b.body)).toBeLessThan(300);
+        // 5,000,000 KRW - 1,000,000 + 700 × 1428.57 = 4,999,999; USD 3,500 + 700 - 700 = 3,500.
+        const krw = await s.wallet('KRW');
+        const usd = await s.wallet('USD');
+        expect(krw?.total).toBe('4999999');
+        expect(usd?.total).toBe('3500');
+        expect(BigInt(String(krw?.total))).toBe(
+          BigInt(String(krw?.available)) + BigInt(String(krw?.reserved)),
+        );
+        const sequences = (
+          await observer.query(
+            'select account_sequence::text as seq from account_sequences where session_id = $1 order by account_sequence',
+            [s.client.id],
+          )
+        ).rows.map((r) => Number(r.seq));
+        expect(sequences).toEqual(sequences.map((_, i) => i + 1));
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'two processes publishing one fee version with different rates cannot both win',
+      async () => {
+        const { runtime } = await start();
+        await runtime.stop();
+        running.splice(0);
+        const { createDatabase } = await import('../db/database.js');
+        const db = createDatabase(databaseUrl);
+        try {
+          const a = { ...DEFAULT_FEE_SCHEDULES, version: 9 };
+          const b = {
+            ...a,
+            KR: { commissionRate: '0.0009', sellTaxRate: '0.0015' },
+          };
+          const outcomes = await Promise.allSettled(
+            Array.from({ length: 6 }, (_, i) =>
+              publishFeeModelVersions(db, i % 2 === 0 ? a : b),
+            ),
+          );
+          const fulfilled = outcomes.filter((o) => o.status === 'fulfilled');
+          const rejected = outcomes.filter((o) => o.status === 'rejected');
+          expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+          expect(rejected.length).toBeGreaterThanOrEqual(1);
+          for (const r of rejected)
+            expect(String((r as PromiseRejectedResult).reason)).toMatch(
+              /different rates/,
+            );
+          const rows = (
+            await observer.query(
+              'select market_code, schedule from fee_model_versions where version_number = 9 order by market_code',
+            )
+          ).rows;
+          expect(rows).toHaveLength(2);
+          const krRate = (
+            rows[0]?.schedule as { commissionRate: string } | undefined
+          )?.commissionRate;
+          // Every winner referenced the single stored schedule; losers saw the mismatch.
+          for (const f of fulfilled)
+            expect(
+              (
+                f as PromiseFulfilledResult<ReadonlyMap<string, string>>
+              ).value.get('KR'),
+            ).toBeTypeOf('string');
+          expect(['0.00015', '0.0009']).toContain(krRate);
+        } finally {
+          await db.destroy();
+        }
       },
       TEST_TIMEOUT_MS,
     );

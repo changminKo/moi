@@ -341,3 +341,81 @@ describe('PaperEngine.restoreOrder', () => {
     });
   });
 });
+
+describe('PaperEngine terminal handling (Codex lane A3)', () => {
+  const fee = () =>
+    createFeeModel({
+      version: 't',
+      market: 'US',
+      currency: 'USD',
+      commissionRate: '0',
+      sellTaxRate: '0',
+      roundingDecimals: 2,
+      roundingMode: 'HALF_UP',
+    });
+  const book = (asks: { price: string; volume: string }[], version = 1n) => ({
+    recoveryEpoch: 1n,
+    leaderFencingToken: 1n,
+    marketDataVersion: version,
+    payload: {
+      market: 'US' as const,
+      symbol: 'AAPL',
+      currency: 'USD' as const,
+      asks,
+      bids: [{ price: '99', volume: '100' }],
+      sourceTimestamp: null,
+    },
+  });
+
+  it('cancels the unfilled remainder of a MARKET order instead of leaving it resting', async () => {
+    const fills: string[] = [];
+    const engine = new PaperEngine({
+      feeModel: fee(),
+      onFill: (order, match) => {
+        fills.push(
+          `${order.status}:${match.execution.terminalReason ?? 'none'}`,
+        );
+      },
+    });
+    await engine.onOrderBook(book([{ price: '100', volume: '1' }]));
+    const order = await engine.placeImmediateOrder({
+      id: 'mkt-1',
+      sessionId: 's',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'MARKET',
+      quantity: '3',
+    });
+    expect(order.status).toBe('CANCELLED');
+    expect(order.filledQuantity).toBe('1');
+    expect(fills).toEqual(['CANCELLED:IOC_REMAINDER']);
+  });
+
+  it('mirrors the ledger status when persistence reports the order already terminal', async () => {
+    const engine = new PaperEngine({
+      feeModel: fee(),
+      onFill: async () => {
+        throw Object.assign(new Error('already filled'), {
+          code: 'ORDER_TERMINAL',
+          status: 'FILLED',
+        });
+      },
+    });
+    await engine.onOrderBook(book([{ price: '100', volume: '10' }]));
+    const order = await engine.placeImmediateOrder({
+      id: 'lim-1',
+      sessionId: 's',
+      market: 'US',
+      symbol: 'AAPL',
+      currency: 'USD',
+      side: 'BUY',
+      type: 'LIMIT',
+      quantity: '2',
+      limitPrice: '100',
+    });
+    expect(order.status).toBe('FILLED');
+    expect(order.filledQuantity).toBe('2');
+  });
+});

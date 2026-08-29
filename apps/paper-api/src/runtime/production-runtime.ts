@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { Market } from '@moi/trading-core';
-import { DomainError, type FeeModel } from '@moi/trading-core';
+import { type Currency, DomainError, type FeeModel } from '@moi/trading-core';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { buildApp } from '../app.js';
 import type { AppConfig } from '../config.js';
 import { createDatabase, type Database } from '../db/database.js';
 import { migrateToLatest } from '../db/migrate.js';
+import type { LockedWallet } from '../db/repositories/account-repository.js';
 import { type TradingTransaction, UnitOfWork } from '../db/unit-of-work.js';
 import { PaperEngine } from '../engine/paper-engine.js';
 import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
@@ -250,7 +251,23 @@ export class ProductionRuntime {
       },
       markPublished: (id) =>
         this.#db.transaction().execute((trx) => markOutboxPublished(trx, id)),
-      publish: (event) => this.hub.deliver(event.sessionId, event),
+      // The browser applies an event's payload as a patch of its portfolio
+      // snapshot, so every published event carries the session's current
+      // snapshot on top of its own fields (order id, status, …).
+      publish: async (event) => {
+        const snapshot = await this.#uow.run((tx) =>
+          tx.portfolio.snapshot(event.sessionId),
+        );
+        await this.hub.deliver(event.sessionId, {
+          ...event,
+          payload: {
+            ...(typeof event.payload === 'object' && event.payload !== null
+              ? (event.payload as Record<string, unknown>)
+              : {}),
+            ...(snapshot as unknown as Record<string, unknown>),
+          },
+        });
+      },
       metrics: this.metrics,
     });
     this.publisher = new OutboxPublisherLoop({
@@ -897,11 +914,33 @@ export class ProductionRuntime {
               return resolved !== undefined;
             },
             cancelAll: async () => {
-              const result = await sql<{ id: string }>`
-                update orders set status = 'CANCELLED', updated_at = now(), version = version + 1
-                where status not in ('FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED') returning id
+              // Every open order goes through the canonical cancellation
+              // (reservations released, OCO groups resolved, engines
+              // notified, per-order outbox rows) — never a bare status update.
+              const open = await sql<{ id: string; session_id: string }>`
+                select id::text, session_id::text from orders
+                where status not in ('FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED')
+                order by session_id, id
               `.execute(this.#db);
-              return { cancelled: result.rows.length };
+              let cancelled = 0;
+              let failed = 0;
+              for (const row of open.rows) {
+                try {
+                  const result = await this.#cancellation({
+                    sessionId: row.session_id,
+                    orderId: row.id,
+                  });
+                  cancelled += result.cancelledOrderIds.length;
+                } catch (error) {
+                  failed += 1;
+                  this.#log('admin.cancel_all_failed', {
+                    orderId: row.id,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                }
+              }
+              return { cancelled, failed };
             },
           });
         }
@@ -967,52 +1006,65 @@ export class ProductionRuntime {
         return new Map(rows.rows.map((row) => [row.currency, row.available]));
       },
       onExchange: (quote, receipt) =>
-        this.#uow.track(() =>
-          this.#db.transaction().execute(async (trx) => {
-            const debit = await sql<{ id: string }>`
-              update wallets set total = total - ${quote.sourceAmount}::numeric,
-                available = available - ${quote.sourceAmount}::numeric, version = version + 1
-              where session_id = ${quote.sessionId}::uuid and currency = ${quote.from}
-                and available >= ${quote.sourceAmount}::numeric
-              returning id
-            `.execute(trx);
-            if (debit.rows.length !== 1)
+        this.#uow.run(async (tx) => {
+          // Same discipline as every other ledger mutation: session FOR UPDATE,
+          // then the two wallets by natural key (KRW before USD whatever the
+          // direction), then the audit / sequence / outbox rows.
+          const session = await tx.sessions.lock(quote.sessionId);
+          if (session === undefined || session.status !== 'ACTIVE')
+            throw new DomainError(
+              'ACCOUNT_READ_ONLY',
+              'the session cannot convert cash',
+            );
+          const wallets = new Map<Currency, LockedWallet>();
+          for (const currency of ['KRW', 'USD'] as const) {
+            const wallet = await tx.accounts.lockWallet({
+              sessionId: quote.sessionId,
+              currency,
+            });
+            if (wallet === undefined)
               throw new DomainError(
                 'INSUFFICIENT_AVAILABLE_CASH',
-                'insufficient balance for the conversion',
+                `session holds no ${currency} wallet`,
               );
-            await sql`
-              update wallets set total = total + ${quote.targetAmount}::numeric,
-                available = available + ${quote.targetAmount}::numeric, version = version + 1
-              where session_id = ${quote.sessionId}::uuid and currency = ${quote.to}
-            `.execute(trx);
-            const payload = {
-              quoteId: quote.id,
-              from: quote.from,
-              to: quote.to,
-              sourceAmount: quote.sourceAmount,
-              targetAmount: quote.targetAmount,
-              exchangedAt: receipt.exchangedAt,
-            };
-            await sql`
-              insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
-              values (${randomUUID()}::uuid, ${quote.sessionId}, null, 'FX_CONVERTED', ${JSON.stringify(payload)}::jsonb, now())
-            `.execute(trx);
-            const sequence = await sql<{ sequence: string }>`
-              with next as (
-                select coalesce(max(account_sequence), 0) + 1 as sequence
-                from account_sequences where session_id = ${quote.sessionId}::uuid
-              )
-              insert into account_sequences (id, session_id, account_sequence, mutation_kind)
-              select ${randomUUID()}::uuid, ${quote.sessionId}::uuid, sequence, 'FX_CONVERTED' from next
-              returning account_sequence::text as sequence
-            `.execute(trx);
-            await sql`
-              insert into outbox_events (id, event_id, session_id, stream_sequence, event_type, payload)
-              values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${quote.sessionId}::uuid, ${sequence.rows[0]?.sequence ?? '1'}, 'FX_CONVERTED', ${JSON.stringify(payload)}::jsonb)
-            `.execute(trx);
-          }),
-        ),
+            wallets.set(currency, wallet);
+          }
+          await tx.accounts.debitCash({
+            wallet: wallets.get(quote.from) as LockedWallet,
+            amount: quote.sourceAmount,
+          });
+          await tx.accounts.creditCash({
+            wallet: wallets.get(quote.to) as LockedWallet,
+            amount: quote.targetAmount,
+          });
+          const payload = {
+            quoteId: quote.id,
+            from: quote.from,
+            to: quote.to,
+            sourceAmount: quote.sourceAmount,
+            targetAmount: quote.targetAmount,
+            exchangedAt: receipt.exchangedAt,
+          };
+          await tx.audit.append({
+            id: randomUUID(),
+            eventType: 'FX_CONVERTED',
+            payload,
+            occurredAt: new Date(),
+            sessionReference: quote.sessionId,
+          });
+          const sequence = await tx.sequences.allocate({
+            sessionId: quote.sessionId,
+            mutationKind: 'FX_CONVERTED',
+          });
+          await tx.outbox.append({
+            id: randomUUID(),
+            eventId: randomUUID(),
+            sessionId: quote.sessionId,
+            streamSequence: sequence,
+            eventType: 'FX_CONVERTED',
+            payload,
+          });
+        }),
     });
   }
 

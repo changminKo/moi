@@ -1,8 +1,10 @@
 import {
+  assertExactMoney,
   type Currency,
   type DecimalString,
   DomainError,
   type Market,
+  moneyDecimal,
   type PositionSnapshot,
   type Quantity,
   releaseReservation,
@@ -86,6 +88,11 @@ export interface LockedReservation {
   readonly released: boolean;
 }
 
+export interface CashMovementInput {
+  readonly wallet: LockedWallet;
+  readonly amount: DecimalString;
+}
+
 export interface ReleaseCashInput {
   readonly wallet: LockedWallet;
   readonly amount: DecimalString;
@@ -121,6 +128,10 @@ export interface AccountRepository {
   lockReservation(
     reservationId: string,
   ): Promise<LockedReservation | undefined>;
+  /** Removes available cash from the wallet (virtual FX source side). */
+  debitCash(input: CashMovementInput): Promise<WalletSnapshot>;
+  /** Adds cash to the wallet's total and available (virtual FX target side). */
+  creditCash(input: CashMovementInput): Promise<WalletSnapshot>;
   /** Hands reserved cash back to `available` and retires the reservation row. */
   releaseCash(input: ReleaseCashInput): Promise<WalletSnapshot>;
   /** Hands reserved quantity back to `available` and retires the reservation row. */
@@ -597,6 +608,73 @@ export async function lockReservation(
   return row === undefined ? undefined : { ...row };
 }
 
+/**
+ * Moves unreserved cash into (`+1`) or out of (`-1`) a locked wallet: total
+ * and available change together, reserved is untouched. A debit that would
+ * overdraw `available` fails with INSUFFICIENT_AVAILABLE_CASH.
+ */
+export async function moveCash(
+  connection: LedgerConnection,
+  input: CashMovementInput,
+  direction: 1 | -1,
+): Promise<WalletSnapshot> {
+  const wallet = input.wallet;
+  const request = snapshotInput({
+    walletId: wallet.id,
+    sessionId: wallet.sessionId,
+    currency: wallet.currency,
+    total: wallet.total,
+    available: wallet.available,
+    reserved: wallet.reserved,
+    version: wallet.version,
+    amount: input.amount,
+  });
+  const amount = assertExactMoney(
+    moneyDecimal(request.amount),
+    'Cash movement',
+  );
+  if (amount.isNegative())
+    throw new DomainError(
+      'INVALID_ORDER',
+      'cash movement must not be negative',
+    );
+  const delta = direction === 1 ? amount : amount.negated();
+  const total = assertExactMoney(
+    moneyDecimal(request.total).plus(delta),
+    'Wallet total',
+  );
+  const available = assertExactMoney(
+    moneyDecimal(request.available).plus(delta),
+    'Wallet available',
+  );
+  if (available.isNegative() || total.isNegative())
+    throw new DomainError(
+      'INSUFFICIENT_AVAILABLE_CASH',
+      'Available cash is insufficient',
+    );
+  connection.acquireLock({
+    table: 'wallets',
+    key: walletLockKey(request),
+    strength: 'NO_KEY_UPDATE',
+  });
+  const result = await sql<{ version: string }>`
+    update wallets
+    set total = ${total.toString()},
+        available = ${available.toString()},
+        version = version + 1
+    where id = ${request.walletId} and version = ${request.version}
+    returning version
+  `.execute(connection.executor);
+  assertVersionedUpdate(result.rows, `wallet ${request.walletId}`);
+  return {
+    currency: request.currency,
+    total: total.toString(),
+    available: available.toString(),
+    reserved: request.reserved,
+    version: request.version + 1n,
+  };
+}
+
 export function createAccountRepository(
   connection: LedgerConnection,
 ): AccountRepository {
@@ -613,6 +691,8 @@ export function createAccountRepository(
       findOrderReservations(connection, key),
     lockReservation: (reservationId: string) =>
       lockReservation(connection, reservationId),
+    debitCash: (input: CashMovementInput) => moveCash(connection, input, -1),
+    creditCash: (input: CashMovementInput) => moveCash(connection, input, 1),
     releaseCash: (input: ReleaseCashInput) => releaseCash(connection, input),
     releasePosition: (input: ReleasePositionInput) =>
       releasePosition(connection, input),

@@ -44,7 +44,7 @@ export interface ImmediateOrderCommand {
   readonly limitPrice?: DecimalString;
 }
 export interface PaperOrder extends MatchableOrder {
-  readonly terminalReason?: 'IOC_REMAINDER';
+  readonly terminalReason?: 'IOC_REMAINDER' | 'PRICE_PROTECTION';
 }
 export interface ConditionalPaperOrder
   extends Omit<PaperOrder, 'type'>,
@@ -372,13 +372,23 @@ export class PaperEngine {
           envelope.leaderFencingToken
       )
         continue;
+      // Nothing happened: no quantity crossed and the status is unchanged, so
+      // there is no fill to persist and no ORDER_FILLED event to publish.
+      if (
+        match.execution.filledQuantity === '0' &&
+        match.nextStatus === order.status
+      )
+        continue;
       const updated: PaperOrder = {
         ...order,
         filledQuantity: match.filledQuantity,
         status: match.nextStatus,
         version: order.version + 1n,
         ...(match.nextStatus === 'CANCELLED'
-          ? { terminalReason: 'IOC_REMAINDER' as const }
+          ? {
+              terminalReason:
+                match.execution.terminalReason ?? ('IOC_REMAINDER' as const),
+            }
           : {}),
       };
       this.#orders.set(order.id, updated);
@@ -386,11 +396,23 @@ export class PaperEngine {
         await this.#options.onFill?.(updated, match, pricing);
       } catch (error) {
         if ((error as { code?: unknown })?.code === 'ORDER_TERMINAL') {
-          // A cancellation committed first: the ledger is the source of
-          // truth, so the order leaves the book without a fill.
+          // The ledger already holds the order in a terminal state (a
+          // cancellation committed first, or another leader filled it): the
+          // ledger is the source of truth, so mirror that exact status.
+          const status = (error as { status?: string }).status;
+          const terminal =
+            status === 'FILLED' ||
+            status === 'EXPIRED' ||
+            status === 'REJECTED' ||
+            status === 'CANCELLED'
+              ? status
+              : 'CANCELLED';
           this.#orders.set(order.id, {
             ...order,
-            status: 'CANCELLED',
+            status: terminal,
+            ...(terminal === 'FILLED'
+              ? { filledQuantity: order.quantity }
+              : {}),
             version: order.version + 1n,
           });
           continue;

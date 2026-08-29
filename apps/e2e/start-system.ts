@@ -42,6 +42,11 @@ import {
   verifyCsrfToken,
 } from '../paper-api/src/modules/session/session-service.js';
 import { SESSION_COOKIE } from '../paper-api/src/modules/session/session-token.js';
+import {
+  claimPendingOutbox,
+  markOutboxPublished,
+  OutboxPublisher,
+} from '../paper-api/src/modules/stream/outbox-publisher.js';
 import { StreamHeartbeatLoop } from '../paper-api/src/modules/stream/stream-heartbeat-loop.js';
 import { StreamHub } from '../paper-api/src/modules/stream/stream-hub.js';
 import type {
@@ -200,6 +205,50 @@ async function portfolio(session: string): Promise<JsonObject> {
   )) as unknown as JsonObject;
 }
 
+/**
+ * Delivers the ledger's own outbox rows — the same publisher, enrichment and
+ * frame shape production uses — instead of allocating a parallel account
+ * sequence for a hand-made snapshot. Options exist only for the resync
+ * journeys: `duplicate` redelivers each frame twice (at-least-once), and
+ * `gap` is handled by `/sequence-gap`.
+ */
+async function drainOutbox(
+  options: { duplicate?: boolean } = {},
+): Promise<void> {
+  if (!database || !unitOfWork) throw new Error('database is not initialized');
+  const db = database;
+  const uow = unitOfWork;
+  const publisher = new OutboxPublisher({
+    claim: (limit) =>
+      db.transaction().execute((trx) => claimPendingOutbox(trx, limit)),
+    markPublished: (id) =>
+      db.transaction().execute((trx) => markOutboxPublished(trx, id)),
+    publish: async (event) => {
+      const snapshot = (await uow.run((tx) =>
+        tx.portfolio.snapshot(event.sessionId),
+      )) as unknown as Record<string, unknown>;
+      sendStream(
+        event.sessionId,
+        {
+          type: 'event',
+          eventId: event.eventId,
+          accountSequence: event.accountSequence,
+          eventType: event.eventType,
+          payload: {
+            ...(typeof event.payload === 'object' && event.payload !== null
+              ? (event.payload as Record<string, unknown>)
+              : {}),
+            ...snapshot,
+          },
+        },
+        options.duplicate ? 2 : 1,
+      );
+    },
+  });
+  await publisher.pollOnce();
+}
+
+/** Legacy hand-made snapshot frame; only the sequence-gap journey still needs it. */
 async function publishSnapshot(
   session: string,
   kind: string,
@@ -481,9 +530,7 @@ async function controlApi(
       'select status from orders where id = $1',
       [input.orderId],
     );
-    await publishSnapshot(row.sessionId, 'FILL_CREATED', {
-      duplicate: input.duplicate === true,
-    });
+    await drainOutbox({ duplicate: input.duplicate === true });
     json(response, 200, { status: status.rows[0]?.status });
     return;
   }
@@ -526,7 +573,7 @@ async function controlApi(
     });
     // Production publishes the trigger's outbox rows; the harness drives its
     // browser stream from snapshots, so mirror the resolution to the session.
-    await publishSnapshot(row.sessionId, 'OCO_RESOLVED');
+    await drainOutbox();
     json(response, 200, { resolved: true });
     return;
   }
@@ -715,8 +762,7 @@ async function executeCancelOrAmend(command: {
       sessionId: command.sessionId,
       orderId: String(command.orderId),
     });
-    if (result.cancelledOrderIds.length > 0)
-      await publishSnapshot(command.sessionId, 'ORDER_CANCELLED');
+    if (result.cancelledOrderIds.length > 0) await drainOutbox();
     return { id: result.id, status: result.status };
   }
   if (command.action === 'amend')
@@ -852,10 +898,7 @@ async function main(): Promise<void> {
   const orderPlacementService = new OrderPlacementService({
     unitOfWork,
     engine: (market) => engines.get(market),
-    afterPlacement: (sessionId, sequence) =>
-      publishSnapshot(sessionId, 'ORDER_PLACED', {
-        sequence: sequence.toString(),
-      }),
+    afterPlacement: () => drainOutbox(),
   });
   const orderService = new OrderService({
     placement: orderPlacementService,
@@ -891,7 +934,7 @@ async function main(): Promise<void> {
           where session_id = $1 and currency = $3`,
         [quote.sessionId, quote.targetAmount, quote.to],
       );
-      await publishSnapshot(quote.sessionId, 'FX_CONVERTED');
+      await drainOutbox();
     },
   });
   apiApp = await buildApp(config, {
