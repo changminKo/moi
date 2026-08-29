@@ -15,5 +15,8 @@ CSRF_SECRET=op://Moi/paper-api/CSRF_SECRET
 ADMIN_API_KEY=op://Moi/paper-api/ADMIN_API_KEY
 # Read-only registry token (classic PAT, scope read:packages) for the private GHCR images.
 GHCR_TOKEN=op://Moi/ghcr/READ_TOKEN
+# Optional: Discord channel webhook for host status, deploy and stack-failure
+# alerts (infra/oracle/notify.sh). Alerting is skipped when it is absent.
+DISCORD_WEBHOOK_URL=op://Moi/discord/WEBHOOK_URL
 TOSS_CLIENT_ID=op://Moi/toss/CLIENT_ID
 TOSS_CLIENT_SECRET=op://Moi/toss/CLIENT_SECRET

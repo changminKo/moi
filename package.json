@@ -13,7 +13,7 @@
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "check:deployment": "node scripts/check-deployment-contract.mjs",
-    "test:deployment": "node --test scripts/check-deployment-contract.test.mjs",
+    "test:deployment": "node --test scripts/check-deployment-contract.test.mjs infra/oracle/status-check.test.mjs",
     "preflight:deploy": "node scripts/preflight-deploy.mjs",
     "test:preflight": "node --test scripts/preflight-deploy.test.mjs"
   },

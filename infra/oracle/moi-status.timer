@@ -1,0 +1,12 @@
+# Runs moi-status.service every 5 minutes (first run 2 minutes after boot).
+[Unit]
+Description=Moi status check every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=moi-status.service
+
+[Install]
+WantedBy=timers.target

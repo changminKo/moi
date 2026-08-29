@@ -13,6 +13,8 @@
 # 5. restart the stack through systemd (compose recreates containers
 # stop-then-start; the 45 s grace period lets the leader drain), 6. require
 # readiness, both markets NORMAL and placement enabled — otherwise fail.
+# Start, success and failure are announced on Discord when the sops file
+# carries DISCORD_WEBHOOK_URL (infra/oracle/notify.sh, docs "Alerting").
 set -euo pipefail
 [ "$(id -u)" = 0 ] || exec sudo -E "$0" "$@"
 REF="${1:-main}"
@@ -25,12 +27,33 @@ COMPOSE=(docker compose -f "$REPO/infra/compose.yaml" -f "$REPO/infra/oracle/com
 withsecrets() { sops exec-env /etc/moi/secrets.enc.env "$*"; }
 cd "$REPO"
 
-echo "== fetch ${REF}"
+# Discord notifications (infra/oracle/notify.sh): a no-op when the sops file
+# has no DISCORD_WEBHOOK_URL, and never able to fail the deploy.
+STEP=start
+step() { STEP="$1"; echo "== $1"; }
+notify() { withsecrets "$REPO/infra/oracle/notify.sh $(printf '%q ' "$@")" || true; }
+on_exit() {
+  local code=$?
+  trap - EXIT
+  [ "$code" = 0 ] || notify fail "deploy failed: ${REF}" "step: ${STEP} (exit ${code}) on $(hostname)"
+  exit "$code"
+}
+trap on_exit EXIT
+notify info "deploy started: ${REF}" "host $(hostname)"
+
+step "fetch ${REF}"
 as_owner git fetch -q origin "$REF"
 as_owner git checkout -q --detach FETCH_HEAD
 as_owner git log --oneline -1
 
-echo "== toolchain"
+step "systemd units"
+# The status timer and failure alert live in the repository; refresh them on
+# every deploy so a unit change ships with the release that needs it.
+install -m 0644 "$REPO"/infra/oracle/*.service "$REPO"/infra/oracle/*.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now moi-status.timer >/dev/null
+
+step toolchain
 # Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and
 # an uncapped heap thrashes swap instead of failing fast.
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
@@ -38,26 +61,26 @@ as_owner node "$REPO/scripts/check-runtime.mjs"
 as_owner corepack prepare pnpm@11.22.0 --activate >/dev/null
 as_owner pnpm install --frozen-lockfile --silent
 
-echo "== preflight (production)"
+step "preflight (production)"
 withsecrets "env WEB_DOMAIN='$WEB_DOMAIN' API_DOMAIN='$API_DOMAIN' pnpm preflight:deploy --environment production"
 
-echo "== registry login + pull (${MOI_IMAGE_TAG:-main})"
+step "registry login + pull (${MOI_IMAGE_TAG:-main})"
 # Private GHCR: the read-only token comes from the sops file over stdin only;
 # docker keeps it in root's config.json (0600).
 withsecrets 'printf %s "$GHCR_TOKEN" | docker login ghcr.io -u changminko --password-stdin >/dev/null'
 withsecrets "${COMPOSE[*]} pull --quiet"
 
-echo "== migrations (new image, old release still serving)"
+step "migrations (new image, old release still serving)"
 # First deploy: no release is running yet, so the datastore the job connects to
 # must be started here. --no-recreate leaves an already running postgres/redis
 # untouched; --wait blocks until their healthchecks pass.
 withsecrets "${COMPOSE[*]} up -d --no-recreate --wait postgres redis"
 withsecrets "${COMPOSE[*]} run --rm --no-deps -T paper-api node apps/paper-api/dist/migrate-cli.js"
 
-echo "== stop-then-start"
+step stop-then-start
 systemctl restart moi
 
-echo "== verify"
+step verify
 ready=0
 for _ in $(seq 1 60); do
   if curl -fsS -o /dev/null "https://${API_DOMAIN}/health/ready"; then ready=1; break; fi
@@ -70,7 +93,10 @@ for _ in $(seq 1 40); do
   if printf %s "$md" | grep -q '"runtime":"SERVING"' \
      && [ "$(printf %s "$md" | grep -o '"state":"NORMAL"' | wc -l)" -ge 2 ] \
      && printf %s "$tr" | grep -q '"placement":true'; then
-    echo "$md"; echo "$tr"; echo "== done ($(as_owner git rev-parse --short HEAD))"; exit 0
+    sha="$(as_owner git rev-parse --short HEAD)"
+    echo "$md"; echo "$tr"; echo "== done (${sha})"
+    notify ok "deploy finished: ${sha}" "ref ${REF}, KR/US NORMAL, placement enabled"
+    exit 0
   fi
   sleep 3
 done
