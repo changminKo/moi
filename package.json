@@ -18,10 +18,10 @@
     "test:preflight": "node --test scripts/preflight-deploy.test.mjs"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.9",
+    "@biomejs/biome": "2.5.10",
     "@types/node": "24.13.3",
     "fast-check": "4.9.0",
-    "turbo": "2.10.11",
+    "turbo": "2.10.12",
     "typescript": "7.0.2",
     "vitest": "4.1.11",
     "yaml": "2.9.0"
