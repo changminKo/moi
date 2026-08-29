@@ -17,8 +17,12 @@
 	import hardening
 
 	# Prometheus scrapes stay private: the public edge never proxies /metrics.
+	# Inside `handle` so it is evaluated before the catch-all below — a bare
+	# `respond` is ordered after `handle` and would never match.
 	@metrics path /metrics /metrics/*
-	respond @metrics 404
+	handle @metrics {
+		respond 404
+	}
 
 	# API, health probes and the admin surface (ADMIN_API_KEY-guarded) go to
 	# paper-api; WebSocket upgrades (/api/v1/stream) are proxied transparently.
