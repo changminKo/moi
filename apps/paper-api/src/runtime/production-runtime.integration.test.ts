@@ -192,7 +192,7 @@ afterEach(async () => {
   await observer.query(
     "delete from audit_events where event_type like 'LEADER_%' or event_type like 'RUNTIME_%' or event_type like 'RECOVERY_%'",
   );
-});
+}, 60_000);
 
 afterAll(async () => {
   await observer?.end();
@@ -1668,10 +1668,17 @@ describe('ProductionRuntime', () => {
         signals: false,
         log: () => undefined,
       });
-      running.push(attempt);
-      await expect(attempt.start()).rejects.toThrow(
-        /already published with different rates/,
-      );
+      try {
+        await expect(attempt.start()).rejects.toThrow(
+          /already published with different rates/,
+        );
+      } finally {
+        // A FAILED_CLOSED runtime is stopped here, inside the test budget, so a
+
+        // slow CI runner cannot leave it for the afterEach hook to time out on.
+
+        await attempt.stop().catch(() => undefined);
+      }
     },
     TEST_TIMEOUT_MS,
   );
