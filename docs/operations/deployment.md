@@ -234,7 +234,8 @@ requires, and the artefacts are the same ones the local smoke uses.
    (2 OCPU / 12 GB is plenty; the free allowance is 4 OCPU / 24 GB in total),
    image Ubuntu 24.04 (aarch64), boot volume 50–100 GB. If A1 capacity is
    unavailable retry later or use `VM.Standard.E2.1.Micro` (amd64, 1 GB —
-   tight but workable). Assign a **reserved** public IP so it survives
+   workable because images are pulled, not built, and the bootstrap adds a
+   2 GB swap file). Assign a **reserved** public IP so it survives
    stop/start.
 2. **Network.** In the VCN security list allow ingress TCP 22 (your IP only),
    80 and 443 from `0.0.0.0/0`. Nothing else: PostgreSQL and Redis stay on the
@@ -276,9 +277,14 @@ requires, and the artefacts are the same ones the local smoke uses.
    /opt/moi/infra/oracle/deploy.sh main
    ```
 
-   fetch → `preflight --environment production` → image build on the host →
+   fetch → `preflight --environment production` → pull the images CI
+   published to GHCR (`.github/workflows/publish.yml`, `linux/amd64` and
+   `linux/arm64`; the host never builds — a 1 GB Micro cannot) →
    `systemctl restart moi` (compose recreates containers stop-then-start, the
    45 s grace period lets the leader drain) → readiness and market-data health.
+   Roll back by pinning `MOI_IMAGE_TAG=<commit sha>` in `/etc/moi/moi.env`.
+   The GHCR packages must be public (package settings → Change visibility) or
+   the host must `docker login ghcr.io` with a read-only token.
 8. **Operate.** `sudo journalctl -u moi -f`, the runbooks in `docs/runbooks/`,
    and `pg_dump` through `docker compose exec postgres` for backups (see
    *Backup and restore*). Oracle may reclaim Always Free compute that stays

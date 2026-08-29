@@ -28,12 +28,19 @@ services:
     labels:
       moi.role: tls-edge
 
+  # Images come from GHCR (built by .github/workflows/publish.yml); the host
+  # never builds. MOI_IMAGE_TAG defaults to `main`; pin a commit sha to roll
+  # back (`MOI_IMAGE_TAG=<sha> infra/oracle/deploy.sh`).
   web:
+    image: ghcr.io/changminko/moi-web:${MOI_IMAGE_TAG:-main}
+    build: !reset null
     ports: !override []
     expose:
       - "8080"
 
   paper-api:
+    image: ghcr.io/changminko/moi-paper-api:${MOI_IMAGE_TAG:-main}
+    build: !reset null
     ports: !override []
     expose:
       - "3000"
