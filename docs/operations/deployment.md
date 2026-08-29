@@ -317,6 +317,40 @@ requires, and the artefacts are the same ones the local smoke uses.
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
 
+## Alerting (Discord)
+
+One Discord channel webhook carries CI results, deploys and host status. The
+webhook URL is a secret: it goes into the GitHub repository secrets and the
+host's sops file — never into the repository, chat, or a shell history line
+that echoes it.
+
+1. **Channel webhook.** Discord → channel → *Edit channel* → *Integrations* →
+   *Webhooks* → *New webhook* → *Copy URL*.
+2. **GitHub Actions** (`.github/workflows/notify.yml`): in a terminal,
+   `gh secret set DISCORD_WEBHOOK` and paste the URL at the prompt. The
+   workflow posts every `CI` / `Publish images` failure and every success on
+   `main`; with the secret absent it exits without posting.
+3. **Host** (`infra/oracle/notify.sh`): add `DISCORD_WEBHOOK_URL` to the
+   production sops file on the workstation
+   (`sops set … '["DISCORD_WEBHOOK_URL"]' '"<url>"'`), copy it to
+   `/etc/moi/secrets.enc.env` as in step 5 above, then `deploy.sh` (or
+   `systemctl restart moi-status.timer`). Three producers use it:
+   - `moi-status.timer` → `status-check.sh` every 5 minutes: readiness,
+     runtime, KR/US states, placement, memory, swap, disk → one status line,
+     posted **only when it changes** (`FAIL` / `WARN` / `recovered`).
+   - `moi.service` `OnFailure=moi-alert.service`: a failed stack start/stop with
+     the journal tail.
+   - `deploy.sh`: `deploy started`, `deploy finished: <sha>`, or
+     `deploy failed` with the step that broke.
+   Without the variable every producer is a silent no-op; a rejected post is
+   logged and never fails the caller.
+4. **Test**: `sudo SOPS_AGE_KEY_FILE=/etc/moi/age.key sops exec-env /etc/moi/secrets.enc.env '/opt/moi/infra/oracle/notify.sh info test'`.
+
+What each alert means and the first response: `docs/runbooks/alerting.md`.
+Host-down detection needs an external probe (the timer cannot report a dead
+host); a free external monitor pointed at `https://<api domain>/health/ready`
+with its own Discord integration covers that gap.
+
 ## Local run
 
 The compose file is the production shape (`MARKET_DATA_ADAPTER=toss`, secrets
