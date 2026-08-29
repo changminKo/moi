@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/changminKo/moi/main/infra/oracle/bootstrap.sh | bash
 #
-# Installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
+# Creates a 4 GB swapfile (the E2.1.Micro fallback host only has 1 GB of RAM),
+# installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
 # firewall (Oracle images ship iptables rules that drop everything else),
 # clones the repository to /opt/moi, prepares /etc/moi (age key, encrypted
 # secrets, moi.env) and installs the systemd unit. It never asks for or writes
@@ -20,6 +21,19 @@ arch="$(dpkg --print-architecture)" # arm64 | amd64
 echo "== packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq ca-certificates curl git gnupg age netfilter-persistent iptables-persistent
+
+echo "== swap (E2.1.Micro ships 1 GB RAM; docker/pnpm builds OOM without it)"
+if ! sudo swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  sudo fallocate -l 4G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=none
+  sudo chmod 600 /swapfile
+  sudo mkswap -q /swapfile
+  sudo swapon /swapfile
+fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+# A 1 GB host must start swapping early, otherwise the OOM killer wins first.
+printf 'vm.swappiness=80\nvm.vfs_cache_pressure=50\n' | sudo tee /etc/sysctl.d/99-moi-swap.conf >/dev/null
+sudo sysctl -q --system
+free -h
 
 echo "== docker (official repository)"
 if ! command -v docker >/dev/null; then
