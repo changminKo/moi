@@ -212,6 +212,7 @@ export class ProductionRuntime {
   readonly #engines = new Map<Market, PaperEngine>();
   #feeVersionIds: ReadonlyMap<Market, string> = new Map();
   readonly #cancellation: ReturnType<typeof createOrderCancellation>;
+  readonly #snapshotUow: UnitOfWork;
   readonly #stores = new Map<Market, MarketStateStore>();
   #resolveListening: () => void = () => undefined;
   #app: FastifyInstance | undefined;
@@ -233,6 +234,16 @@ export class ProductionRuntime {
     });
     this.#db = createDatabase(options.config.databaseUrl);
     this.#uow = new CountingUnitOfWork(this.#db, {
+      backoff: async (attempt) => {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(10 * 2 ** (attempt - 1), 100)),
+        );
+      },
+    });
+    // Snapshot reads for stream enrichment run in REPEATABLE READ so the nine
+    // portfolio queries see one consistent state (issue #11, first step).
+    this.#snapshotUow = new UnitOfWork(this.#db, {
+      isolationLevel: 'repeatable read',
       backoff: async (attempt) => {
         await new Promise((resolve) =>
           setTimeout(resolve, Math.min(10 * 2 ** (attempt - 1), 100)),
@@ -951,14 +962,27 @@ export class ProductionRuntime {
                 if (runtime.supervisor.exhausted) runtime.resumeRetries();
               return resolved !== undefined;
             },
-            cancelAll: async () => {
+            cancelAll: async (input) => {
               // Every open order goes through the canonical cancellation
               // (reservations released, OCO groups resolved, engines
               // notified, per-order outbox rows) — never a bare status update.
               // Rescan until nothing eligible remains, so an order placed
               // after the first scan is still swept; failures are counted per
               // order and make the command fail loudly rather than report
-              // success with reservations still held.
+              // success with reservations still held. The sweep is bracketed
+              // by durable audit rows (issue #10, first step): who asked, why,
+              // and what each pass did, so an interrupted sweep is visible and
+              // re-running the command is the documented recovery.
+              const body =
+                typeof input === 'object' && input !== null
+                  ? (input as Record<string, unknown>)
+                  : {};
+              const command = {
+                commandId: randomUUID(),
+                actor: typeof body.actor === 'string' ? body.actor : null,
+                reason: typeof body.reason === 'string' ? body.reason : null,
+              };
+              await this.#audit('CANCEL_ALL_STARTED', command);
               let cancelled = 0;
               let failed = 0;
               const attempted = new Set<string>();
@@ -970,6 +994,11 @@ export class ProductionRuntime {
                 `.execute(this.#db);
                 const pending = open.rows.filter((r) => !attempted.has(r.id));
                 if (pending.length === 0) break;
+                await this.#audit('CANCEL_ALL_PASS', {
+                  commandId: command.commandId,
+                  pass,
+                  eligible: pending.length,
+                });
                 for (const row of pending) {
                   attempted.add(row.id);
                   try {
@@ -988,6 +1017,11 @@ export class ProductionRuntime {
                   }
                 }
               }
+              await this.#audit('CANCEL_ALL_COMPLETED', {
+                ...command,
+                cancelled,
+                failed,
+              });
               if (failed > 0)
                 throw Object.assign(
                   new Error(
@@ -995,7 +1029,7 @@ export class ProductionRuntime {
                   ),
                   { code: 'SERVICE_UNAVAILABLE', statusCode: 503 },
                 );
-              return { cancelled, failed };
+              return { commandId: command.commandId, cancelled, failed };
             },
           });
         }
@@ -1043,7 +1077,7 @@ export class ProductionRuntime {
     sessionId: string,
     payload: unknown,
   ): Promise<Record<string, unknown>> {
-    const snapshot = await this.#uow.run((tx) =>
+    const snapshot = await this.#snapshotUow.run((tx) =>
       tx.portfolio.snapshot(sessionId),
     );
     return {
