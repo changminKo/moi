@@ -85,6 +85,15 @@ handoff therefore remains unchecked below.
   [`infra/provider-allowlist.yaml`](../../infra/provider-allowlist.yaml) as
   environment `local`). The real credential also exposed an over-strict
   `TOSS_CLIENT_ID` pattern (`c_…` was only the contract's example); fixed.
+  **Live provider smoke (2026-08-29 15:07 UTC, weekend session):** the compose
+  stack built from this tree (`moi/paper-api:local`, `moi/web:local`) booted
+  with `MARKET_DATA_ADAPTER=toss` and the sops-held credentials, acquired both
+  leases (epoch 1), completed REST recovery against the real Toss API (KR
+  `005930` in 5.4 s; the US allow list in 11.3 s), reached `SERVING` with
+  `placement/cancellation/fx = true`, held `provider_connections_open 2`, and
+  its logs contained zero bearer tokens or client-secret fragments. Quotes were
+  `null` because both markets were closed; no order was placed. Stack torn down
+  with `down -v`.
   **Still open:** no production egress address exists — `--environment
   production` fails by design until a static address is registered. Blocked
   on infrastructure, not code.
