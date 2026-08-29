@@ -61,12 +61,63 @@ includes it in the CSP `connect-src`. No other variable reaches the browser.
 ### Secret injection
 
 Secrets are injected at runtime by the platform's secret store (Compose:
-required interpolation `${VAR:?}` from the shell or an untracked env file;
+required interpolation `${VAR:?}` resolved by a secret manager at run time;
 Kubernetes: `Secret` → `envFrom`; PaaS: the provider's secret manager). Never
 bake a secret into an image, commit an `.env`, or pass a secret through CI
 logs. Rotate `CSRF_SECRET` and `ADMIN_API_KEY` by redeploying;
 rotate `SESSION_HASH_KEYS` by prepending the new key and removing the oldest
 after `SESSION_MAX_AGE_SECONDS` has elapsed.
+
+Concrete recipes for the Compose reference topology — every one resolves the
+`${VAR:?}` interpolations in the process environment of `docker compose` and
+writes nothing to disk:
+
+| Store | Command |
+|-------|---------|
+| 1Password CLI | `op run --env-file=infra/secrets.env.tpl -- docker compose -f infra/compose.yaml up -d` — [`infra/secrets.env.tpl`](../../infra/secrets.env.tpl) holds only `op://vault/item/field` references and is checked by `pnpm check:deployment` |
+| sops (age/KMS) | `sops exec-env infra/secrets.enc.env 'docker compose -f infra/compose.yaml up -d'` — the encrypted file lives outside this repository |
+| CI / PaaS store | GitHub Environments, Fly/Render/Railway secrets, AWS/GCP secret managers: expose the same variable names to the deploy job; the workflow itself never references `TOSS_*` |
+
+Rotating `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET`: issue the new credential in the
+Toss developer console, update the referenced item, run the preflight below,
+then perform the stop-then-start handoff. The old process keeps its cached
+access token until it exits; a `401` after the handoff means the new secret
+was rejected (see the market-data runbook).
+
+### Preflight (`pnpm preflight:deploy`)
+
+Run immediately before `docker compose up`, with the production environment
+resolved by the secret manager (for example `op run --env-file=infra/secrets.env.tpl -- pnpm preflight:deploy`).
+It exits non-zero unless all three hold, and never prints a secret value:
+
+1. every required variable is present, well-formed, and not a placeholder;
+   `MARKET_DATA_ADAPTER`, `TOSS_REST_BASE_URL`, `TOSS_WS_URL` are *not* set
+   (the compose file owns them);
+2. `docker compose -f infra/compose.yaml config` accepts the environment;
+3. the machine's egress address is registered with the provider (below).
+
+`--skip-compose` / `--skip-egress` print what was skipped; `--egress-ip <ip>`
+(or `EGRESS_IP`) supplies the address when the deploy host is not the egress
+host; `--environment staging` checks against staging registrations.
+
+### Egress allow list
+
+Toss serves only registered source addresses: an unregistered `paper-api`
+gets `403 access_denied` on every REST snapshot and WebSocket handshake and
+the markets never leave `RECOVERING`. Therefore:
+
+- `paper-api` egresses through **one static address** (NAT gateway / elastic
+  IP / the platform's dedicated egress). Autoscaling egress pools are not
+  acceptable for this process.
+- The address is registered in the Toss developer console **and** recorded in
+  [`infra/provider-allowlist.yaml`](../../infra/provider-allowlist.yaml) in the
+  same change (address, environment, date, who registered it). The file holds
+  addresses only; `pnpm check:deployment` validates its shape and
+  `pnpm preflight:deploy` refuses to deploy from an address that is not
+  listed for the target environment.
+- Changing the egress address is a release: register the new address first,
+  record it, preflight, then move the process; remove the old address from
+  the console and the file afterwards.
 
 ## Origins, TLS, cookies
 
@@ -81,6 +132,10 @@ after `SESSION_MAX_AGE_SECONDS` has elapsed.
 
 ## Rollout procedure
 
+0. **Preflight.** `pnpm preflight:deploy` with the resolved production
+   environment (see *Preflight* above) must pass; a missing secret or an
+   unregistered egress address stops the release before the old leader is
+   touched.
 1. **Migrations run before traffic.** Run `migrateToLatest`
    (`apps/paper-api/src/db/migrate.ts`) as a one-off job against the target
    database using the new image, and let it finish before the new `paper-api`

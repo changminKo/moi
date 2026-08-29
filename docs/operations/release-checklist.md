@@ -69,6 +69,15 @@ handoff therefore remains unchecked below.
   blocked.
 - [x] Deterministic drills cover leader loss, Redis loss, PostgreSQL outage,
   outbox backlog, WebSocket disconnect, and anonymous-session expiry.
+- [ ] **Provider credentials and egress registration.** `TOSS_CLIENT_ID`/
+  `TOSS_CLIENT_SECRET` live only in the secret manager referenced by
+  [`infra/secrets.env.tpl`](../../infra/secrets.env.tpl); the static egress
+  address is registered in the Toss console and recorded in
+  [`infra/provider-allowlist.yaml`](../../infra/provider-allowlist.yaml);
+  `pnpm preflight:deploy` passes against the production environment.
+  Tooling landed 2026-08-29 (`scripts/preflight-deploy.mjs`,
+  `pnpm test:preflight`); the allow list is still empty because no
+  production egress address exists yet. Blocked on infrastructure, not code.
 
 ## SLO evidence
 

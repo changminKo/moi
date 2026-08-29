@@ -1,0 +1,16 @@
+# Egress IP allow list registered with the Toss Open API for the `paper-api`
+# market-data leader (docs/operations/deployment.md, "Egress allow list").
+#
+# The provider answers `403 access_denied` from any address not registered
+# here, so this file is the operator's record of what was registered and when.
+# Update it in the same change that registers or removes an address with the
+# provider. `pnpm preflight:deploy` refuses a deployment whose current egress
+# address is not listed. Addresses only — never credentials.
+provider: toss
+registered_egress_ips: []
+# Entry shape (one per static egress address):
+#   - address: 203.0.113.10
+#     environment: production
+#     registered_at: 2026-09-01
+#     registered_by: ops@example.com
+#     note: NAT gateway eip for the paper-api leader

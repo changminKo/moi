@@ -49,6 +49,9 @@ jobs:
       - name: Deployment contract
         run: pnpm check:deployment
 
+      - name: Deployment tooling tests
+        run: pnpm test:deployment && pnpm test:preflight
+
       - name: Build
         run: pnpm build
 

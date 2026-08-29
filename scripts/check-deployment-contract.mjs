@@ -353,6 +353,75 @@ check('no committed secrets', () => {
   );
 });
 
+check('provider egress allow list', () => {
+  const doc = readYaml('infra/provider-allowlist.yaml');
+  assert.strictEqual(
+    doc?.provider,
+    'toss',
+    'allow list must name the toss provider',
+  );
+  assert.ok(
+    Array.isArray(doc?.registered_egress_ips),
+    'registered_egress_ips must be a list',
+  );
+  for (const [index, entry] of doc.registered_egress_ips.entries()) {
+    const where = `provider-allowlist entry ${index}`;
+    assert.match(
+      String(entry?.address ?? ''),
+      /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]+)$/i,
+      `${where}: address must be an IP address`,
+    );
+    for (const field of ['environment', 'registered_at', 'registered_by'])
+      assert.ok(
+        typeof entry?.[field] === 'string' && entry[field].length > 0,
+        `${where}: ${field} is required`,
+      );
+    assert.ok(
+      !Number.isNaN(Date.parse(String(entry.registered_at))),
+      `${where}: registered_at must be an ISO date`,
+    );
+  }
+  const text = read('infra/provider-allowlist.yaml');
+  for (const pattern of SECRET_PATTERNS)
+    assert.ok(
+      !pattern.test(text),
+      `allow list must hold addresses only (${pattern})`,
+    );
+});
+
+check('secret-manager template holds references only', () => {
+  const lines = read('infra/secrets.env.tpl')
+    .split('\n')
+    .filter((line) => line.trim().length > 0 && !line.startsWith('#'));
+  assert.ok(
+    lines.length > 0,
+    'secrets.env.tpl must declare the compose variables',
+  );
+  const declared = new Set();
+  for (const line of lines) {
+    const match = /^([A-Z_]+)=(op:\/\/[^\s]+)$/.exec(line);
+    assert.ok(
+      match,
+      `secrets.env.tpl line must be VAR=op://vault/item/field: ${line.split('=')[0]}`,
+    );
+    declared.add(match[1]);
+  }
+  for (const key of [
+    'DATABASE_URL',
+    'POSTGRES_PASSWORD',
+    'SESSION_HASH_KEYS',
+    'CSRF_SECRET',
+    'ADMIN_API_KEY',
+    'TOSS_CLIENT_ID',
+    'TOSS_CLIENT_SECRET',
+  ])
+    assert.ok(declared.has(key), `secrets.env.tpl must reference ${key}`);
+  assert.ok(
+    !declared.has('MARKET_DATA_ADAPTER'),
+    'MARKET_DATA_ADAPTER is a compose literal, not a secret',
+  );
+});
+
 check('no live provider hosts in tests', () => {
   const roots = ['apps', 'packages', 'scripts'];
   const allowed = new Set([
@@ -497,6 +566,9 @@ check('deployment guide', () => {
     /NORMAL/,
     /rollback/i,
     /secret injection/i,
+    /preflight:deploy/,
+    /egress allow list/i,
+    /provider-allowlist\.yaml/,
     /TLS/,
     /Secure/,
     /SameSite=Lax/,

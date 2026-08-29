@@ -29,7 +29,7 @@ Keep the incident open until the feed has been stable for at least 10 minutes.
 
 ## `PROVIDER_IP_NOT_ALLOWED` / `ProviderAuthFailed`
 
-A `403 access_denied` from the provider means the process's egress IP is not on the provider allow list, and a `401` means the client credentials were rejected. Neither is fixed by a restart: correct the allow list (the `paper-api` egress IP must be static and recorded next to the secret store) or rotate `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET`, then let the market-local reconnect supervisor retry (or resolve `RECOVERY_RETRY_EXHAUSTED` if it tripped).
+A `403 access_denied` from the provider means the process's egress IP is not on the provider allow list, and a `401` means the client credentials were rejected. Neither is fixed by a restart: correct the allow list (the `paper-api` egress IP must be static, registered in the Toss console, and recorded in `infra/provider-allowlist.yaml`; compare the process's current egress address with `pnpm preflight:deploy --skip-compose`) or rotate `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET` through the secret manager (`infra/secrets.env.tpl`), then let the market-local reconnect supervisor retry (or resolve `RECOVERY_RETRY_EXHAUSTED` if it tripped).
 
 ## Read-only diagnosis
 
