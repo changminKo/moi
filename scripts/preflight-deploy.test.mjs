@@ -134,12 +134,19 @@ describe('preflight', () => {
     const lines = [];
     const code = await preflight({
       env: { ...goodEnv() },
-      args: ['--skip-compose', '--egress-ip', '203.0.113.10'],
+      // Overrides are for operators' machines, never production (see below).
+      args: [
+        '--skip-compose',
+        '--egress-ip',
+        '198.51.100.7',
+        '--environment',
+        'staging',
+      ],
       allowlistText: allowlistYaml,
       log: (l) => lines.push(l),
     });
     assert.equal(code, 0, lines.join('\n'));
-    assert.ok(lines.some((l) => /^ok\s+egress 203\.0\.113\.10/.test(l)));
+    assert.ok(lines.some((l) => /^ok\s+egress 198\.51\.100\.7/.test(l)));
   });
   it('fails closed on any problem and never prints a secret value', async () => {
     const lines = [];
@@ -164,6 +171,8 @@ describe('preflight', () => {
         '--skip-compose',
         '--egress-ip',
         '203.0.113.10',
+        '--environment',
+        'staging',
       ],
       { env: { PATH: process.env.PATH }, encoding: 'utf8' },
     );
@@ -173,5 +182,28 @@ describe('preflight', () => {
       /FAIL environment: TOSS_CLIENT_SECRET is required/,
     );
     assert.match(result.stdout, /FAIL no egress address is registered/);
+  });
+
+  it('refuses egress overrides for the production environment', async () => {
+    const lines = [];
+    const code = await preflight({
+      env: { ...goodEnv() },
+      args: ['--skip-compose', '--skip-egress'],
+      allowlistText: allowlistYaml,
+      log: (l) => lines.push(l),
+    });
+    assert.equal(code, 1);
+    assert.match(
+      lines.join('\n'),
+      /production preflight must observe the real egress address/,
+    );
+    const withIp = [];
+    const code2 = await preflight({
+      env: { ...goodEnv() },
+      args: ['--skip-compose', '--egress-ip', '203.0.113.10'],
+      allowlistText: allowlistYaml,
+      log: (l) => withIp.push(l),
+    });
+    assert.equal(code2, 1);
   });
 });

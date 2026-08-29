@@ -116,7 +116,7 @@ describe('usePortfolioStream stream protocol (§7.5)', () => {
           type: 'event',
           eventId: `e${sequence}`,
           accountSequence: sequence,
-          payload: {},
+          payload: { wallets: [] },
         }),
       );
     act(() => first.onclose?.({ code: 1006 } as CloseEvent));

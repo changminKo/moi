@@ -78,17 +78,21 @@ const MARKETS: readonly Market[] = ['KR', 'US'];
  * wins the bundle instead of the loser flapping back into leadership.
  */
 const REELECTION_YIELD_MS = 1_000;
+const CANCEL_ALL_MAX_PASSES = 10;
 
-/** Resolves with `work`, or rejects once `ms` elapse — never leaves a caller waiting. */
+class ShutdownBudgetExceeded extends Error {
+  constructor(ms: number) {
+    super(`shutdown step exceeded ${ms}ms`);
+  }
+}
+
+/** Resolves with `work`, or rejects with ShutdownBudgetExceeded once `ms` elapse. */
 function withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     work,
     new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`shutdown step exceeded ${ms}ms`)),
-        ms,
-      );
+      timer = setTimeout(() => reject(new ShutdownBudgetExceeded(ms)), ms);
     }),
   ]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
@@ -271,17 +275,9 @@ export class ProductionRuntime {
       // snapshot, so every published event carries the session's current
       // snapshot on top of its own fields (order id, status, …).
       publish: async (event) => {
-        const snapshot = await this.#uow.run((tx) =>
-          tx.portfolio.snapshot(event.sessionId),
-        );
         await this.hub.deliver(event.sessionId, {
           ...event,
-          payload: {
-            ...(typeof event.payload === 'object' && event.payload !== null
-              ? (event.payload as Record<string, unknown>)
-              : {}),
-            ...(snapshot as unknown as Record<string, unknown>),
-          },
+          payload: await this.#enrichPayload(event.sessionId, event.payload),
         });
       },
       metrics: this.metrics,
@@ -405,7 +401,7 @@ export class ProductionRuntime {
       this.#resolveListening();
       if (this.#o.signals !== false) {
         const onSignal = (): void => {
-          void this.stop().then(() => process.exit(0));
+          void this.stop().then(({ forced }) => process.exit(forced ? 1 : 0));
         };
         process.once('SIGTERM', onSignal);
         process.once('SIGINT', onSignal);
@@ -688,20 +684,36 @@ export class ProductionRuntime {
     // us (a failed-closed start, a killed container): every step is bounded
     // by the remaining drain budget so stop() can never hang a caller.
     const budget = () => Math.max(1_000, deadline - Date.now());
-    await withBudget(Promise.all([...this.#pendingAudits]), budget()).catch(
-      () => undefined,
-    );
-    await withBudget(
+    let timedOut = false;
+    const tail = async (step: string, work: Promise<unknown>) => {
+      try {
+        await withBudget(work, budget());
+      } catch (error) {
+        const timeout = error instanceof ShutdownBudgetExceeded;
+        if (timeout) timedOut = true;
+        // Neither outcome is swallowed silently: a real cleanup failure is
+        // logged as such, a timeout is reported as a forced stop.
+        this.#log(
+          timeout ? 'shutdown.step_timed_out' : 'shutdown.step_failed',
+          {
+            step,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+    };
+    await tail('pendingAudits', Promise.all([...this.#pendingAudits]));
+    await tail(
+      'audit',
       this.#audit('RUNTIME_STOPPED', { leaderId: this.leaderId, forced }),
-      budget(),
-    ).catch(() => undefined);
-    await withBudget(this.#app?.close() ?? Promise.resolve(), budget()).catch(
-      () => undefined,
     );
+    await tail('app.close', this.#app?.close() ?? Promise.resolve());
     await this.#o.bundle.close().catch(() => undefined);
     this.#databaseDestroyed = true;
-    await withBudget(this.#db.destroy(), budget()).catch(() => undefined);
-    return { forced };
+    await tail('db.destroy', this.#db.destroy());
+    const result = { forced: forced || timedOut };
+    if (timedOut && !forced) this.metrics.counter('shutdown_forced_total');
+    return result;
   }
 
   #buildMarket(market: Market): void {
@@ -845,7 +857,9 @@ export class ProductionRuntime {
       execute: (command) => this.#executeCancel(command),
     });
     const limiter = new LayeredRateLimiter();
-    const source = createOutboxEventSource(this.#db);
+    const source = createOutboxEventSource(this.#db, {
+      enrich: (sessionId, payload) => this.#enrichPayload(sessionId, payload),
+    });
     const tradable = new Set(
       MARKETS.flatMap((m) =>
         (this.#o.symbols ?? this.#o.bundle.symbols)[m].map((s) => `${m}:${s}`),
@@ -941,29 +955,46 @@ export class ProductionRuntime {
               // Every open order goes through the canonical cancellation
               // (reservations released, OCO groups resolved, engines
               // notified, per-order outbox rows) — never a bare status update.
-              const open = await sql<{ id: string; session_id: string }>`
-                select id::text, session_id::text from orders
-                where status not in ('FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED')
-                order by session_id, id
-              `.execute(this.#db);
+              // Rescan until nothing eligible remains, so an order placed
+              // after the first scan is still swept; failures are counted per
+              // order and make the command fail loudly rather than report
+              // success with reservations still held.
               let cancelled = 0;
               let failed = 0;
-              for (const row of open.rows) {
-                try {
-                  const result = await this.#cancellation({
-                    sessionId: row.session_id,
-                    orderId: row.id,
-                  });
-                  cancelled += result.cancelledOrderIds.length;
-                } catch (error) {
-                  failed += 1;
-                  this.#log('admin.cancel_all_failed', {
-                    orderId: row.id,
-                    error:
-                      error instanceof Error ? error.message : String(error),
-                  });
+              const attempted = new Set<string>();
+              for (let pass = 0; pass < CANCEL_ALL_MAX_PASSES; pass += 1) {
+                const open = await sql<{ id: string; session_id: string }>`
+                  select id::text, session_id::text from orders
+                  where status not in ('FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED')
+                  order by session_id, id
+                `.execute(this.#db);
+                const pending = open.rows.filter((r) => !attempted.has(r.id));
+                if (pending.length === 0) break;
+                for (const row of pending) {
+                  attempted.add(row.id);
+                  try {
+                    const result = await this.#cancellation({
+                      sessionId: row.session_id,
+                      orderId: row.id,
+                    });
+                    cancelled += result.cancelledOrderIds.length;
+                  } catch (error) {
+                    failed += 1;
+                    this.#log('admin.cancel_all_failed', {
+                      orderId: row.id,
+                      error:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  }
                 }
               }
+              if (failed > 0)
+                throw Object.assign(
+                  new Error(
+                    `cancel-all left ${failed} order(s) open; see admin.cancel_all_failed`,
+                  ),
+                  { code: 'SERVICE_UNAVAILABLE', statusCode: 503 },
+                );
               return { cancelled, failed };
             },
           });
@@ -1003,6 +1034,26 @@ export class ProductionRuntime {
   }
 
   /** Current book-derived quote from this leader's market state (never invented). */
+  /**
+   * The browser applies an event's payload as a patch of its portfolio
+   * snapshot, so live delivery and durable replay both carry the session's
+   * current snapshot on top of the event's own fields.
+   */
+  async #enrichPayload(
+    sessionId: string,
+    payload: unknown,
+  ): Promise<Record<string, unknown>> {
+    const snapshot = await this.#uow.run((tx) =>
+      tx.portfolio.snapshot(sessionId),
+    );
+    return {
+      ...(typeof payload === 'object' && payload !== null
+        ? (payload as Record<string, unknown>)
+        : {}),
+      ...(snapshot as unknown as Record<string, unknown>),
+    };
+  }
+
   #quote(market: Market, symbol: string): Record<string, unknown> {
     const store = this.#stores.get(market);
     const book = store?.get(symbol) as
@@ -1040,6 +1091,30 @@ export class ProductionRuntime {
               'ACCOUNT_READ_ONLY',
               'the session cannot convert cash',
             );
+          // The quote is claimed durably — one row per quote id in the
+          // idempotency table, declared right after the session pin as the
+          // lock order requires (the claim's insert pins the session FK) — so two concurrent conversions of one quote
+          // cannot both debit; the in-memory FxService checks are only a
+          // fast path.
+          const claim = await tx.idempotency.begin({
+            sessionId: quote.sessionId,
+            key: `fx-quote:${quote.id}`,
+            requestHash: quote.id,
+          });
+          if (claim.state !== 'STARTED')
+            throw Object.assign(new Error('Quote was already consumed'), {
+              code: 'QUOTE_CONSUMED',
+              statusCode: 409,
+            });
+          // Recorded right after the claim, as commitTradingMutation does: the
+          // idempotency row ranks above wallets and the outbox, so it must not
+          // be written after them.
+          await tx.idempotency.complete({
+            sessionId: quote.sessionId,
+            key: `fx-quote:${quote.id}`,
+            statusCode: 200,
+            body: receipt,
+          });
           const wallets = new Map<Currency, LockedWallet>();
           for (const currency of ['KRW', 'USD'] as const) {
             const wallet = await tx.accounts.lockWallet({

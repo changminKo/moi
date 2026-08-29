@@ -2383,4 +2383,148 @@ describe('ProductionRuntime', () => {
       TEST_TIMEOUT_MS,
     );
   });
+
+  describe('durable replay and FX claims (Codex round 4)', () => {
+    const sessionFor = async (origin: string) => {
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      const post = (path: string, body: Record<string, unknown>) =>
+        json(`${origin}${path}`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+      return { client, headers, post };
+    };
+
+    it(
+      'replays events with the snapshot-shaped payload the browser needs, even when no socket was live',
+      async () => {
+        const { runtime, origin, bundle } = await start();
+        const s = await sessionFor(origin);
+        bundle.streamFor('KR').emitOrderBook({
+          market: 'KR',
+          symbol: '005930',
+          book: {
+            market: 'KR',
+            symbol: '005930',
+            currency: 'KRW',
+            asks: [{ price: '70000', volume: '10' }],
+            bids: [{ price: '69900', volume: '10' }],
+          },
+          sourceTimestamp: null,
+        });
+        await sleep(200);
+        const buy = await s.post('/api/v1/orders', {
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '70000',
+        });
+        expect(buy.status, JSON.stringify(buy.body)).toBe(201);
+        const id = String((buy.body as { id?: string }).id);
+        await vi.waitFor(
+          async () => {
+            expect(
+              (
+                await observer.query(
+                  'select status from orders where id = $1',
+                  [id],
+                )
+              ).rows[0]?.status,
+            ).toBe('FILLED');
+          },
+          { timeout: 5_000 },
+        );
+        const frames: Record<string, unknown>[] = [];
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${runtime.port}/api/v1/stream?afterSequence=0`,
+          {
+            headers: { origin: 'http://127.0.0.1:0', cookie: s.client.cookie },
+          },
+        );
+        ws.on('message', (data) =>
+          frames.push(JSON.parse(String(data)) as Record<string, unknown>),
+        );
+        await new Promise<void>((resolve, reject) => {
+          ws.once('open', () => resolve());
+          ws.once('error', reject);
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              frames.some(
+                (f) => f.type === 'event' && f.eventType === 'ORDER_FILLED',
+              ),
+            ).toBe(true);
+          },
+          { timeout: 5_000 },
+        );
+        ws.close();
+        const filled = frames.find(
+          (f) => f.type === 'event' && f.eventType === 'ORDER_FILLED',
+        ) as { payload: Record<string, unknown> };
+        expect(Array.isArray(filled.payload.wallets)).toBe(true);
+        expect(Array.isArray(filled.payload.positions)).toBe(true);
+        expect(filled.payload.orderId).toBe(id);
+        const wallet = (
+          filled.payload.wallets as { currency: string; total: string }[]
+        ).find((w) => w.currency === 'KRW');
+        expect(wallet?.total).toBe('9930000');
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'applies one FX quote exactly once under concurrent conversions',
+      async () => {
+        const { origin } = await start();
+        const s = await sessionFor(origin);
+        const quote = await s.post('/api/v1/fx/quotes', {
+          from: 'KRW',
+          to: 'USD',
+          amount: '1000000',
+        });
+        expect(quote.status, JSON.stringify(quote.body)).toBeLessThan(300);
+        const results = await Promise.all(
+          Array.from({ length: 4 }, () =>
+            s.post('/api/v1/fx/conversions', { quoteId: quote.body.quoteId }),
+          ),
+        );
+        const ok = results.filter((r) => r.status < 300);
+        const consumed = results.filter(
+          (r) => r.status === 409 && r.body.code === 'QUOTE_CONSUMED',
+        );
+        expect(
+          ok,
+          JSON.stringify(results.map((r) => [r.status, r.body.code])),
+        ).toHaveLength(1);
+        expect(consumed).toHaveLength(3);
+        const krw = (
+          await observer.query(
+            'select total::text as total from wallets where session_id = $1 and currency = $2',
+            [s.client.id, 'KRW'],
+          )
+        ).rows[0];
+        expect(krw?.total).toBe('9000000');
+        expect(
+          (
+            await observer.query(
+              "select count(*)::int as n from outbox_events where session_id = $1 and event_type = 'FX_CONVERTED'",
+              [s.client.id],
+            )
+          ).rows[0]?.n,
+        ).toBe(1);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  });
 });

@@ -51,3 +51,33 @@ describe('portfolio reconciliation', () => {
     expect(recovered.snapshot.market.recoveryFill.US).toBe(true);
   });
 });
+
+describe('reducePortfolio replay guard', () => {
+  it('requests a refresh instead of patching when an event payload lacks the snapshot shape', () => {
+    const snapshot = {
+      accountSequence: '5',
+      wallets: [],
+      positions: [],
+      reservations: [],
+      activeOrders: [],
+      market: { health: {}, recoveryFill: {} },
+    } as never;
+    const live = reducePortfolio(
+      {
+        snapshot: undefined as never,
+        sync: { status: 'LIVE', refreshRequested: false },
+        seenEventIds: new Set(),
+      } as never,
+      snapshot,
+    );
+    const next = reducePortfolio(live, {
+      type: 'event',
+      eventId: 'e6',
+      accountSequence: '6',
+      eventType: 'ORDER_FILLED',
+      payload: { orderId: 'o1', status: 'FILLED' },
+    } as never);
+    expect(next.sync).toEqual({ status: 'STALE', refreshRequested: true });
+    expect(next.snapshot.accountSequence).toBe('5');
+  });
+});

@@ -1,4 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import {
+  httpStatusFor,
+  PUBLIC_ERROR_CODES,
+} from '../../plugins/error-handler.js';
 import { fxQuoteSchema } from './fx-schemas.js';
 import type { FxService } from './fx-service.js';
 export async function registerFxRoutes(
@@ -64,6 +68,19 @@ export async function registerFxRoutes(
         requestId: request.id,
       });
     }
-    return service.exchange(sessionId, body.quoteId, key);
+    try {
+      return await service.exchange(sessionId, body.quoteId, key);
+    } catch (error) {
+      const code = (error as { code?: unknown })?.code;
+      if (typeof code === 'string' && PUBLIC_ERROR_CODES.has(code))
+        return reply.code(httpStatusFor(code)).send({
+          code,
+          message:
+            error instanceof Error ? error.message : 'FX conversion failed',
+          retryable: false,
+          requestId: request.id,
+        });
+      throw error;
+    }
   });
 }

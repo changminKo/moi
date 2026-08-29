@@ -192,7 +192,16 @@ async function currentSequence(session: string): Promise<string> {
  * `gap` is handled by `/sequence-gap`.
  */
 async function drainOutbox(
-  options: { duplicate?: boolean } = {},
+  options: {
+    duplicate?: boolean;
+    /**
+     * FAULT INJECTION for the sequence-gap journey: every claimed row is
+     * consumed but only the newest frame is delivered, as if the frames were
+     * lost in flight. Production delivers every row; recovery of the missing
+     * ones is the browser's REST resync, which is what the journey asserts.
+     */
+    deliverOnlyLast?: boolean;
+  } = {},
 ): Promise<void> {
   if (!database || !unitOfWork) throw new Error('database is not initialized');
   const db = database;

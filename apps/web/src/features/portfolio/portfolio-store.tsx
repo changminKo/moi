@@ -36,6 +36,14 @@ export function createPortfolioState(
   };
 }
 
+function isSnapshotPatch(payload: unknown): boolean {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    Array.isArray((payload as { wallets?: unknown }).wallets)
+  );
+}
+
 function applyEvent(
   snapshot: PortfolioSnapshot,
   payload: PortfolioEvent,
@@ -84,7 +92,14 @@ export function reducePortfolio(
     seen.delete(seen.values().next().value as string);
   const current = sequence(state.snapshot.accountSequence);
   const next = sequence(action.accountSequence);
-  if (current === undefined || next === undefined || next !== current + 1n) {
+  // A payload without the snapshot shape (a bare durable event replayed
+  // without enrichment) cannot be applied as a patch: fetch the snapshot.
+  if (
+    current === undefined ||
+    next === undefined ||
+    next !== current + 1n ||
+    !isSnapshotPatch(action.payload)
+  ) {
     return {
       ...state,
       seenEventIds: seen,

@@ -243,7 +243,14 @@ export async function preflight({ env, args, allowlistText, fetchImpl, log }) {
     else fail(problem);
   }
 
-  if (skipEgress) log('skip egress allow list (--skip-egress)');
+  if (
+    environment === 'production' &&
+    (skipEgress || args.includes('--egress-ip') || env.EGRESS_IP !== undefined)
+  ) {
+    fail(
+      'production preflight must observe the real egress address: --skip-egress, --egress-ip and EGRESS_IP are refused',
+    );
+  } else if (skipEgress) log('skip egress allow list (--skip-egress)');
   else {
     try {
       const allowlist = parseAllowlist(allowlistText);

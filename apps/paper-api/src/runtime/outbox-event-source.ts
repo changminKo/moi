@@ -5,8 +5,20 @@ import type {
   DurableEventSource,
 } from '../modules/stream/stream-session.js';
 
+export interface OutboxEventSourceOptions {
+  /**
+   * Adds the session's portfolio snapshot to a replayed event's payload, the
+   * same enrichment the live publisher applies, so a reconnecting browser can
+   * patch its state from replay exactly as it would from live delivery.
+   */
+  readonly enrich?: (sessionId: string, payload: unknown) => Promise<unknown>;
+}
+
 /** Durable per-session event source over `outbox_events` / `account_sequences`. */
-export function createOutboxEventSource(db: Database): DurableEventSource {
+export function createOutboxEventSource(
+  db: Database,
+  options: OutboxEventSourceOptions = {},
+): DurableEventSource {
   return {
     async latest(sessionId) {
       const result = await sql<{ latest: string }>`
@@ -31,7 +43,14 @@ export function createOutboxEventSource(db: Database): DurableEventSource {
         where session_id = ${sessionId}::uuid and stream_sequence > ${after}
         order by stream_sequence
       `.execute(db);
-      return result.rows;
+      if (options.enrich === undefined) return result.rows;
+      const enriched: DurableAccountEvent[] = [];
+      for (const row of result.rows)
+        enriched.push({
+          ...row,
+          payload: await options.enrich(sessionId, row.payload),
+        });
+      return enriched;
     },
   };
 }
