@@ -65,6 +65,8 @@ export interface ReservationInput {
 export interface OrderReservationsKey {
   readonly sessionId: string;
   readonly orderId: string;
+  /** True when the caller is cancelling the whole OCO group in this mutation. */
+  readonly wholeGroup?: boolean;
 }
 
 /** An unreleased reservation the order (or its whole OCO group) still holds. */
@@ -408,6 +410,7 @@ export async function findOrderReservations(
   const request = snapshotInput({
     sessionId: key.sessionId,
     orderId: key.orderId,
+    wholeGroup: key.wholeGroup === true,
   });
   const rows = await sql<{
     id: string;
@@ -423,9 +426,9 @@ export async function findOrderReservations(
       r.order_id = ${request.orderId}::uuid
       or (r.oco_group_id is not null
           and r.oco_group_id = (select oco_group_id from orders where id = ${request.orderId}::uuid)
-          and not exists (
+          and (${request.wholeGroup} or not exists (
             select 1 from orders o where o.oco_group_id = r.oco_group_id
-              and o.id <> ${request.orderId}::uuid and o.status <> all(${TERMINAL_STATUSES})))
+              and o.id <> ${request.orderId}::uuid and o.status <> all(${TERMINAL_STATUSES}))))
     )
     order by r.id
   `.execute(connection.executor);

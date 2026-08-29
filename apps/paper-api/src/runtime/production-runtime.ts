@@ -11,6 +11,7 @@ import type {
   LockedPosition,
   LockedWallet,
 } from '../db/repositories/account-repository.js';
+import type { LockedOrder } from '../db/repositories/order-repository.js';
 import { type TradingTransaction, UnitOfWork } from '../db/unit-of-work.js';
 import { PaperEngine } from '../engine/paper-engine.js';
 import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
@@ -78,6 +79,12 @@ const MARKETS: readonly Market[] = ['KR', 'US'];
  * interval before re-acquiring, so a successor already polling (§6.5, §10.2-10)
  * wins the bundle instead of the loser flapping back into leadership.
  */
+const TERMINAL_ORDER_STATUSES = new Set([
+  'FILLED',
+  'CANCELLED',
+  'EXPIRED',
+  'REJECTED',
+]);
 const REELECTION_YIELD_MS = 1_000;
 const MARKET_DENIED: readonly Capability[] = [
   'PLACE',
@@ -1067,9 +1074,13 @@ export class ProductionRuntime {
     return await this.#uow.run(async (tx) => {
       // Read what the cancellation must release before taking any lock, then
       // walk LEDGER_LOCK_ORDER: session → wallet/position → order → reservation.
+      // Cancelling one OCO leg cancels the bracket: both legs, the group,
+      // and the shared reservation go together (one-cancels-other).
+      const oco = await tx.orders.findOcoLegs(orderId);
       const reservations = await tx.accounts.findOrderReservations({
         sessionId: command.sessionId,
         orderId,
+        wholeGroup: oco !== undefined,
       });
       const session = await tx.sessions.lock(command.sessionId);
       if (session === undefined || session.status !== 'ACTIVE')
@@ -1098,21 +1109,42 @@ export class ProductionRuntime {
           if (position !== undefined) positions.set(reservation.id, position);
         }
       }
-      const order = await tx.orders.lock(orderId);
+      const group =
+        oco === undefined
+          ? undefined
+          : await tx.orders.lockOcoGroup(oco.groupId);
+      const legs = new Map<string, LockedOrder>();
+      for (const legId of oco?.legIds ?? [orderId]) {
+        const leg = await tx.orders.lock(legId);
+        if (leg !== undefined) legs.set(legId, leg);
+      }
+      const order = legs.get(orderId);
       if (order === undefined || order.sessionId !== command.sessionId)
         throw new DomainError('INVALID_ORDER', 'order was not found');
-      if (['FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'].includes(order.status))
+      if (TERMINAL_ORDER_STATUSES.has(order.status))
         return { id: order.id, status: order.status };
-      for (const engine of this.#engines.values())
-        await engine.cancelOrder(order.id);
-      await tx.orders.update({
-        id: order.id,
-        expectedVersion: order.version,
-        status: 'CANCELLED',
-        ...(order.filledQuantity === undefined
-          ? {}
-          : { filledQuantity: order.filledQuantity }),
-      });
+      const cancelled: LockedOrder[] = [];
+      for (const leg of legs.values()) {
+        if (TERMINAL_ORDER_STATUSES.has(leg.status)) continue;
+        for (const engine of this.#engines.values())
+          await engine.cancelOrder(leg.id);
+        await tx.orders.update({
+          id: leg.id,
+          expectedVersion: leg.version,
+          status: 'CANCELLED',
+          ...(leg.filledQuantity === undefined
+            ? {}
+            : { filledQuantity: leg.filledQuantity }),
+          ...(oco === undefined ? {} : { ocoGroupId: oco.groupId }),
+        });
+        cancelled.push(leg);
+      }
+      if (group !== undefined && group.status === 'ACTIVE')
+        await tx.orders.resolveOcoGroup({
+          id: group.id,
+          expectedVersion: group.version,
+          resolvedAt: new Date(),
+        });
       for (const reservation of reservations) {
         const wallet = wallets.get(reservation.id);
         const position = positions.get(reservation.id);
@@ -1134,26 +1166,36 @@ export class ProductionRuntime {
             `reservation ${reservation.id} has no balance to release into`,
           );
       }
-      await tx.audit.append({
-        id: randomUUID(),
-        eventType: 'ORDER_CANCELLED',
-        payload: { orderId: order.id },
-        occurredAt: new Date(),
-        sessionReference: command.sessionId,
-        orderId: order.id,
-      });
-      const sequence = await tx.sequences.allocate({
-        sessionId: command.sessionId,
-        mutationKind: 'ORDER_CANCELLED',
-      });
-      await tx.outbox.append({
-        id: randomUUID(),
-        eventId: randomUUID(),
-        sessionId: command.sessionId,
-        streamSequence: sequence,
-        eventType: 'ORDER_CANCELLED',
-        payload: { orderId: order.id },
-      });
+      for (const leg of cancelled) {
+        const payload =
+          oco === undefined
+            ? { orderId: leg.id }
+            : {
+                orderId: leg.id,
+                ocoGroupId: oco.groupId,
+                reason: leg.id === orderId ? 'USER' : 'OCO_SIBLING_CANCELLED',
+              };
+        await tx.audit.append({
+          id: randomUUID(),
+          eventType: 'ORDER_CANCELLED',
+          payload,
+          occurredAt: new Date(),
+          sessionReference: command.sessionId,
+          orderId: leg.id,
+        });
+        const sequence = await tx.sequences.allocate({
+          sessionId: command.sessionId,
+          mutationKind: 'ORDER_CANCELLED',
+        });
+        await tx.outbox.append({
+          id: randomUUID(),
+          eventId: randomUUID(),
+          sessionId: command.sessionId,
+          streamSequence: sequence,
+          eventType: 'ORDER_CANCELLED',
+          payload,
+        });
+      }
       return { id: order.id, status: 'CANCELLED' };
     });
   }

@@ -157,7 +157,12 @@ export class PaperEngine {
         !this.#options.calendar.isRegularSession(envelope.payload.market, now)
       )
         return;
+      const failures: unknown[] = [];
       for (const order of this.#conditional.values()) {
+        // Same interlocks as book matching (§6.1): no trigger while the
+        // matching gate is exclusive (RE_ELECTING / DRAINING / RECOVERING) or
+        // the emergency latch is closed.
+        if (this.#options.isGateExclusive?.() === true) break;
         if (this.#options.emergencyLatch?.matchingOpen === false) break;
         if (
           order.market !== envelope.payload.market ||
@@ -190,8 +195,24 @@ export class PaperEngine {
         const triggered = { ...order, status: 'TRIGGERED' as const };
         this.#conditional.set(order.id, triggered);
         this.#orders.set(order.id, triggered);
-        await this.#options.onConditionalTrigger?.(triggered, pricing);
+        try {
+          await this.#options.onConditionalTrigger?.(triggered, pricing);
+        } catch (error) {
+          // Persistence is the source of truth: a rejected trigger left the
+          // row PENDING_TRIGGER, so the engine returns to that state and the
+          // next crossing trade evaluates the order again. Other conditional
+          // orders crossed by this same trade are still evaluated.
+          this.#conditional.set(order.id, order);
+          this.#orders.set(order.id, order);
+          failures.push(error);
+        }
       }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(
+          failures,
+          `${failures.length} conditional triggers failed to persist`,
+        );
     });
   }
 

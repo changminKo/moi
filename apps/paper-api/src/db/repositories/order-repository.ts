@@ -78,6 +78,34 @@ export interface OrderRepository {
   lockOcoGroup(ocoGroupId: string): Promise<LockedOcoGroup | undefined>;
   update(input: UpdateOrderInput): Promise<bigint>;
   resolveOcoGroup(input: ResolveOcoGroupInput): Promise<bigint>;
+  /**
+   * Lock-free read of the OCO group an order belongs to and every leg in it
+   * (ascending id), so a cancellation can lock the group and both legs in
+   * LEDGER_LOCK_ORDER before it mutates anything. Undefined for a single.
+   */
+  findOcoLegs(orderId: string): Promise<OcoLegs | undefined>;
+}
+
+export interface OcoLegs {
+  readonly groupId: string;
+  readonly legIds: readonly string[];
+}
+
+export async function findOcoLegs(
+  connection: LedgerConnection,
+  orderId: string,
+): Promise<OcoLegs | undefined> {
+  const request = snapshotInput({ orderId });
+  const rows = await sql<{ group_id: string; leg_id: string }>`
+    select o.oco_group_id::text as group_id, legs.id::text as leg_id
+    from orders o
+    join orders legs on legs.oco_group_id = o.oco_group_id
+    where o.id = ${request.orderId} and o.oco_group_id is not null
+    order by legs.id
+  `.execute(connection.executor);
+  const first = rows.rows[0];
+  if (first === undefined) return undefined;
+  return { groupId: first.group_id, legIds: rows.rows.map((r) => r.leg_id) };
 }
 
 export async function insertOcoGroup(
@@ -366,6 +394,7 @@ export function createOrderRepository(
       insertOcoGroup(connection, input),
     insert: (input: InsertOrderInput) => insertOrder(connection, input),
     lock: (orderId: string) => lockOrder(connection, orderId),
+    findOcoLegs: (orderId: string) => findOcoLegs(connection, orderId),
     lockOcoGroup: (ocoGroupId: string) => lockOcoGroup(connection, ocoGroupId),
     update: (input: UpdateOrderInput) => updateOrder(connection, input),
     resolveOcoGroup: (input: ResolveOcoGroupInput) =>

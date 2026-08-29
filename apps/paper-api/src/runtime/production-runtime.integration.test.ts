@@ -1384,4 +1384,125 @@ describe('ProductionRuntime', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  it(
+    'cancelling one OCO leg cancels the bracket, resolves the group, and releases the shared reservation',
+    async () => {
+      const { origin, bundle } = await start();
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      bundle.streamFor('KR').emitOrderBook({
+        market: 'KR',
+        symbol: '005930',
+        book: {
+          market: 'KR',
+          symbol: '005930',
+          currency: 'KRW',
+          asks: [{ price: '70000', volume: '10' }],
+          bids: [{ price: '69900', volume: '10' }],
+        },
+        sourceTimestamp: null,
+      });
+      await sleep(200);
+      const oco = await json(`${origin}/api/v1/orders`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'OCO',
+          quantity: '1',
+          legs: [
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'LIMIT',
+              quantity: '1',
+              limitPrice: '60000',
+            },
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'STOP',
+              quantity: '1',
+              stopPrice: '80000',
+            },
+          ],
+        }),
+      });
+      expect(oco.status, JSON.stringify(oco.body)).toBe(201);
+      const legId = String((oco.body as { id?: string }).id);
+      const group = (
+        await observer.query(
+          'select oco_group_id::text as g from orders where id = $1',
+          [legId],
+        )
+      ).rows[0]?.g as string;
+      const before = (
+        await observer.query(
+          'select reserved::text as reserved from wallets where session_id = $1 and currency = $2',
+          [client.id, 'KRW'],
+        )
+      ).rows[0];
+      expect(Number(before?.reserved)).toBeGreaterThan(0);
+
+      const { 'content-type': _json, ...cancelHeaders } = headers();
+      const cancel = await json(`${origin}/api/v1/orders/${legId}`, {
+        method: 'DELETE',
+        headers: cancelHeaders,
+      });
+      expect(cancel.status, JSON.stringify(cancel.body)).toBeLessThan(300);
+
+      const legs = (
+        await observer.query(
+          'select status from orders where oco_group_id = $1',
+          [group],
+        )
+      ).rows.map((r) => r.status);
+      expect(legs).toEqual(['CANCELLED', 'CANCELLED']);
+      expect(
+        (
+          await observer.query('select status from oco_groups where id = $1', [
+            group,
+          ])
+        ).rows[0]?.status,
+      ).toBe('RESOLVED');
+      expect(
+        (
+          await observer.query(
+            'select count(*)::int as n from reservations where oco_group_id = $1 and released = false',
+            [group],
+          )
+        ).rows[0]?.n,
+      ).toBe(0);
+      expect(
+        (
+          await observer.query(
+            'select reserved::text as reserved, total::text as total, available::text as available from wallets where session_id = $1 and currency = $2',
+            [client.id, 'KRW'],
+          )
+        ).rows[0],
+      ).toEqual({ reserved: '0', total: '10000000', available: '10000000' });
+      const events = (
+        await observer.query(
+          "select event_type, payload from outbox_events where session_id = $1 and event_type = 'ORDER_CANCELLED'",
+          [client.id],
+        )
+      ).rows;
+      expect(events).toHaveLength(2);
+      expect(
+        events.map((e) => (e.payload as { reason?: string }).reason).sort(),
+      ).toEqual(['OCO_SIBLING_CANCELLED', 'USER']);
+    },
+    TEST_TIMEOUT_MS,
+  );
 });

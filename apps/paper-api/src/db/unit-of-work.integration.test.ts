@@ -2158,6 +2158,12 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
         sessionId: fixture.sessionId,
         orderId: fixture.lowerOrderId,
       }),
+    (tx, fixture) =>
+      tx.accounts.findOrderReservations({
+        sessionId: fixture.sessionId,
+        orderId: fixture.groupedOrderId,
+        wholeGroup: true,
+      }),
   ],
   // The fixture wallet reserves nothing, so each release probe reserves first
   // and re-locks to pick up the new version — exactly the sequence a
@@ -2230,6 +2236,9 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
       }),
   ],
   'orders.lock': [(tx, fixture) => tx.orders.lock(fixture.lowerOrderId)],
+  'orders.findOcoLegs': [
+    (tx, fixture) => tx.orders.findOcoLegs(fixture.groupedOrderId),
+  ],
   'orders.lockOcoGroup': [
     (tx, fixture) => tx.orders.lockOcoGroup(fixture.ocoGroupId),
   ],
@@ -2343,11 +2352,13 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'accounts.recordReservation#0': [],
   'accounts.recordReservation#1': [],
   'accounts.findOrderReservations#0': [],
+  'accounts.findOrderReservations#1': [],
   'accounts.releaseCash#0': [],
   'accounts.releasePosition#0': [],
   'orders.insertOcoGroup#0': [],
   'orders.insert#0': [],
   'orders.lock#0': [],
+  'orders.findOcoLegs#0': [],
   'orders.lockOcoGroup#0': [],
   'orders.update#0': [],
   'orders.update#1': ['orders_one_oco_winner_per_group'],

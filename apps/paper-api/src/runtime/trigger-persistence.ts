@@ -9,6 +9,10 @@ import type { Database } from '../db/database.js';
 import type { ConditionalPaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
 import { settleFill } from './fill-settlement.js';
+import {
+  allocateAccountSequence,
+  runSessionTransaction,
+} from './ledger-transaction.js';
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
 
@@ -34,7 +38,7 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
     pricing: PricingContext,
   ): Promise<void> {
     await wrap(() =>
-      deps.db.transaction().execute(async (trx) => {
+      runSessionTransaction(deps.db, order.sessionId, async (trx) => {
         const fence = await sql<{ fencing_token: string }>`
           select fencing_token::text from leader_epochs where market_code = ${order.market}
         `.execute(trx);
@@ -148,18 +152,14 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
             insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
             values (${randomUUID()}::uuid, ${order.sessionId}, ${event.orderId}::uuid, ${event.type}, ${JSON.stringify(event.payload)}::jsonb, now())
           `.execute(trx);
-          const sequence = await sql<{ sequence: string }>`
-            with next as (
-              select coalesce(max(account_sequence), 0) + 1 as sequence
-              from account_sequences where session_id = ${order.sessionId}::uuid
-            )
-            insert into account_sequences (id, session_id, account_sequence, mutation_kind)
-            select ${randomUUID()}::uuid, ${order.sessionId}::uuid, sequence, ${event.type} from next
-            returning account_sequence::text as sequence
-          `.execute(trx);
+          const sequence = await allocateAccountSequence(
+            trx,
+            order.sessionId,
+            event.type,
+          );
           await sql`
             insert into outbox_events (id, event_id, session_id, stream_sequence, event_type, payload)
-            values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${order.sessionId}::uuid, ${sequence.rows[0]?.sequence ?? '1'}, ${event.type}, ${JSON.stringify(event.payload)}::jsonb)
+            values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${order.sessionId}::uuid, ${sequence}, ${event.type}, ${JSON.stringify(event.payload)}::jsonb)
           `.execute(trx);
         }
       }),
