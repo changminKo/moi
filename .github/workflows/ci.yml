@@ -44,7 +44,9 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit and integration tests
-        run: pnpm test
+        # One workspace at a time: the integration suites are container-bound
+        # and the runner has four cores.
+        run: pnpm turbo run test --concurrency=1
 
       - name: Deployment contract
         run: pnpm check:deployment

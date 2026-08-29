@@ -633,7 +633,9 @@ check('ci workflow', () => {
     'pnpm install --frozen-lockfile',
     'pnpm check',
     'pnpm typecheck',
-    'pnpm test',
+    // Container-bound integration suites run one workspace at a time on the
+    // four-core runner; parallel containers dropped PostgreSQL connections.
+    'pnpm turbo run test --concurrency=1',
     'pnpm check:deployment',
     'pnpm build',
     'pnpm --filter @moi/e2e exec playwright install --with-deps chromium',

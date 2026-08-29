@@ -78,6 +78,22 @@ const MARKETS: readonly Market[] = ['KR', 'US'];
  * wins the bundle instead of the loser flapping back into leadership.
  */
 const REELECTION_YIELD_MS = 1_000;
+
+/** Resolves with `work`, or rejects once `ms` elapse — never leaves a caller waiting. */
+function withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`shutdown step exceeded ${ms}ms`)),
+        ms,
+      );
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
 const MARKET_DENIED: readonly Capability[] = [
   'PLACE',
   'AMEND',
@@ -668,15 +684,23 @@ export class ProductionRuntime {
     const forced = Date.now() > deadline;
     if (forced) this.metrics.counter('shutdown_forced_total');
     this.state.transition('STOPPED');
-    await Promise.all([...this.#pendingAudits]);
-    await this.#audit('RUNTIME_STOPPED', {
-      leaderId: this.leaderId,
-      forced,
-    }).catch(() => undefined);
-    await this.#app?.close();
+    // The tail must finish even when the database has gone away underneath
+    // us (a failed-closed start, a killed container): every step is bounded
+    // by the remaining drain budget so stop() can never hang a caller.
+    const budget = () => Math.max(1_000, deadline - Date.now());
+    await withBudget(Promise.all([...this.#pendingAudits]), budget()).catch(
+      () => undefined,
+    );
+    await withBudget(
+      this.#audit('RUNTIME_STOPPED', { leaderId: this.leaderId, forced }),
+      budget(),
+    ).catch(() => undefined);
+    await withBudget(this.#app?.close() ?? Promise.resolve(), budget()).catch(
+      () => undefined,
+    );
     await this.#o.bundle.close().catch(() => undefined);
     this.#databaseDestroyed = true;
-    await this.#db.destroy();
+    await withBudget(this.#db.destroy(), budget()).catch(() => undefined);
     return { forced };
   }
 
