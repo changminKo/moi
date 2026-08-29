@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/changminKo/moi/main/infra/oracle/bootstrap.sh | bash
 #
-# Installs Docker + compose plugin, sops and age, opens 80/443 in the OS
+# Installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
 # firewall (Oracle images ship iptables rules that drop everything else),
 # clones the repository to /opt/moi, prepares /etc/moi (age key, encrypted
 # secrets, moi.env) and installs the systemd unit. It never asks for or writes
@@ -31,6 +31,15 @@ if ! command -v docker >/dev/null; then
   sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
   sudo usermod -aG docker "$USER"
 fi
+
+echo "== node 24 (for the preflight and the pnpm workspace on the host)"
+if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]; then
+  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - >/dev/null
+  sudo apt-get install -y -qq nodejs
+fi
+sudo corepack enable
+corepack prepare pnpm@11.22.0 --activate >/dev/null
+node --version; pnpm --version
 
 echo "== sops ${SOPS_VERSION}"
 if ! command -v sops >/dev/null; then
