@@ -1,5 +1,13 @@
 # TLS edge for the Moi compose stack. Certificates come from Let's Encrypt
-# automatically; both hosts must resolve to this machine's reserved public IP.
+# automatically; the host must resolve to this machine's reserved public IP.
+#
+# Single-origin layout: the browser app and the API share one hostname and
+# the edge routes by path. Free DNS providers such as DuckDNS sit on the Public
+# Suffix List, so `app.<x>` and `api.<x>` would be *different sites* there and
+# the SameSite=Lax session cookie would never reach the API. One origin also
+# removes CORS and WebSocket Origin handling from the request path. Set
+# API_DOMAIN equal to WEB_DOMAIN in /etc/moi/moi.env (the preflight and
+# deploy.sh verification use API_DOMAIN for the health probes).
 (hardening) {
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	encode zstd gzip
@@ -7,16 +15,23 @@
 
 {$WEB_DOMAIN} {
 	import hardening
-	reverse_proxy web:8080
-}
 
-{$API_DOMAIN} {
-	import hardening
 	# Prometheus scrapes stay private: the public edge never proxies /metrics.
 	@metrics path /metrics /metrics/*
 	respond @metrics 404
-	# WebSocket upgrades (/api/v1/stream) are proxied transparently.
-	reverse_proxy paper-api:3000 {
-		flush_interval -1
+
+	# API, health probes and the admin surface (ADMIN_API_KEY-guarded) go to
+	# paper-api; WebSocket upgrades (/api/v1/stream) are proxied transparently.
+	@api path /api/* /health/* /admin/*
+	handle @api {
+		reverse_proxy paper-api:3000 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else is the static web bundle (SPA shell, hashed assets,
+	# fonts, /runtime-config.js).
+	handle {
+		reverse_proxy web:8080
 	}
 }
