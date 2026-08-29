@@ -1,49 +1,73 @@
 #!/usr/bin/env bash
 # Stop-then-start release on the Oracle reference host (docs/operations/deployment.md).
 #
-#   /opt/moi/infra/oracle/deploy.sh [git-ref]
+#   sudo /opt/moi/infra/oracle/deploy.sh [git-ref]
 #
-# 1. fetch the ref, 2. production preflight (secrets, compose config, and the
-# host's real egress address against infra/provider-allowlist.yaml — overrides
-# are refused for production), 3. pull the images CI published to GHCR,
-# 4. restart the stack through systemd so the old leader drains before the new
-# one starts (compose recreates containers stop-then-start; no surge).
+# Runs as root because /etc/moi (age key, encrypted secrets, moi.env) is root
+# only; git and pnpm run as the repository owner. Steps: 1. fetch the exact ref
+# and check it out detached, 2. production preflight (secrets, compose config,
+# the host's real egress address — overrides are refused for production, and
+# PUBLIC_ORIGIN / PUBLIC_API_ORIGIN must match WEB_DOMAIN / API_DOMAIN),
+# 3. docker login + pull the images CI published to GHCR, 4. run the new
+# image's migrations as a one-off job while the old release still serves,
+# 5. restart the stack through systemd (compose recreates containers
+# stop-then-start; the 45 s grace period lets the leader drain), 6. require
+# readiness, both markets NORMAL and placement enabled — otherwise fail.
 set -euo pipefail
+[ "$(id -u)" = 0 ] || exec sudo -E "$0" "$@"
 REF="${1:-main}"
-cd /opt/moi
+REPO=/opt/moi
+OWNER="$(stat -c %U "$REPO")"
+as_owner() { sudo -u "$OWNER" -H env PATH="$PATH" "$@"; }
 export SOPS_AGE_KEY_FILE=/etc/moi/age.key
 set -a; . /etc/moi/moi.env; set +a
+COMPOSE=(docker compose -f "$REPO/infra/compose.yaml" -f "$REPO/infra/oracle/compose.override.yaml")
+withsecrets() { sops exec-env /etc/moi/secrets.enc.env "$*"; }
+cd "$REPO"
 
 echo "== fetch ${REF}"
-git fetch -q origin
-git checkout -q "$REF"
-git pull -q --ff-only origin "$REF" 2>/dev/null || true
-git log --oneline -1
+as_owner git fetch -q origin "$REF"
+as_owner git checkout -q --detach FETCH_HEAD
+as_owner git log --oneline -1
 
 echo "== toolchain"
 # Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and
 # an uncapped heap thrashes swap instead of failing fast.
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
-[ "$(node -p 'process.versions.node.split(".")[0]')" = "24" ] || { echo "Node 24 required (run infra/oracle/bootstrap.sh)"; exit 1; }
-command -v pnpm >/dev/null || sudo corepack enable
-corepack prepare pnpm@11.22.0 --activate >/dev/null
-pnpm install --frozen-lockfile --silent
+as_owner node "$REPO/scripts/check-runtime.mjs"
+as_owner corepack prepare pnpm@11.22.0 --activate >/dev/null
+as_owner pnpm install --frozen-lockfile --silent
 
 echo "== preflight (production)"
-sops exec-env /etc/moi/secrets.enc.env 'pnpm preflight:deploy --environment production'
+withsecrets "env WEB_DOMAIN='$WEB_DOMAIN' API_DOMAIN='$API_DOMAIN' pnpm preflight:deploy --environment production"
 
-echo "== pull images (${MOI_IMAGE_TAG:-main})"
-# Hosts never build (a 1 GB Micro cannot); CI publishes multi-arch images to a
-# private GHCR package. The read-only token comes from the sops file and is
-# handed to docker over stdin only; docker stores it in root's config.json.
-sops exec-env /etc/moi/secrets.enc.env 'printf %s "$GHCR_TOKEN" | sudo docker login ghcr.io -u changminko --password-stdin >/dev/null'
-sops exec-env /etc/moi/secrets.enc.env 'docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml pull --quiet'
+echo "== registry login + pull (${MOI_IMAGE_TAG:-main})"
+# Private GHCR: the read-only token comes from the sops file over stdin only;
+# docker keeps it in root's config.json (0600).
+withsecrets 'printf %s "$GHCR_TOKEN" | docker login ghcr.io -u changminko --password-stdin >/dev/null'
+withsecrets "${COMPOSE[*]} pull --quiet"
+
+echo "== migrations (new image, old release still serving)"
+withsecrets "${COMPOSE[*]} run --rm --no-deps -T paper-api node apps/paper-api/dist/migrate-cli.js"
 
 echo "== stop-then-start"
-sudo systemctl restart moi
+systemctl restart moi
+
+echo "== verify"
+ready=0
 for _ in $(seq 1 60); do
-  if curl -fsS -o /dev/null "https://${API_DOMAIN}/health/ready"; then break; fi
+  if curl -fsS -o /dev/null "https://${API_DOMAIN}/health/ready"; then ready=1; break; fi
   sleep 3
 done
-curl -fsS "https://${API_DOMAIN}/health/market-data"; echo
-echo "== done; watch: sudo journalctl -u moi -f ; docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml logs -f paper-api"
+[ "$ready" = 1 ] || { echo "FAIL: /health/ready never returned 200"; journalctl -u moi --no-pager -n 30; exit 1; }
+for _ in $(seq 1 40); do
+  md="$(curl -fsS "https://${API_DOMAIN}/health/market-data")"
+  tr="$(curl -fsS "https://${API_DOMAIN}/api/v1/health/trading")"
+  if printf %s "$md" | grep -q '"runtime":"SERVING"' \
+     && [ "$(printf %s "$md" | grep -o '"state":"NORMAL"' | wc -l)" -ge 2 ] \
+     && printf %s "$tr" | grep -q '"placement":true'; then
+    echo "$md"; echo "$tr"; echo "== done ($(as_owner git rev-parse --short HEAD))"; exit 0
+  fi
+  sleep 3
+done
+echo "FAIL: markets did not reach NORMAL with placement enabled:"; echo "$md"; echo "$tr"; exit 1

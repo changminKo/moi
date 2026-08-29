@@ -973,14 +973,31 @@ export class ProductionRuntime {
               // by durable audit rows (issue #10, first step): who asked, why,
               // and what each pass did, so an interrupted sweep is visible and
               // re-running the command is the documented recovery.
-              const body =
+              const envelope =
                 typeof input === 'object' && input !== null
-                  ? (input as Record<string, unknown>)
+                  ? (input as { requestId?: unknown; body?: unknown })
+                  : {};
+              const body =
+                typeof envelope.body === 'object' && envelope.body !== null
+                  ? (envelope.body as Record<string, unknown>)
                   : {};
               const command = {
                 commandId: randomUUID(),
-                actor: typeof body.actor === 'string' ? body.actor : null,
-                reason: typeof body.reason === 'string' ? body.reason : null,
+                // Server-side identity: the admin route authenticated the
+                // caller and stamped its request id; body text is untrusted.
+                requestId:
+                  typeof envelope.requestId === 'string'
+                    ? envelope.requestId
+                    : null,
+                actor: 'ADMIN_API_KEY',
+                requestedBy:
+                  typeof body.actor === 'string'
+                    ? body.actor.slice(0, 200)
+                    : null,
+                reason:
+                  typeof body.reason === 'string'
+                    ? body.reason.slice(0, 500)
+                    : null,
               };
               await this.#audit('CANCEL_ALL_STARTED', command);
               let cancelled = 0;
@@ -1077,8 +1094,10 @@ export class ProductionRuntime {
     sessionId: string,
     payload: unknown,
   ): Promise<Record<string, unknown>> {
-    const snapshot = await this.#snapshotUow.run((tx) =>
-      tx.portfolio.snapshot(sessionId),
+    // Counted with the mutation transactions so shutdown draining waits for
+    // in-flight enrichment before the database is destroyed.
+    const snapshot = await this.#uow.track(() =>
+      this.#snapshotUow.run((tx) => tx.portfolio.snapshot(sessionId)),
     );
     return {
       ...(typeof payload === 'object' && payload !== null

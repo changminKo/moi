@@ -2243,15 +2243,26 @@ describe('ProductionRuntime', () => {
           (admin.body as { result?: { cancelled?: number; failed?: number } })
             .result,
         ).toMatchObject({ cancelled: 3, failed: 0 });
-        // The sweep is bracketed by durable audit rows (issue #10).
+        // The sweep is bracketed by durable audit rows correlated by commandId (issue #10).
+        const commandId = (admin.body as { result?: { commandId?: string } })
+          .result?.commandId;
+        expect(commandId).toBeTypeOf('string');
         const sweep = (
           await observer.query(
-            "select event_type from audit_events where event_type like 'CANCEL_ALL_%' order by occurred_at",
+            "select event_type, payload from audit_events where event_type like 'CANCEL_ALL_%' and payload->>'commandId' = $1 order by occurred_at, id",
+            [commandId],
           )
-        ).rows.map((r) => r.event_type);
-        expect(sweep[0]).toBe('CANCEL_ALL_STARTED');
-        expect(sweep).toContain('CANCEL_ALL_PASS');
-        expect(sweep.at(-1)).toBe('CANCEL_ALL_COMPLETED');
+        ).rows;
+        const kinds = sweep.map((r) => r.event_type);
+        expect(kinds[0]).toBe('CANCEL_ALL_STARTED');
+        expect(kinds).toContain('CANCEL_ALL_PASS');
+        expect(kinds.at(-1)).toBe('CANCEL_ALL_COMPLETED');
+        const started = sweep[0]?.payload as {
+          actor?: string;
+          requestId?: string;
+        };
+        expect(started.actor).toBe('ADMIN_API_KEY');
+        expect(started.requestId).toBeTypeOf('string');
         expect(
           (
             await observer.query(

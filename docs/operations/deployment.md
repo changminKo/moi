@@ -19,11 +19,11 @@ Only `web` and `paper-api` publish ports. PostgreSQL and Redis are reachable
 solely from `paper-api` on the private network and use health checks plus
 persistent volumes.
 
-> **Release blocker:** the current `main.js` composition does not yet own the
-> live provider adapter, fenced market-leader lifecycle, or outbox publisher.
-> Without the explicitly test-only `MARKET_DATA_ADAPTER=fake`, it starts in
-> `CANCEL_ONLY`. The topology and handoff rules below are the required target,
-> not evidence that this candidate is approved for public deployment.
+> The `main.js` composition owns the live provider adapter, the fenced
+> market-leader lifecycle and the outbox publisher (spec §16); with
+> `MARKET_DATA_ADAPTER=toss` and the configured secrets it recovers from the
+> provider and reaches `SERVING`. The release checklist records what remains
+> open before a public launch.
 
 Run exactly one `paper-api` replica (one leader replica). The single `paper-api` process both serves HTTP and owns exactly one leader
 per market (`moi.leader-markets` label). Running more than one
@@ -60,6 +60,12 @@ validates the origin, serves it from `/runtime-config.js` with `no-store`, and
 includes it in the CSP `connect-src`. No other variable reaches the browser.
 
 ### Secret injection
+
+> Accepted exposure: the unit decrypts secrets into the environment of
+> `docker compose`, and Docker records container environment in its own
+> metadata (`/var/lib/docker`, `docker inspect`), readable by root on the
+> host. Nothing in this repository writes a secret to a file; moving to
+> file-based secrets / systemd credentials is tracked as follow-up work.
 
 Secrets are injected at runtime by the platform's secret store (Compose:
 required interpolation `${VAR:?}` resolved by a secret manager at run time;
@@ -274,14 +280,24 @@ requires, and the artefacts are the same ones the local smoke uses.
 7. **Deploy** (each release):
 
    ```bash
-   /opt/moi/infra/oracle/deploy.sh main
+   sudo /opt/moi/infra/oracle/deploy.sh main
    ```
 
-   fetch → `preflight --environment production` → pull the images CI
+   It runs as root (`/etc/moi` is root-only; git and pnpm run as the
+   repository owner) and fails — never reports success — unless readiness,
+   both markets `NORMAL` and `placement: true` are observed.
+
+   fetch the exact ref (detached checkout; a non-fast-forward is an error,
+   never a silent stale deploy) → `preflight --environment production`
+   (also requires `PUBLIC_ORIGIN`/`PUBLIC_API_ORIGIN` to equal
+   `https://$WEB_DOMAIN` / `https://$API_DOMAIN`) → docker login + pull the
+   images CI
    published to GHCR (`.github/workflows/publish.yml`, `linux/amd64` and
    `linux/arm64`; the host never builds — a 1 GB Micro cannot) →
-   `systemctl restart moi` (compose recreates containers stop-then-start, the
-   45 s grace period lets the leader drain) → readiness and market-data health.
+   one-off migration job with the new image (`node dist/migrate-cli.js`)
+   while the old release still serves → `systemctl restart moi` (compose
+   recreates containers stop-then-start, the 45 s grace period lets the leader
+   drain) → readiness, both markets `NORMAL`, placement enabled.
    Roll back by pinning `MOI_IMAGE_TAG=<commit sha>` in `/etc/moi/moi.env`.
    The GHCR packages are private: create a classic PAT with only
    `read:packages`, store it as `GHCR_TOKEN` in the sops file, and `deploy.sh`

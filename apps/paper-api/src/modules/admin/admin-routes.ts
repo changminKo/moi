@@ -114,7 +114,10 @@ export async function registerAdminRoutes(
         retryable: true,
         requestId: request.id,
       });
-    const result = await deps.cancelAll(request.body);
+    const result = await deps.cancelAll({
+      requestId: request.id,
+      body: request.body,
+    });
     await deps.audit('CANCEL_ALL', { requestId: request.id });
     return { result, requestId: request.id };
   });

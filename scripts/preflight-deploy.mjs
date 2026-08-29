@@ -131,6 +131,25 @@ export function validateEnvironment(env) {
   for (const [variable, problem] of Object.entries(FORBIDDEN)) {
     if (env[variable] !== undefined) failures.push({ variable, problem });
   }
+  // The TLS edge (WEB_DOMAIN / API_DOMAIN) and the application origins must
+  // name the same hosts, or CORS, cookies and WebSocket Origin checks fail
+  // while readiness still looks healthy.
+  for (const [domainVar, originVar] of [
+    ['WEB_DOMAIN', 'PUBLIC_ORIGIN'],
+    ['API_DOMAIN', 'PUBLIC_API_ORIGIN'],
+  ]) {
+    const domain = env[domainVar];
+    const origin = env[originVar];
+    if (
+      domain !== undefined &&
+      origin !== undefined &&
+      origin !== `https://${domain}`
+    )
+      failures.push({
+        variable: originVar,
+        problem: `must be https://${domain} to match ${domainVar}`,
+      });
+  }
   return failures;
 }
 
