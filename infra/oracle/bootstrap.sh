@@ -47,6 +47,12 @@ if ! command -v sops >/dev/null; then
   sudo dpkg -i /tmp/sops.deb && rm /tmp/sops.deb
 fi
 
+echo "== swap (2 GB): the Micro shape has 1 GB of RAM"
+if ! swapon --show | grep -q /swapfile; then
+  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
+
 echo "== firewall: allow 80/443 (Oracle images drop them by default)"
 for port in 80 443; do
   if ! sudo iptables -C INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null; then

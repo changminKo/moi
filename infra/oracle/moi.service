@@ -11,6 +11,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/moi
 EnvironmentFile=/etc/moi/moi.env
+# MOI_IMAGE_TAG may be set in moi.env to pin a published image; default main.
 Environment=SOPS_AGE_KEY_FILE=/etc/moi/age.key
 # Secrets are decrypted into the environment of docker compose only; they are
 # never written to disk. `stop` respects the 45 s stop_grace_period so the
