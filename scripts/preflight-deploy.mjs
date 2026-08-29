@@ -104,9 +104,9 @@ function hashKeys(value) {
 
 function tossClientId(value) {
   // Mirrors CLIENT_ID_PATTERN in apps/paper-api/src/config.ts.
-  return /^c_[A-Za-z0-9]{8,}$/.test(value)
+  return /^[A-Za-z0-9_-]{8,}$/.test(value)
     ? undefined
-    : 'must look like c_<id> (at least 8 alphanumerics)';
+    : 'must be at least 8 letters, digits, _ or -';
 }
 
 /**

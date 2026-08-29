@@ -75,18 +75,19 @@ handoff therefore remains unchecked below.
   blocked.
 - [x] Deterministic drills cover leader loss, Redis loss, PostgreSQL outage,
   outbox backlog, WebSocket disconnect, and anonymous-session expiry.
-- [ ] **Provider credentials and egress registration.** `TOSS_CLIENT_ID`/
-  `TOSS_CLIENT_SECRET` live only in the secret manager referenced by
-  [`infra/secrets.env.tpl`](../../infra/secrets.env.tpl); the static egress
-  address is registered in the Toss console and recorded in
-  [`infra/provider-allowlist.yaml`](../../infra/provider-allowlist.yaml);
-  `pnpm preflight:deploy` passes against the production environment.
-  Tooling landed 2026-08-29 (`scripts/preflight-deploy.mjs`,
-  `pnpm test:preflight`); the allow list is still empty because no
-  production egress address exists yet. Blocked on infrastructure, not code.
-
-## SLO evidence
-
+- [ ] **Provider credentials and egress registration.** Credentials live only in
+  the operator's sops/age store (`~/.config/moi/secrets.enc.env`, age key
+  outside the repository); the secret-manager template is
+  [`infra/secrets.env.tpl`](../../infra/secrets.env.tpl). Evidence 2026-08-30:
+  `sops exec-env … pnpm preflight:deploy --environment local` passed 3/3
+  (variables, `docker compose config`, egress `210.121.195.35` registered in the
+  Toss console and recorded in
+  [`infra/provider-allowlist.yaml`](../../infra/provider-allowlist.yaml) as
+  environment `local`). The real credential also exposed an over-strict
+  `TOSS_CLIENT_ID` pattern (`c_…` was only the contract's example); fixed.
+  **Still open:** no production egress address exists — `--environment
+  production` fails by design until a static address is registered. Blocked
+  on infrastructure, not code.
 - [x] Healthy order-mutation server duration p95 ≤ 500 ms: **3 ms**, 4,649
   isolated-session samples over 60 seconds.
 - [x] `CANCEL_ONLY` cancellation server duration p95 ≤ 1,000 ms: **2 ms**,

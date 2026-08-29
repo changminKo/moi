@@ -11,7 +11,9 @@ export class ConfigError extends Error {
 export { TOSS_CONTRACT_SERVERS };
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
-const CLIENT_ID_PATTERN = /^c_[A-Za-z0-9]{8,}$/;
+// The contract only shows `c_…` as an example; the developer console issues
+// other prefixes (e.g. `ts…`), so only the character class and length are checked.
+const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,}$/;
 
 const environmentSchema = z.object({
   NODE_ENV: z
@@ -219,7 +221,7 @@ export function loadConfig(
       !CLIENT_ID_PATTERN.test(parsed.TOSS_CLIENT_ID)
     )
       throw new ConfigError(
-        'TOSS_CLIENT_ID is required for the toss adapter and must look like c_<id>',
+        'TOSS_CLIENT_ID is required for the toss adapter (at least 8 letters, digits, _ or -)',
       );
     if (!parsed.TOSS_CLIENT_SECRET || parsed.TOSS_CLIENT_SECRET.length < 16)
       throw new ConfigError(

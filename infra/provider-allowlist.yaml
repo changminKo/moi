@@ -7,7 +7,12 @@
 # provider. `pnpm preflight:deploy` refuses a deployment whose current egress
 # address is not listed. Addresses only — never credentials.
 provider: toss
-registered_egress_ips: []
+registered_egress_ips:
+  - address: 210.121.195.35
+    environment: local
+    registered_at: 2026-08-30
+    registered_by: rhckdals123@gmail.com
+    note: developer workstation egress for the local Toss smoke; not a production address
 # Entry shape (one per static egress address):
 #   - address: 203.0.113.10
 #     environment: production

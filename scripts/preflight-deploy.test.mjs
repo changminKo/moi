@@ -63,7 +63,7 @@ describe('validateEnvironment', () => {
     assert.match(problems.PUBLIC_ORIGIN, /https/);
     assert.match(problems.PUBLIC_API_ORIGIN, /bare origin/);
     assert.match(problems.DATABASE_URL, /localhost/);
-    assert.match(problems.TOSS_CLIENT_ID, /c_<id>/);
+    assert.match(problems.TOSS_CLIENT_ID, /at least 8 letters/);
   });
   it('refuses environment overrides of the compose literals', () => {
     const failures = validateEnvironment({

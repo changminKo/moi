@@ -73,7 +73,7 @@ services:
       FEE_KR_SELL_TAX_RATE: "0.0015"
       FEE_US_COMMISSION_RATE: "0.0025"
       FEE_US_SELL_TAX_RATE: "0"
-      TOSS_CLIENT_ID: "${TOSS_CLIENT_ID:?Toss Open API client id (c_...)}"
+      TOSS_CLIENT_ID: "${TOSS_CLIENT_ID:?Toss Open API client id}"
       TOSS_CLIENT_SECRET: "${TOSS_CLIENT_SECRET:?Toss Open API client secret}"
     depends_on:
       postgres:
