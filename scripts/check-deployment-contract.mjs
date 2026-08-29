@@ -56,6 +56,7 @@ const SECRET_PATTERNS = [
   /POSTGRES_PASSWORD\s*[:=]\s*["']?[A-Za-z0-9+/=_-]{4,}/,
   /(CSRF_SECRET|SESSION_HASH_KEYS|ADMIN_API_KEY)\s*[:=]\s*["']?[A-Za-z0-9+/=_-]{8,}/,
   /postgres(ql)?:\/\/[^:\s]+:[^@$\s]+@/,
+  /discord(app)?\.com\/api\/webhooks\/\d+\/\S+/,
 ];
 
 const failures = [];
@@ -303,11 +304,18 @@ check('shutdown grace exceeds drain deadline', () => {
 
 check('no committed secrets', () => {
   assert.ok(!existsSync(path('.env')), '.env must not exist in the repository');
+  // Host-side alerting scripts and units post to a Discord webhook; the URL
+  // must come from the sops file, never from the repository.
+  const oracleFiles = readdirSync(path('infra/oracle'))
+    .filter((name) => /\.(sh|service|timer)$/.test(name))
+    .map((name) => `infra/oracle/${name}`);
   const texts = [
     'infra/compose.yaml',
     'apps/paper-api/Dockerfile',
     'apps/web/Dockerfile',
     '.github/workflows/ci.yml',
+    '.github/workflows/notify.yml',
+    ...oracleFiles,
   ].map((f) => [f, read(f)]);
   for (const [file, text] of texts) {
     for (const pattern of SECRET_PATTERNS) {

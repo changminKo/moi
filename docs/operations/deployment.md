@@ -337,18 +337,38 @@ that echoes it.
    `systemctl restart moi-status.timer`). Three producers use it:
    - `moi-status.timer` → `status-check.sh` every 5 minutes: readiness,
      runtime, KR/US states, placement, memory, swap, disk → one status line,
-     posted **only when it changes** (`FAIL` / `WARN` / `recovered`).
-   - `moi.service` `OnFailure=moi-alert.service`: a failed stack start/stop with
-     the journal tail.
-   - `deploy.sh`: `deploy started`, `deploy finished: <sha>`, or
-     `deploy failed` with the step that broke.
-   Without the variable every producer is a silent no-op; a rejected post is
-   logged and never fails the caller.
+     posted when it differs from the last **delivered** line (`FAIL` / `WARN` /
+     `recovered`); the state file is written only after a successful post, so
+     a transition that hits a Discord outage is retried on the next tick. A
+     `heartbeat` embed goes out when nothing has been delivered for 24 hours
+     (`MOI_STATUS_HEARTBEAT_HOURS`), so silence is never mistaken for health.
+     This is the only producer that sees a container dying after start-up
+     (compose `restart: unless-stopped` restarts it; a restart loop shows up as
+     readiness/market flapping in the status line). The check is skipped while
+     `deploy.sh` holds `/run/moi-deploy.lock`.
+   - `OnFailure=moi-alert@%n.service` on `moi.service` and
+     `moi-status.service`: fires **only** when systemd fails to start or stop
+     the oneshot unit (sops key, compose interpolation, Docker down) and posts
+     the unit's journal tail. `moi.service` is `RemainAfterExit=yes`, so a
+     container crash later does not fail the unit and does not fire this.
+   - `deploy.sh`: `deploy started`, `deploy finished: <sha>` (only after the
+     verification step observed readiness, both markets `NORMAL` and
+     placement enabled), or `deploy failed` with the step that broke —
+     including an interrupted deploy (SIGINT/SIGTERM/SIGHUP) and a run that
+     ended without reaching verification.
+   Without the variable every producer is a silent no-op. `notify.sh` is
+   fail-open by default (a rejected post is logged, exit 0) so a Discord outage
+   can never fail a deploy; only the status check runs it with `NOTIFY_STRICT=1`
+   to drive its retry. Titles and descriptions are masked before leaving the
+   host (credentials in URLs, `KEY|TOKEN|SECRET|PASSWORD=…` assignments,
+   webhook URLs) and capped at 1,500 characters. The deployment-contract
+   checker scans `notify.yml` and every `infra/oracle/*.{sh,service,timer}` for
+   a literal webhook URL.
 4. **Test**: `sudo SOPS_AGE_KEY_FILE=/etc/moi/age.key sops exec-env /etc/moi/secrets.enc.env '/opt/moi/infra/oracle/notify.sh info test'`.
 
 What each alert means and the first response: `docs/runbooks/alerting.md`.
 Host-down detection needs an external probe (the timer cannot report a dead
-host); a free external monitor pointed at `https://<api domain>/health/ready`
+host); a free external monitor pointed at `https://<domain>/health/ready`
 with its own Discord integration covers that gap.
 
 ## Local run

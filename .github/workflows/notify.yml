@@ -54,3 +54,12 @@ jobs:
              ]}]}')"
           curl -fsS --max-time 15 -o /dev/null \
             -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
+      - name: Report a failed notification
+        # The workflow is not in its own `workflows:` list (that would loop);
+        # a broken embed step announces itself with a plain message instead.
+        if: ${{ failure() && env.WEBHOOK != '' }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg content "Notify workflow failed for $WORKFLOW ($BRANCH): $RUN_URL" '{content: $content}')"
+          curl -fsS --max-time 15 -o /dev/null \
+            -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"

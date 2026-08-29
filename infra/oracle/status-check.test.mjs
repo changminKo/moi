@@ -1,14 +1,16 @@
-// Behavioural tests for infra/oracle/status-check.sh and notify.sh.
+// Behavioural tests for infra/oracle/{status-check,notify,deploy-lib}.sh.
 // Every collector is stubbed through environment variables and a fake `curl`
 // placed first on PATH records what would have been posted to Discord.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const statusCheck = resolve(here, 'status-check.sh');
 const notify = resolve(here, 'notify.sh');
+const deployLib = resolve(here, 'deploy-lib.sh');
 const WEBHOOK = 'https://discord.example/webhook';
 
 const API = {
@@ -31,10 +34,13 @@ const API = {
 };
 
 // A curl stand-in: the status check uses it for the API probes, notify.sh for
-// the webhook POST. It routes on the URL and appends every POST body to a log.
+// the webhook POST (URL arrives via `-K -` on stdin). It routes on the URL and
+// appends every POST body to a log. FAKE_CURL_FAIL_POST=1 rejects posts,
+// FAKE_CURL_API_DOWN=1 makes every API probe exit 7 with no output.
 function makeSandbox(api) {
   const dir = mkdtempSync(join(tmpdir(), 'moi-status-'));
   const bin = join(dir, 'bin');
+  mkdirSync(bin);
   const posts = join(dir, 'posts.log');
   const fakeCurl = `#!/usr/bin/env bash
 url=""; data=""; write_out=""
@@ -42,12 +48,18 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -d|--data|--data-binary) data="$2"; shift 2;;
     -w|--write-out) write_out="$2"; shift 2;;
+    -K|--config) cfg="$(cat)"; url="$(printf '%s\\n' "$cfg" | sed -n 's/^url = "\\(.*\\)"$/\\1/p')"; shift 2;;
     -o|--output|-H|--header|--max-time|-X) shift 2;;
     -*) shift;;
     *) url="$1"; shift;;
   esac
 done
-if [ -n "$data" ]; then printf '%s\\n' "$data" >> "${posts}"; exit 0; fi
+if [ -n "$data" ]; then
+  [ "\${FAKE_CURL_FAIL_POST:-0}" = 1 ] && exit 22
+  printf '%s\\n' "$url" >> "${posts}.urls"
+  printf '%s\\n' "$data" >> "${posts}"; exit 0
+fi
+[ "\${FAKE_CURL_API_DOWN:-0}" = 1 ] && exit 7
 case "$url" in
   */health/ready) [ -n "$write_out" ] && printf '%s' "${api.ready}"; [ "${api.ready}" = 200 ] || exit 22;;
   */health/market-data) printf '%s' '${api.marketData}';;
@@ -55,37 +67,36 @@ case "$url" in
   *) echo "unexpected url $url" >&2; exit 7;;
 esac
 `;
-  writeFileSync(join(dir, 'curl'), fakeCurl);
-  chmodSync(join(dir, 'curl'), 0o755);
-  writeFileSync(
-    join(dir, 'free'),
+  const stub = (name, body) => {
+    writeFileSync(join(bin, name), body);
+    chmodSync(join(bin, name), 0o755);
+  };
+  stub('curl', fakeCurl);
+  stub(
+    'free',
     `#!/usr/bin/env bash\nprintf '%s\\n' '${api.free.replace(/\n/g, "' '")}'\n`,
   );
-  chmodSync(join(dir, 'free'), 0o755);
-  writeFileSync(
-    join(dir, 'df'),
+  stub(
+    'df',
     `#!/usr/bin/env bash\nprintf '%s\\n' '${api.df.replace(/\n/g, "' '")}'\n`,
   );
-  chmodSync(join(dir, 'df'), 0o755);
-  spawnSync('mkdir', ['-p', bin]);
-  for (const f of ['curl', 'free', 'df'])
-    spawnSync('mv', [join(dir, f), join(bin, f)]);
   return { dir, bin, posts, state: join(dir, 'status.last') };
 }
 
 function runStatus(sb, extraEnv = {}) {
-  const result = spawnSync('bash', [statusCheck], {
+  return spawnSync('bash', [statusCheck], {
     env: {
       PATH: `${sb.bin}:${process.env.PATH}`,
       HOME: sb.dir,
       MOI_STATUS_API_BASE: 'https://api.moi.example',
       MOI_STATUS_STATE_FILE: sb.state,
+      MOI_STATUS_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_STATUS_NOW: '1000000000',
       DISCORD_WEBHOOK_URL: WEBHOOK,
       ...extraEnv,
     },
     encoding: 'utf8',
   });
-  return result;
 }
 
 function posted(sb) {
@@ -93,6 +104,8 @@ function posted(sb) {
     ? readFileSync(sb.posts, 'utf8').trim().split('\n').filter(Boolean)
     : [];
 }
+const embed = (json) => JSON.parse(json).embeds[0];
+const stateLines = (sb) => readFileSync(sb.state, 'utf8').trim().split('\n');
 
 describe('status-check.sh', () => {
   it('reports ok, posts the first observation, then stays quiet while unchanged', () => {
@@ -102,6 +115,7 @@ describe('status-check.sh', () => {
       assert.equal(first.status, 0, first.stderr);
       assert.match(first.stdout, /^ok /);
       assert.equal(posted(sb).length, 1, 'first observation is announced once');
+      assert.deepEqual(stateLines(sb)[1], '1000000000', 'post epoch recorded');
       const second = runStatus(sb);
       assert.equal(second.status, 0, second.stderr);
       assert.equal(
@@ -133,16 +147,15 @@ describe('status-check.sh', () => {
       assert.equal(r2.status, 0);
       const degradedPosts = posted(degraded);
       assert.equal(degradedPosts.length, 1, 'same failure is not re-posted');
-      const body = JSON.parse(degradedPosts[0]);
-      assert.equal(body.embeds[0].color, 0xe5484d);
-      assert.match(body.embeds[0].title, /status FAIL/i);
+      assert.equal(embed(degradedPosts[0]).color, 0xe5484d);
+      assert.match(embed(degradedPosts[0]).title, /status FAIL/i);
       rmSync(degraded.dir, { recursive: true, force: true });
 
       const recovered = runStatus(sb);
       assert.match(recovered.stdout, /^ok /);
       const all = posted(sb);
       assert.equal(all.length, 2, 'recovery is announced');
-      assert.match(JSON.parse(all[1]).embeds[0].title, /recovered/i);
+      assert.match(embed(all[1]).title, /recovered/i);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -161,7 +174,7 @@ describe('status-check.sh', () => {
       assert.match(r.stdout, /mem_avail=5%/);
       assert.match(r.stdout, /swap_used=73%/);
       assert.match(r.stdout, /disk_used=90%/);
-      assert.equal(JSON.parse(posted(sb)[0]).embeds[0].color, 0xf5a524);
+      assert.equal(embed(posted(sb)[0]).color, 0xf5a524);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -183,6 +196,21 @@ describe('status-check.sh', () => {
     }
   });
 
+  it('fails closed when the API edge is unreachable', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runStatus(sb, { FAKE_CURL_API_DOWN: '1' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        /^fail ready=000 runtime=unknown KR=unknown US=unknown placement=unknown/,
+      );
+      assert.equal(posted(sb).length, 1);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('is a silent no-op for the webhook when DISCORD_WEBHOOK_URL is absent', () => {
     const sb = makeSandbox(API);
     try {
@@ -195,34 +223,139 @@ describe('status-check.sh', () => {
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });
+
+  it('keeps the transition pending while Discord rejects the post, then delivers it', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r1 = runStatus(sb, { FAKE_CURL_FAIL_POST: '1' });
+      assert.equal(r1.status, 0);
+      assert.match(r1.stderr, /post failed, will retry next tick/);
+      assert.ok(
+        !existsSync(sb.state),
+        'state must not be recorded without delivery',
+      );
+      assert.ok(!(r1.stdout + r1.stderr).includes(WEBHOOK));
+      const r2 = runStatus(sb);
+      assert.equal(r2.status, 0, r2.stderr);
+      assert.equal(posted(sb).length, 1, 'retried on the next tick');
+      assert.ok(existsSync(sb.state));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends a heartbeat when nothing was delivered for the configured window', () => {
+    const sb = makeSandbox(API);
+    try {
+      runStatus(sb); // delivered at epoch 1000000000
+      const quiet = runStatus(sb, {
+        MOI_STATUS_NOW: String(1000000000 + 23 * 3600),
+      });
+      assert.equal(quiet.status, 0);
+      assert.equal(posted(sb).length, 1, 'inside the window: nothing');
+      const due = runStatus(sb, {
+        MOI_STATUS_NOW: String(1000000000 + 24 * 3600),
+      });
+      assert.equal(due.status, 0, due.stderr);
+      const all = posted(sb);
+      assert.equal(all.length, 2, 'heartbeat posted');
+      assert.match(embed(all[1]).title, /heartbeat/i);
+      assert.equal(embed(all[1]).color, 0x2ecc71);
+      assert.equal(stateLines(sb)[1], String(1000000000 + 24 * 3600));
+      const again = runStatus(sb, {
+        MOI_STATUS_NOW: String(1000000000 + 25 * 3600),
+      });
+      assert.equal(again.status, 0);
+      assert.equal(posted(sb).length, 2, 'heartbeat clock restarted');
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent and leaves the state alone while a deploy holds the lock', () => {
+    const sb = makeSandbox(API);
+    try {
+      writeFileSync(join(sb.dir, 'deploy.lock'), '');
+      const r = runStatus(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, '');
+      assert.equal(posted(sb).length, 0);
+      assert.ok(!existsSync(sb.state));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('notify.sh', () => {
-  it('posts a Discord embed and never echoes the webhook URL', () => {
+  const runNotify = (sb, args, env = {}) =>
+    spawnSync('bash', [notify, ...args], {
+      env: {
+        PATH: `${sb.bin}:${process.env.PATH}`,
+        DISCORD_WEBHOOK_URL: WEBHOOK,
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+
+  it('posts a Discord embed, passes the URL on stdin and never echoes it', () => {
     const sb = makeSandbox(API);
     try {
-      const r = spawnSync(
-        'bash',
-        [notify, 'warn', 'hello title', 'some body'],
-        {
-          env: {
-            PATH: `${sb.bin}:${process.env.PATH}`,
-            DISCORD_WEBHOOK_URL: WEBHOOK,
-          },
-          encoding: 'utf8',
-        },
-      );
+      const r = runNotify(sb, ['warn', 'hello title', 'some body']);
       assert.equal(r.status, 0, r.stderr);
       assert.ok(!(r.stdout + r.stderr).includes(WEBHOOK));
-      const body = JSON.parse(posted(sb)[0]);
-      assert.equal(body.embeds[0].title, 'hello title');
-      assert.equal(body.embeds[0].description, 'some body');
-      assert.equal(body.embeds[0].color, 0xf5a524);
-      assert.match(
-        body.embeds[0].footer.text,
-        /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/,
-      );
+      const body = embed(posted(sb)[0]);
+      assert.equal(body.title, 'hello title');
+      assert.equal(body.description, 'some body');
+      assert.equal(body.color, 0xf5a524);
+      assert.match(body.footer.text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
       assert.ok(!JSON.stringify(body).includes(WEBHOOK));
+      assert.equal(
+        readFileSync(`${sb.posts}.urls`, 'utf8').trim(),
+        WEBHOOK,
+        'curl received the URL through -K -',
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('masks credentials, secret assignments and webhook URLs before posting', () => {
+    const sb = makeSandbox(API);
+    try {
+      const leak = [
+        'DATABASE_URL=postgres://moi:pw-secret-123@postgres:5432/moi',
+        'TOSS_CLIENT_SECRET=abcDEF123',
+        'ADMIN_API_KEY: zzz999',
+        'api token=lower-case-tok',
+        'hook https://discord.com/api/webhooks/1234567890/AbC-def_GHI',
+        'plain line stays',
+      ].join('\n');
+      const r = runNotify(sb, ['fail', 'moi.service failed', leak]);
+      assert.equal(r.status, 0, r.stderr);
+      const text = embed(posted(sb)[0]).description;
+      assert.ok(!text.includes('pw-secret-123'));
+      assert.ok(!text.includes('abcDEF123'));
+      assert.ok(!text.includes('zzz999'));
+      assert.ok(!text.includes('1234567890'));
+      assert.ok(!text.includes('lower-case-tok'));
+      assert.match(text, /api token=\*\*\*/);
+      assert.match(text, /postgres:\/\/moi:\*\*\*@postgres:5432\/moi/);
+      assert.match(text, /TOSS_CLIENT_SECRET=\*\*\*/);
+      assert.match(text, /ADMIN_API_KEY: \*\*\*/);
+      assert.match(text, /hook <webhook>/);
+      assert.match(text, /plain line stays/);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('caps the description at 1500 characters', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runNotify(sb, ['info', 't', 'x'.repeat(4000)]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(embed(posted(sb)[0]).description.length, 1500);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -231,10 +364,7 @@ describe('notify.sh', () => {
   it('exits 0 without calling curl when the webhook is unset', () => {
     const sb = makeSandbox(API);
     try {
-      const r = spawnSync('bash', [notify, 'ok', 'x'], {
-        env: { PATH: `${sb.bin}:${process.env.PATH}` },
-        encoding: 'utf8',
-      });
+      const r = runNotify(sb, ['ok', 'x'], { DISCORD_WEBHOOK_URL: '' });
       assert.equal(r.status, 0);
       assert.equal(posted(sb).length, 0);
     } finally {
@@ -242,20 +372,51 @@ describe('notify.sh', () => {
     }
   });
 
-  it('exits 0 even when the webhook rejects the post', () => {
+  it('exits 0 by default when the webhook rejects the post, 1 under NOTIFY_STRICT', () => {
     const sb = makeSandbox(API);
     try {
-      writeFileSync(join(sb.bin, 'curl'), '#!/usr/bin/env bash\nexit 22\n');
-      chmodSync(join(sb.bin, 'curl'), 0o755);
+      const soft = runNotify(sb, ['fail', 'x'], { FAKE_CURL_FAIL_POST: '1' });
+      assert.equal(soft.status, 0);
+      assert.match(soft.stderr, /notify: post failed/);
+      assert.ok(!(soft.stdout + soft.stderr).includes(WEBHOOK));
+      const strict = runNotify(sb, ['fail', 'x'], {
+        FAKE_CURL_FAIL_POST: '1',
+        NOTIFY_STRICT: '1',
+      });
+      assert.equal(strict.status, 1);
+      assert.match(strict.stderr, /notify: post failed/);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 0 with a message and no curl call when jq is missing', () => {
+    const sb = makeSandbox(API);
+    try {
+      // A PATH that has the fake curl plus only the tools notify.sh needs, no jq.
+      const nojq = join(sb.dir, 'nojq');
+      mkdirSync(nojq);
+      for (const tool of [
+        'bash',
+        'sed',
+        'head',
+        'hostname',
+        'date',
+        'cat',
+        'tr',
+      ]) {
+        const real = spawnSync('bash', ['-lc', `command -v ${tool}`], {
+          encoding: 'utf8',
+        }).stdout.trim();
+        symlinkSync(real, join(nojq, tool));
+      }
       const r = spawnSync('bash', [notify, 'fail', 'x'], {
-        env: {
-          PATH: `${sb.bin}:${process.env.PATH}`,
-          DISCORD_WEBHOOK_URL: WEBHOOK,
-        },
+        env: { PATH: `${sb.bin}:${nojq}`, DISCORD_WEBHOOK_URL: WEBHOOK },
         encoding: 'utf8',
       });
-      assert.equal(r.status, 0);
-      assert.match(r.stderr, /notify: post failed/);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /notify: jq missing/);
+      assert.equal(posted(sb).length, 0);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -267,5 +428,139 @@ describe('notify.sh', () => {
       encoding: 'utf8',
     });
     assert.equal(r.status, 2);
+  });
+});
+
+describe('deploy-lib.sh', () => {
+  // A stand-in for deploy.sh: sources the library and runs `body`.
+  function runDeploy(sb, body, { signal } = {}) {
+    const script = join(sb.dir, 'deploy-under-test.sh');
+    writeFileSync(
+      script,
+      `#!/usr/bin/env bash\nset -euo pipefail\nREPO=${JSON.stringify(here)}\n. ${JSON.stringify(deployLib)}\n${body}\n`,
+    );
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    if (!signal) return spawnSync('bash', [script], { env, encoding: 'utf8' });
+    return new Promise((done) => {
+      const child = spawn('bash', [script], { env });
+      let stderr = '';
+      child.stderr.on('data', (d) => {
+        stderr += d;
+      });
+      // Wait until the body signals it passed its `step`, then interrupt.
+      const tick = setInterval(() => {
+        if (existsSync(`${env.MOI_DEPLOY_LOCK}.ready`)) {
+          clearInterval(tick);
+          child.kill(signal);
+        }
+      }, 50);
+      child.on('exit', (code, sig) =>
+        done({ status: code, signal: sig, stderr }),
+      );
+    });
+  }
+  const titles = (sb) => posted(sb).map((p) => embed(p).title);
+
+  it('reports success only after deploy_verified and removes the lock', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        'deploy_begin main\nstep verify\ndeploy_verified abc1234\nexit 0',
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy finished: abc1234',
+      ]);
+      assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('turns an exit 0 that never reached verification into exit 1 with a fail alert', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(sb, 'deploy_begin main\nstep migrations\nexit 0');
+      assert.equal(r.status, 1);
+      const all = posted(sb);
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+      assert.match(embed(all[1]).description, /step: migrations \(exit 1\)/);
+      assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the failing step when a command fails under set -e', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        'deploy_begin main\nstep "preflight (production)"\nfalse',
+      );
+      assert.equal(r.status, 1);
+      assert.match(
+        embed(posted(sb)[1]).description,
+        /step: preflight \(production\) \(exit 1\)/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 130 with a fail alert on SIGINT', async () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = await runDeploy(
+        sb,
+        'deploy_begin main\nstep toolchain\n: > "$MOI_DEPLOY_LOCK.ready"\nsleep 30 &\nwait',
+        {
+          signal: 'SIGINT',
+        },
+      );
+      assert.equal(r.status, 130, r.stderr);
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+      assert.match(
+        embed(posted(sb)[1]).description,
+        /step: toolchain \(exit 130\)/,
+      );
+      assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 143 with a fail alert on SIGTERM', async () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = await runDeploy(
+        sb,
+        'deploy_begin main\nstep verify\n: > "$MOI_DEPLOY_LOCK.ready"\nsleep 30 &\nwait',
+        {
+          signal: 'SIGTERM',
+        },
+      );
+      assert.equal(r.status, 143, r.stderr);
+      assert.match(
+        embed(posted(sb)[1]).description,
+        /step: verify \(exit 143\)/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
   });
 });
