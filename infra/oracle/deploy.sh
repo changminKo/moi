@@ -30,7 +30,10 @@ echo "== preflight (production)"
 sops exec-env /etc/moi/secrets.enc.env 'pnpm preflight:deploy --environment production'
 
 echo "== pull images (${MOI_IMAGE_TAG:-main})"
-# Hosts never build (a 1 GB Micro cannot); CI publishes multi-arch images.
+# Hosts never build (a 1 GB Micro cannot); CI publishes multi-arch images to a
+# private GHCR package. The read-only token comes from the sops file and is
+# handed to docker over stdin only; docker stores it in root's config.json.
+sops exec-env /etc/moi/secrets.enc.env 'printf %s "$GHCR_TOKEN" | sudo docker login ghcr.io -u changminko --password-stdin >/dev/null'
 sops exec-env /etc/moi/secrets.enc.env 'docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml pull --quiet'
 
 echo "== stop-then-start"

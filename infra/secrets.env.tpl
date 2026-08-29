@@ -13,5 +13,7 @@ POSTGRES_PASSWORD=op://Moi/postgres/POSTGRES_PASSWORD
 SESSION_HASH_KEYS=op://Moi/paper-api/SESSION_HASH_KEYS
 CSRF_SECRET=op://Moi/paper-api/CSRF_SECRET
 ADMIN_API_KEY=op://Moi/paper-api/ADMIN_API_KEY
+# Read-only registry token (classic PAT, scope read:packages) for the private GHCR images.
+GHCR_TOKEN=op://Moi/ghcr/READ_TOKEN
 TOSS_CLIENT_ID=op://Moi/toss/CLIENT_ID
 TOSS_CLIENT_SECRET=op://Moi/toss/CLIENT_SECRET
