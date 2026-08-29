@@ -19,6 +19,7 @@ import {
   vi,
 } from 'vitest';
 import type { AppConfig } from '../config.js';
+import { ZERO_FEE_SCHEDULES } from '../config.js';
 import { ProductionRuntime } from './production-runtime.js';
 import { createTossProviderBundle } from './provider-bundle.js';
 
@@ -51,6 +52,7 @@ function config(credentials: {
     toss: { ...credentials, restBaseUrl: rest.baseUrl, wsUrl: ws.url },
     shutdownDrainDeadlineMs: 5_000,
     recoveryStabilityMs: 0,
+    fees: ZERO_FEE_SCHEDULES,
   };
 }
 

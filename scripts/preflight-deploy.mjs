@@ -50,6 +50,12 @@ const FORBIDDEN = {
     'is a committed compose literal (toss); do not override it from the environment',
   TOSS_REST_BASE_URL: 'must not be overridden in production',
   TOSS_WS_URL: 'must not be overridden in production',
+  FEE_SCHEDULE_VERSION:
+    'is a committed compose literal; bump it in infra/compose.yaml',
+  FEE_KR_COMMISSION_RATE: 'is a committed compose literal',
+  FEE_KR_SELL_TAX_RATE: 'is a committed compose literal',
+  FEE_US_COMMISSION_RATE: 'is a committed compose literal',
+  FEE_US_SELL_TAX_RATE: 'is a committed compose literal',
 };
 
 function httpsOrigin(value) {

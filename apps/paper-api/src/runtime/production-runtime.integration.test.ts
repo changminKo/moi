@@ -21,6 +21,7 @@ import {
 } from 'vitest';
 import WebSocket from 'ws';
 import type { AppConfig } from '../config.js';
+import { DEFAULT_FEE_SCHEDULES, ZERO_FEE_SCHEDULES } from '../config.js';
 import { OutboxPublisherLoop } from '../modules/stream/outbox-publisher-loop.js';
 import {
   ProductionRuntime,
@@ -66,6 +67,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 5_000,
     recoveryStabilityMs: 0,
+    fees: ZERO_FEE_SCHEDULES,
     ...overrides,
   };
 }
@@ -81,6 +83,7 @@ interface Started {
 
 async function start(
   options: {
+    config?: Partial<AppConfig>;
     deferSnapshots?: boolean;
     bundle?: FakeProviderBundle;
     awaitServing?: boolean;
@@ -94,7 +97,7 @@ async function start(
   if (deferSnapshots) bundle.snapshots.gate = deferSnapshots.promise;
   const spy: RuntimePhaseSpy = (phase) => phases.push(phase);
   const runtime = new ProductionRuntime({
-    config: config(),
+    config: config(options.config ?? {}),
     bundle,
     signals: false,
     log: (event, fields) => logs.push({ event, fields }),
@@ -1502,6 +1505,166 @@ describe('ProductionRuntime', () => {
       expect(
         events.map((e) => (e.payload as { reason?: string }).reason).sort(),
       ).toEqual(['OCO_SIBLING_CANCELLED', 'USER']);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'publishes the configured fee schedule, charges fees on fills, and refuses a silently changed rate',
+    async () => {
+      const { origin, bundle } = await start({
+        config: { fees: DEFAULT_FEE_SCHEDULES },
+      });
+      const versions = (
+        await observer.query(
+          'select market_code, version_number::text as v, status, schedule from fee_model_versions where version_number = 1 order by market_code',
+        )
+      ).rows;
+      expect(versions).toEqual([
+        expect.objectContaining({
+          market_code: 'KR',
+          v: '1',
+          status: 'PUBLISHED',
+          schedule: expect.objectContaining({
+            commissionRate: '0.00015',
+            sellTaxRate: '0.0015',
+          }),
+        }),
+        expect.objectContaining({
+          market_code: 'US',
+          v: '1',
+          status: 'PUBLISHED',
+          schedule: expect.objectContaining({
+            commissionRate: '0.0025',
+            sellTaxRate: '0',
+          }),
+        }),
+      ]);
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      bundle.streamFor('KR').emitOrderBook({
+        market: 'KR',
+        symbol: '005930',
+        book: {
+          market: 'KR',
+          symbol: '005930',
+          currency: 'KRW',
+          asks: [{ price: '70000', volume: '10' }],
+          bids: [{ price: '69900', volume: '10' }],
+        },
+        sourceTimestamp: null,
+      });
+      await sleep(200);
+      const buy = await json(`${origin}/api/v1/orders`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '70000',
+        }),
+      });
+      expect(buy.status, JSON.stringify(buy.body)).toBe(201);
+      const buyId = String((buy.body as { id?: string }).id);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (
+              await observer.query('select status from orders where id = $1', [
+                buyId,
+              ])
+            ).rows[0]?.status,
+          ).toBe('FILLED');
+        },
+        { timeout: 5_000 },
+      );
+      // 70000 × 0.015% = 10.5 → 11 KRW (HALF_UP, whole won); the fill names its schedule.
+      const fill = (
+        await observer.query(
+          'select fee::text as fee, fee_model_version_id is not null as versioned from fills where order_id = $1',
+          [buyId],
+        )
+      ).rows[0];
+      expect(fill).toEqual({ fee: '11', versioned: true });
+      expect(
+        (
+          await observer.query(
+            'select total::text as total, reserved::text as reserved from wallets where session_id = $1 and currency = $2',
+            [client.id, 'KRW'],
+          )
+        ).rows[0],
+      ).toEqual({ total: '9929989', reserved: '0' });
+      // SELL 1 @ 69900: commission 10.485 → 10, sell tax 104.85 → 105 ⇒ fee 115, proceeds 69785.
+      const sell = await json(`${origin}/api/v1/orders`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+          market: 'KR',
+          symbol: '005930',
+          side: 'SELL',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '69900',
+        }),
+      });
+      expect(sell.status, JSON.stringify(sell.body)).toBe(201);
+      const sellId = String((sell.body as { id?: string }).id);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (
+              await observer.query('select status from orders where id = $1', [
+                sellId,
+              ])
+            ).rows[0]?.status,
+          ).toBe('FILLED');
+        },
+        { timeout: 5_000 },
+      );
+      expect(
+        (
+          await observer.query(
+            'select fee::text as fee from fills where order_id = $1',
+            [sellId],
+          )
+        ).rows[0]?.fee,
+      ).toBe('115');
+      expect(
+        (
+          await observer.query(
+            'select total::text as total from wallets where session_id = $1 and currency = $2',
+            [client.id, 'KRW'],
+          )
+        ).rows[0]?.total,
+      ).toBe('9999774');
+
+      // A changed rate under the same version number must not boot.
+      for (const runtime of running.splice(0))
+        await runtime.stop().catch(() => undefined);
+      await observer.query('select pg_advisory_unlock_all()');
+      const drifted = {
+        ...DEFAULT_FEE_SCHEDULES,
+        KR: { commissionRate: '0.0003', sellTaxRate: '0.0015' },
+      };
+      const attempt = new ProductionRuntime({
+        config: config({ fees: drifted }),
+        bundle: createFakeProviderBundle(),
+        signals: false,
+        log: () => undefined,
+      });
+      running.push(attempt);
+      await expect(attempt.start()).rejects.toThrow(
+        /already published with different rates/,
+      );
     },
     TEST_TIMEOUT_MS,
   );

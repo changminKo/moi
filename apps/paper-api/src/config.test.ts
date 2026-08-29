@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, DEFAULT_FEE_SCHEDULES, loadConfig } from './config.js';
 
+const PROD_FEES = {
+  FEE_SCHEDULE_VERSION: '1',
+  FEE_KR_COMMISSION_RATE: '0.00015',
+  FEE_KR_SELL_TAX_RATE: '0.0015',
+  FEE_US_COMMISSION_RATE: '0.0025',
+  FEE_US_SELL_TAX_RATE: '0',
+};
 const BASE = {
   PUBLIC_ORIGIN: 'https://app.moi.test',
   DATABASE_URL: 'postgres://u:p@db:5432/moi',
@@ -27,12 +34,18 @@ describe('loadConfig (§5.1, A8)', () => {
       /MARKET_DATA_ADAPTER must be set explicitly in production/,
     );
     expect(() =>
-      loadConfig({ ...BASE, NODE_ENV: 'production', MARKET_DATA_ADAPTER: '' }),
+      loadConfig({
+        ...BASE,
+        NODE_ENV: 'production',
+        ...PROD_FEES,
+        MARKET_DATA_ADAPTER: '',
+      }),
     ).toThrow(ConfigError);
     expect(() =>
       loadConfig({
         ...BASE,
         NODE_ENV: 'production',
+        ...PROD_FEES,
         MARKET_DATA_ADAPTER: 'fake',
       }),
     ).toThrow(/fake adapter is forbidden in production/);
@@ -45,12 +58,14 @@ describe('loadConfig (§5.1, A8)', () => {
       loadConfig({
         ...BASE,
         NODE_ENV: 'production',
+        ...PROD_FEES,
         MARKET_DATA_ADAPTER: 'toss',
       }),
     ).toThrow(/TOSS_CLIENT_ID/);
     const ok = loadConfig({
       ...BASE,
       NODE_ENV: 'production',
+      ...PROD_FEES,
       MARKET_DATA_ADAPTER: 'toss',
       TOSS_CLIENT_ID: 'c_abcdefgh123',
       TOSS_CLIENT_SECRET: 's'.repeat(16),
@@ -92,6 +107,7 @@ describe('loadConfig (§5.1, A8)', () => {
         ...BASE,
         ...toss,
         NODE_ENV: 'production',
+        ...PROD_FEES,
         TOSS_REST_BASE_URL: 'http://127.0.0.1:4010',
         TOSS_WS_URL: 'ws://localhost:4011/ws/v1',
       }).toss?.restBaseUrl,
@@ -101,6 +117,7 @@ describe('loadConfig (§5.1, A8)', () => {
         ...BASE,
         ...toss,
         NODE_ENV: 'production',
+        ...PROD_FEES,
         TOSS_REST_BASE_URL: 'https://evil.example',
       }),
     ).toThrow(/loopback/);
@@ -109,6 +126,7 @@ describe('loadConfig (§5.1, A8)', () => {
         ...BASE,
         ...toss,
         NODE_ENV: 'production',
+        ...PROD_FEES,
         TOSS_WS_URL: 'wss://evil.example/ws',
       }),
     ).toThrow(/loopback/);
@@ -167,5 +185,37 @@ describe('loadConfig (§5.1, A8)', () => {
       expect(String((error as Error).message)).not.toContain('tooshort');
       expect(String((error as Error).message)).not.toContain(BASE.CSRF_SECRET);
     }
+  });
+
+  it('applies the default fee schedule outside production and requires it in production', () => {
+    expect(loadConfig({ ...BASE, NODE_ENV: 'test' }).fees).toEqual(
+      DEFAULT_FEE_SCHEDULES,
+    );
+    const production = {
+      ...BASE,
+      NODE_ENV: 'production',
+      MARKET_DATA_ADAPTER: 'toss',
+      TOSS_CLIENT_ID: 'c_abcdef1234',
+      TOSS_CLIENT_SECRET: 's'.repeat(32),
+    };
+    expect(() => loadConfig(production)).toThrow(/FEE_SCHEDULE_VERSION/);
+    const fees = {
+      FEE_SCHEDULE_VERSION: '2',
+      FEE_KR_COMMISSION_RATE: '0.0001',
+      FEE_KR_SELL_TAX_RATE: '0.0015',
+      FEE_US_COMMISSION_RATE: '0.002',
+      FEE_US_SELL_TAX_RATE: '0',
+    };
+    expect(loadConfig({ ...production, ...fees }).fees).toEqual({
+      version: 2,
+      KR: { commissionRate: '0.0001', sellTaxRate: '0.0015' },
+      US: { commissionRate: '0.002', sellTaxRate: '0' },
+    });
+    expect(() =>
+      loadConfig({ ...BASE, NODE_ENV: 'test', FEE_SCHEDULE_VERSION: '1' }),
+    ).toThrow(/partial/);
+    expect(() =>
+      loadConfig({ ...production, ...fees, FEE_KR_COMMISSION_RATE: '1.5' }),
+    ).toThrow(/decimal rate/);
   });
 });

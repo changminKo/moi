@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type AppDependencies, buildApp } from './app.js';
 import type { AppConfig } from './config.js';
+import { ZERO_FEE_SCHEDULES } from './config.js';
 
 const testConfig = (): AppConfig => ({
   nodeEnv: 'test',
@@ -14,6 +15,7 @@ const testConfig = (): AppConfig => ({
   marketDataAdapter: 'fake',
   shutdownDrainDeadlineMs: 30_000,
   recoveryStabilityMs: 0,
+  fees: ZERO_FEE_SCHEDULES,
 });
 
 const fakeDependencies = (): AppDependencies => ({

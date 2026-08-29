@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Market } from '@moi/trading-core';
-import { createFeeModel, DomainError } from '@moi/trading-core';
+import { DomainError, type FeeModel } from '@moi/trading-core';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { buildApp } from '../app.js';
@@ -56,6 +56,7 @@ import type { Capability, SafetyIncident } from '../safety/capabilities.js';
 import { createDbIncidentRepository } from '../safety/incident-db-repository.js';
 import { IncidentService } from '../safety/incident-service.js';
 import { AdmissionLatch } from './admission-latch.js';
+import { feeModelFor, publishFeeModelVersions } from './fee-schedule.js';
 import { createFillPersistence } from './fill-persistence.js';
 import { leaseAuditPort } from './lease-audit.js';
 import { LeaseRegistry } from './lease-registry.js';
@@ -198,6 +199,7 @@ export class ProductionRuntime {
   readonly #controller = new AbortController();
   readonly #processSupervisor: ReconnectSupervisor;
   readonly #engines = new Map<Market, PaperEngine>();
+  #feeVersionIds: ReadonlyMap<Market, string> = new Map();
   readonly #stores = new Map<Market, MarketStateStore>();
   #resolveListening: () => void = () => undefined;
   #app: FastifyInstance | undefined;
@@ -384,6 +386,12 @@ export class ProductionRuntime {
         restore: async () => {
           this.state.transition('RESTORING');
           await this.#refreshIncidents();
+          // The configured fee schedule is published (or matched) before any
+          // fill can reference it; a silently changed rate fails closed here.
+          this.#feeVersionIds = await publishFeeModelVersions(
+            this.#db,
+            config.fees,
+          );
           const restored = await this.#restoreOpenOrders();
           this.#log('runtime.restored', {
             leaderId: this.leaderId,
@@ -662,23 +670,18 @@ export class ProductionRuntime {
   #buildMarket(market: Market): void {
     const store = new MarketStateStore();
     this.#stores.set(market, store);
+    const feeModel = feeModelFor(this.#o.config.fees, market);
+    const feeModelVersionId = () => this.#feeVersionIds.get(market);
     const persistFill = createFillPersistence({
       db: this.#db,
       log: this.#log,
+      feeModelVersionId,
       onTransaction: (work) => this.#uow.track(work),
-    });
-    const feeModel = createFeeModel({
-      version: `runtime-${market}`,
-      market,
-      currency: market === 'US' ? 'USD' : 'KRW',
-      commissionRate: '0',
-      sellTaxRate: '0',
-      roundingDecimals: 2,
-      roundingMode: 'HALF_UP',
     });
     const persistTrigger = createTriggerPersistence({
       db: this.#db,
       feeModelFor: () => feeModel,
+      feeModelVersionId,
       log: this.#log,
       onTransaction: (work) => this.#uow.track(work),
     });
@@ -795,6 +798,7 @@ export class ProductionRuntime {
         const price = this.#quote(market, symbol).price;
         return typeof price === 'string' ? price : undefined;
       },
+      feeModel: (market): FeeModel => feeModelFor(this.#o.config.fees, market),
     });
     const orderService = new OrderService({
       placement,

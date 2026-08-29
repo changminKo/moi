@@ -21,6 +21,8 @@ type LogFn = (event: string, fields: Record<string, unknown>) => void;
 export function createFillPersistence(deps: {
   readonly db: Database;
   readonly log: LogFn;
+  /** Published `fee_model_versions.id` the fill's fee was computed under. */
+  readonly feeModelVersionId?: () => string | undefined;
   readonly onTransaction?: <T>(work: () => Promise<T>) => Promise<T>;
 }) {
   const wrap = deps.onTransaction ?? ((work) => work());
@@ -55,11 +57,13 @@ export function createFillPersistence(deps: {
           await sql`
             insert into fills (
               id, order_id, price, quantity, fee, slippage, reference_trade_price,
-              recovery_epoch, market_data_version, leader_fencing_token, is_recovery_fill
+              recovery_epoch, market_data_version, leader_fencing_token, is_recovery_fill,
+              fee_model_version_id
             ) values (
               ${randomUUID()}::uuid, ${order.id}::uuid, ${fill.price}, ${fill.quantity}, ${fill.fee},
               ${match.execution.slippageAmount}, ${pricing.referencePrice}, ${pricing.recoveryEpoch},
-              ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true}
+              ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true},
+              ${deps.feeModelVersionId?.() ?? null}::uuid
             )
           `.execute(trx);
         }

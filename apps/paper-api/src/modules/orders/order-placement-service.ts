@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type Currency,
   DomainError,
+  type FeeModel,
   type Market,
   type OrderType,
   planOcoReservation,
@@ -56,6 +57,8 @@ export interface OrderPlacementServiceDependencies {
     market: Market,
     symbol: string,
   ) => string | undefined;
+  /** Fee model used to size the estimated fee inside BUY reservations. */
+  readonly feeModel?: (market: Market) => FeeModel;
   readonly afterPlacement?: (
     sessionId: string,
     sequence: bigint,
@@ -131,7 +134,7 @@ export class OrderPlacementService {
         ? {}
         : { limitPrice: input.limitPrice }),
       ...(referencePrice === undefined ? {} : { referencePrice }),
-      estimatedFee: '0',
+      estimatedFee: this.#estimatedFee(input, referencePrice),
     });
     if (plan.cash !== undefined)
       return {
@@ -148,6 +151,22 @@ export class OrderPlacementService {
         reservationId: this.#id(),
       };
     return {};
+  }
+
+  #estimatedFee(
+    input: Exclude<PlaceOrderInput, { type: 'OCO' }>,
+    referencePrice: string | undefined,
+  ): string {
+    const feeModel = this.#deps.feeModel?.(input.market);
+    const price = input.limitPrice ?? referencePrice;
+    if (feeModel === undefined || input.side !== 'BUY' || price === undefined)
+      return '0';
+    return feeModel.calculate({
+      market: input.market,
+      side: 'BUY',
+      price,
+      quantity: input.quantity,
+    });
   }
 
   async #placeSingle(

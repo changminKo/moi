@@ -338,6 +338,22 @@ check('no committed secrets', () => {
     'paper-api MARKET_DATA_ADAPTER must be the literal toss (no interpolation, no fake)',
   );
   assert.match(
+    String(env.FEE_SCHEDULE_VERSION ?? ''),
+    /^[1-9]\d*$/,
+    'FEE_SCHEDULE_VERSION must be a committed positive integer literal',
+  );
+  for (const key of [
+    'FEE_KR_COMMISSION_RATE',
+    'FEE_KR_SELL_TAX_RATE',
+    'FEE_US_COMMISSION_RATE',
+    'FEE_US_SELL_TAX_RATE',
+  ])
+    assert.match(
+      String(env[key] ?? ''),
+      /^(0|0\.\d{1,10})$/,
+      `${key} must be a committed decimal rate literal in [0, 1)`,
+    );
+  assert.match(
     String(compose?.services?.postgres?.environment?.POSTGRES_PASSWORD ?? ''),
     /^\$\{[A-Z_]+:\?/,
     'POSTGRES_PASSWORD must be injected via required interpolation',

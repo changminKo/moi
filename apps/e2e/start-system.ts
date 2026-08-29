@@ -19,7 +19,7 @@ import {
   Wait,
 } from 'testcontainers';
 import { buildApp } from '../paper-api/src/app.js';
-import type { AppConfig } from '../paper-api/src/config.js';
+import { type AppConfig, ZERO_FEE_SCHEDULES } from '../paper-api/src/config.js';
 import { createDatabase, type Database } from '../paper-api/src/db/database.js';
 import { UnitOfWork } from '../paper-api/src/db/unit-of-work.js';
 import type { OrderMatch } from '../paper-api/src/engine/match-orders.js';
@@ -873,6 +873,7 @@ async function main(): Promise<void> {
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 30_000,
     recoveryStabilityMs: 0,
+    fees: ZERO_FEE_SCHEDULES,
   };
   database = createDatabase(config.databaseUrl);
   unitOfWork = new UnitOfWork(database, { backoff: async () => undefined });

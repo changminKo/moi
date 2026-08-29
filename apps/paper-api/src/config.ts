@@ -50,7 +50,105 @@ const environmentSchema = z.object({
     .min(0)
     .max(30_000)
     .default(5_000),
+  FEE_SCHEDULE_VERSION: z.coerce.number().int().min(1).optional(),
+  FEE_KR_COMMISSION_RATE: z.string().optional(),
+  FEE_KR_SELL_TAX_RATE: z.string().optional(),
+  FEE_US_COMMISSION_RATE: z.string().optional(),
+  FEE_US_SELL_TAX_RATE: z.string().optional(),
 });
+
+export interface FeeRates {
+  readonly commissionRate: string;
+  readonly sellTaxRate: string;
+}
+
+/** Versioned per-market fee schedule (architecture §fees). */
+export interface FeeSchedules {
+  readonly version: number;
+  readonly KR: FeeRates;
+  readonly US: FeeRates;
+}
+
+/**
+ * Korean retail approximation: 0.015% commission plus 0.15% sell-side
+ * transaction tax; US: 0.25% commission, no sell tax. Applied outside
+ * production when no FEE_* variable is set; production must configure all.
+ */
+export const DEFAULT_FEE_SCHEDULES: FeeSchedules = Object.freeze({
+  version: 1,
+  KR: { commissionRate: '0.00015', sellTaxRate: '0.0015' },
+  US: { commissionRate: '0.0025', sellTaxRate: '0' },
+});
+
+/**
+ * Fee-free schedule for deterministic fixtures and harnesses. It carries its
+ * own version number: a schedule version names one set of rates for good, so
+ * fixtures and the default schedule must never share one (the boot-time drift
+ * guard would refuse the second process to see the same database).
+ */
+export const ZERO_FEE_SCHEDULES: FeeSchedules = Object.freeze({
+  version: 2,
+  KR: { commissionRate: '0', sellTaxRate: '0' },
+  US: { commissionRate: '0', sellTaxRate: '0' },
+});
+
+const RATE_PATTERN = /^(0|0\.\d{1,10})$/;
+const FEE_VARIABLES = [
+  'FEE_SCHEDULE_VERSION',
+  'FEE_KR_COMMISSION_RATE',
+  'FEE_KR_SELL_TAX_RATE',
+  'FEE_US_COMMISSION_RATE',
+  'FEE_US_SELL_TAX_RATE',
+] as const;
+
+function readRate(name: string, value: string | undefined): string {
+  if (value === undefined || !RATE_PATTERN.test(value))
+    throw new ConfigError(
+      `${name} must be a decimal rate in [0, 1) with at most 10 decimals`,
+    );
+  return value;
+}
+
+function resolveFees(
+  nodeEnv: AppConfig['nodeEnv'],
+  parsed: z.infer<typeof environmentSchema>,
+): FeeSchedules {
+  const provided = FEE_VARIABLES.filter((name) => parsed[name] !== undefined);
+  if (provided.length === 0) {
+    if (nodeEnv === 'production')
+      throw new ConfigError(
+        'FEE_SCHEDULE_VERSION and the FEE_*_RATE variables must be set in production',
+      );
+    return DEFAULT_FEE_SCHEDULES;
+  }
+  if (provided.length !== FEE_VARIABLES.length)
+    throw new ConfigError(
+      `fee schedule is partial: set all of ${FEE_VARIABLES.join(', ')}`,
+    );
+  return {
+    version: parsed.FEE_SCHEDULE_VERSION as number,
+    KR: {
+      commissionRate: readRate(
+        'FEE_KR_COMMISSION_RATE',
+        parsed.FEE_KR_COMMISSION_RATE,
+      ),
+      sellTaxRate: readRate(
+        'FEE_KR_SELL_TAX_RATE',
+        parsed.FEE_KR_SELL_TAX_RATE,
+      ),
+    },
+    US: {
+      commissionRate: readRate(
+        'FEE_US_COMMISSION_RATE',
+        parsed.FEE_US_COMMISSION_RATE,
+      ),
+      sellTaxRate: readRate(
+        'FEE_US_SELL_TAX_RATE',
+        parsed.FEE_US_SELL_TAX_RATE,
+      ),
+    },
+  };
+}
 
 export type MarketDataAdapter = 'toss' | 'fake';
 
@@ -75,6 +173,7 @@ export interface AppConfig {
   readonly toss?: TossConfig;
   readonly shutdownDrainDeadlineMs: number;
   readonly recoveryStabilityMs: number;
+  readonly fees: FeeSchedules;
 }
 
 function isLoopback(url: string): boolean {
@@ -164,5 +263,6 @@ export function loadConfig(
     ...(toss ? { toss } : {}),
     shutdownDrainDeadlineMs: parsed.SHUTDOWN_DRAIN_DEADLINE_MS,
     recoveryStabilityMs: parsed.RECOVERY_STABILITY_MS,
+    fees: resolveFees(parsed.NODE_ENV, parsed),
   };
 }

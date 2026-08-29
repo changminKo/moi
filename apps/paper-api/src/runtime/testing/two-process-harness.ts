@@ -310,6 +310,13 @@ export class TwoProcessHarness {
       env: {
         PATH: process.env.PATH ?? '',
         NODE_ENV: 'production',
+        // Production requires an explicit fee schedule (compose literals in
+        // deployment); the drill uses the v1 defaults.
+        FEE_SCHEDULE_VERSION: '1',
+        FEE_KR_COMMISSION_RATE: '0.00015',
+        FEE_KR_SELL_TAX_RATE: '0.0015',
+        FEE_US_COMMISSION_RATE: '0.0025',
+        FEE_US_SELL_TAX_RATE: '0',
         HOST: '127.0.0.1',
         PORT: String(port),
         PUBLIC_ORIGIN,

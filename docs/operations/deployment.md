@@ -53,6 +53,7 @@ tests, Git metadata, or developer control directories (`.dockerignore`).
 | `TOSS_REST_BASE_URL`, `TOSS_WS_URL` | no | contract defaults; production may override only with a loopback host |
 | `SHUTDOWN_DRAIN_DEADLINE_MS` | no | default 30000, must stay below `stop_grace_period` (45 s) |
 | `RECOVERY_STABILITY_MS` | no | default 5000 |
+| `FEE_SCHEDULE_VERSION`, `FEE_KR_COMMISSION_RATE`, `FEE_KR_SELL_TAX_RATE`, `FEE_US_COMMISSION_RATE`, `FEE_US_SELL_TAX_RATE` | yes in production | committed compose literals (v1: KR 0.015% + 0.15% sell tax, US 0.25%); published to `fee_model_versions` at boot and referenced by every fill. Changing a rate is a new `FEE_SCHEDULE_VERSION`; the process refuses to start if the same version is already published with different rates |
 
 `web` reads `PUBLIC_API_ORIGIN` (bare HTTPS origin) and `PORT`. The server
 validates the origin, serves it from `/runtime-config.js` with `no-store`, and

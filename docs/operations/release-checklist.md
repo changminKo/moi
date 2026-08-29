@@ -60,7 +60,13 @@ handoff therefore remains unchecked below.
   while polling ≤ 3 s. Independent re-execution (Codex, 2026-08-28, HEAD
   `775d469`): all gates green and 3 consecutive drill runs —
   `2026-08-28T02-18-59.973Z`, `02-19-11.153Z`, `02-19-20.975Z` — each with
-  `peakConcurrentConnections=2`, `evictions=0`. Known: under whole-monorepo
+  `peakConcurrentConnections=2`, `evictions=0`. Re-run after the review-driven
+  ledger/trigger hardening, the Moi rename, and the versioned fee schedule
+  (2026-08-29): 3 consecutive runs — `2026-08-29T13-13-55.644Z`, `2026-08-29T13-14-03.692Z`,
+  `2026-08-29T13-14-11.420Z` — each `peakConcurrentConnections=2`, `evictions=0`. One
+  earlier run that day failed without a captured reason and passed on the
+  immediate rerun (6 of 7 runs green); treat as a flake to watch, not evidence.
+  Known: under whole-monorepo
   parallel `pnpm test` load the 100 ms split-lease sampler once caught the
   surviving-lease release window of a re-electing process (harmless — that
   process holds no provider connection); rerun the drill alone to confirm.
