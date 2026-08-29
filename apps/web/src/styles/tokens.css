@@ -1,25 +1,74 @@
 :root {
-  --color-ink: #e9f0f2;
-  --color-muted: #94a8ad;
-  --color-surface: #102333;
-  --color-surface-raised: #163044;
-  --color-canvas: #0d1b2a;
-  --color-line: #2c4a5a;
-  --color-positive: #69d6a7;
-  --color-negative: #ff827b;
+  /* Surfaces */
+  --color-canvas: #101419;
+  --color-surface: #17202a;
+  --color-surface-sunken: #0f151d;
+  --color-surface-raised: #1e2a3a;
+  --color-line: #243040;
+  --color-line-strong: #2f3f52;
+
+  /* Text */
+  --color-ink: #eef2f6;
+  --color-muted: #8b98a8;
+
+  /* Semantic — KR market convention: up is red, down is blue */
+  --color-up: #ff5d6c;
+  --color-up-soft: #2a1c22;
+  --color-down: #4a8df8;
+  --color-down-soft: #1a2638;
+  --color-ok: #3ddc97;
+  --color-ok-soft: #123326;
   --color-warning: #f2c46d;
+  --color-warning-soft: #33290f;
+  --color-danger: #ff5d6c;
+  --color-danger-soft: #2a1c22;
+  --color-accent: #4a8df8;
   --color-focus: #f6d365;
-  --font-display: Georgia, "Times New Roman", serif;
-  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --color-on-accent: #ffffff;
+
+  /* Typography */
+  --font-display:
+    "BM Hanna Pro", "BM Hanna Air", -apple-system, "Apple SD Gothic Neo",
+    system-ui, sans-serif;
+  --font-body:
+    "BM Hanna Air", -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --type-xs: 0.75rem;
+  --type-sm: 0.8125rem;
+  --type-body: 0.9375rem;
+  --type-md: 1.0625rem;
+  --type-lg: 1.375rem;
+  --type-xl: 2rem;
+  --type-price: clamp(2.25rem, 4vw, 2.75rem);
+  --type-display: clamp(2.5rem, 6vw, 4.5rem);
+
+  /* Spacing */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
+  --space-5: 1.25rem;
   --space-6: 1.5rem;
   --space-8: 2rem;
   --space-12: 3rem;
   --space-16: 4rem;
-  --type-sm: 0.8125rem;
-  --type-body: 1rem;
-  --type-display: clamp(2.5rem, 8vw, 6.5rem);
+
+  /* Shape & depth */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1.125rem;
+  --radius-pill: 999px;
+  --shadow-card:
+    inset 0 1px 0 rgb(255 255 255 / 0.03), 0 12px 32px -18px rgb(0 0 0 / 0.7);
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-normal: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Layout */
+  --layout-max: 80rem;
+  --col-side: 18.75rem;
+  --col-ticket: 22.5rem;
 }

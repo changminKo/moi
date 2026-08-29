@@ -1,0 +1,21 @@
+/*
+ * Baemin Hanna (배달의민족 한나체) — self-hosted woff2 subsets.
+ * Subset: Hangul syllables + compat jamo, Basic Latin, Latin-1 punctuation.
+ * ₩ (U+20A9) and geometric symbols (· ▲ ▼ ●) are deliberately left out so they
+ * fall back to the system font instead of rendering as wrong or blank glyphs.
+ */
+@font-face {
+  font-family: "BM Hanna Pro";
+  src: url("/fonts/bm-hanna-pro.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "BM Hanna Air";
+  src: url("/fonts/bm-hanna-air.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
