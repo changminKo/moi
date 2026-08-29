@@ -79,7 +79,7 @@ export const createPortfolioRepository = (
       sql<Row>`select distinct on (o.market_code) o.market_code, f.is_recovery_fill from orders o join fills f on f.order_id = o.id where o.session_id = ${sessionId} order by o.market_code, f.occurred_at desc`.execute(
         connection.executor,
       ),
-      sql<Row>`select f.id, f.order_id, o.symbol, f.quantity, f.price, f.is_recovery_fill from fills f join orders o on o.id = f.order_id where o.session_id = ${sessionId} order by f.occurred_at, f.id`.execute(
+      sql<Row>`select f.id, f.order_id, o.symbol, f.quantity, f.price, f.fee, f.is_recovery_fill from fills f join orders o on o.id = f.order_id where o.session_id = ${sessionId} order by f.occurred_at, f.id`.execute(
         connection.executor,
       ),
       sql<Row>`select a.id as order_id, b.id as sibling_id from orders a join orders b on b.oco_group_id = a.oco_group_id and b.id <> a.id where a.session_id = ${sessionId}`.execute(
@@ -130,6 +130,7 @@ export const createPortfolioRepository = (
             symbol: text(fill.symbol),
             quantity: numeric(fill.quantity),
             price: numeric(fill.price),
+            fee: numeric(fill.fee),
             recoveryFill: fill.is_recovery_fill === true,
           })),
         siblingOrderIds: ocoSiblings.rows

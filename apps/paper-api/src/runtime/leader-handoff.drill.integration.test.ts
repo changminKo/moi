@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   type ApiProcess,
   type DrillClient,
@@ -15,6 +15,17 @@ const evidence: Record<string, unknown> = {};
 beforeAll(async () => {
   await harness.start();
 }, 300_000);
+
+afterEach((context) => {
+  // A failed step is evidence too: keep its assertion text next to the
+  // process logs so an intermittent failure can be diagnosed after the fact.
+  const errors = context.task.result?.errors ?? [];
+  if (errors.length > 0)
+    evidence.failure = {
+      test: context.task.name,
+      errors: errors.map((error) => error.message),
+    };
+});
 
 afterAll(async () => {
   const file = harness.writeEvidence('drill', evidence);

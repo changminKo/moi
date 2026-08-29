@@ -12,7 +12,7 @@ export function PositionsTable({
       ) : (
         <table>
           <caption className="sr-only">
-            Available and reserved position quantities
+            Available and reserved position quantities with average cost
           </caption>
           <thead>
             <tr>
@@ -20,6 +20,7 @@ export function PositionsTable({
               <th>Available</th>
               <th>Reserved</th>
               <th>Total</th>
+              <th>Avg cost</th>
             </tr>
           </thead>
           <tbody>
@@ -29,6 +30,7 @@ export function PositionsTable({
                 <td>{String(position.available ?? '0')}</td>
                 <td>{String(position.reserved ?? '0')}</td>
                 <td>{String(position.total ?? position.quantity ?? '0')}</td>
+                <td>{String(position.averageCost ?? '—')}</td>
               </tr>
             ))}
           </tbody>
