@@ -25,6 +25,10 @@ RUN pnpm --filter @moi/paper-api deploy --prod --legacy /out/paper-api \
     && rm -rf /out/paper-api/src /out/paper-api/Dockerfile /out/paper-api/tsconfig.json /out/paper-api/.turbo
 
 FROM node:24.19.0-alpine3.23 AS runtime
+# Pull in Alpine security updates (e.g. openssl) so the published image passes
+# the Trivy gate in .github/workflows/publish.yml without waiting for a new
+# upstream node tag.
+RUN apk upgrade --no-cache
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000

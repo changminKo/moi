@@ -23,6 +23,10 @@ RUN pnpm install --offline --frozen-lockfile --filter @moi/web...
 RUN pnpm turbo run build --filter=@moi/web...
 
 FROM node:24.19.0-alpine3.23 AS runtime
+# Pull in Alpine security updates (e.g. openssl) so the published image passes
+# the Trivy gate in .github/workflows/publish.yml without waiting for a new
+# upstream node tag.
+RUN apk upgrade --no-cache
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080
