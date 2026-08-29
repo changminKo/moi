@@ -10,7 +10,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FakeMarketData } from '@moi/market-data';
-import { createFeeModel, decimal } from '@moi/trading-core';
+import { decimal } from '@moi/trading-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Pool } from 'pg';
 import {
@@ -22,13 +22,7 @@ import { buildApp } from '../paper-api/src/app.js';
 import { type AppConfig, ZERO_FEE_SCHEDULES } from '../paper-api/src/config.js';
 import { createDatabase, type Database } from '../paper-api/src/db/database.js';
 import { UnitOfWork } from '../paper-api/src/db/unit-of-work.js';
-import type { OrderMatch } from '../paper-api/src/engine/match-orders.js';
-import {
-  type ConditionalPaperOrder,
-  PaperEngine,
-  type PaperOrder,
-} from '../paper-api/src/engine/paper-engine.js';
-import type { PricingContext } from '../paper-api/src/engine/pricing-context.js';
+import { PaperEngine } from '../paper-api/src/engine/paper-engine.js';
 import type { LeaderLease } from '../paper-api/src/market-data/leader-lease.js';
 import { MarketStateStore } from '../paper-api/src/market-data/market-state-store.js';
 import { RecoveryCoordinator } from '../paper-api/src/market-data/recovery-coordinator.js';
@@ -60,7 +54,10 @@ import {
 } from '../paper-api/src/modules/stream/stream-upgrade.js';
 import { LayeredRateLimiter } from '../paper-api/src/plugins/rate-limits.js';
 import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
-import { settleFill } from '../paper-api/src/runtime/fill-settlement.js';
+import { feeModelFor } from '../paper-api/src/runtime/fee-schedule.js';
+import { createFillPersistence } from '../paper-api/src/runtime/fill-persistence.js';
+import { createOrderCancellation } from '../paper-api/src/runtime/order-cancellation.js';
+import { createTriggerPersistence } from '../paper-api/src/runtime/trigger-persistence.js';
 import { stateFilePath } from './state-file.js';
 
 const API_PORT = 3100;
@@ -262,134 +259,31 @@ function fundedSessionStore(
   };
 }
 
-async function persistEngineFill(
-  order: PaperOrder,
-  match: OrderMatch,
-  pricing: PricingContext,
-): Promise<void> {
-  await pool.query(
-    `update orders
-        set filled_quantity = $2, status = $3, terminal_reason = $4,
-            market_data_epoch = $5, updated_at = now(), version = version + 1
-      where id = $1`,
-    [
-      order.id,
-      match.filledQuantity,
-      match.nextStatus,
-      match.execution.terminalReason ?? null,
-      pricing.recoveryEpoch.toString(),
-    ],
-  );
-  for (const fill of match.execution.fills) {
-    await pool.query(
-      `insert into fills (
-         id, order_id, price, quantity, fee, slippage, reference_trade_price,
-         recovery_epoch, market_data_version, leader_fencing_token,
-         is_recovery_fill
-       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        randomUUID(),
-        order.id,
-        fill.price,
-        fill.quantity,
-        fill.fee,
-        match.execution.slippageAmount,
-        pricing.referencePrice,
-        pricing.recoveryEpoch.toString(),
-        pricing.marketDataVersion.toString(),
-        pricing.leaderFencingToken.toString(),
-        pricing.recoveryFill === true,
-      ],
-    );
-  }
+/**
+ * The harness persists fills, triggers, and cancellations through the SAME
+ * modules production uses (lock order, settlement, terminal rejection), so a
+ * browser journey exercises the real ledger semantics instead of a copy that
+ * could drift from them.
+ */
+function ledgerPersistence(market: Market) {
   if (!database) throw new Error('database is not initialized');
-  await database.transaction().execute((trx) =>
-    settleFill(trx, {
-      order: {
-        id: order.id,
-        sessionId: order.sessionId,
-        market: order.market,
-        symbol: order.symbol,
-        side: order.side,
-      },
-      fills: match.execution.fills,
-      terminal:
-        match.nextStatus === 'FILLED' || match.nextStatus === 'CANCELLED',
+  const feeModel = feeModelFor(ZERO_FEE_SCHEDULES, market);
+  const log = (event: string, fields: Record<string, unknown>) =>
+    console.log(JSON.stringify({ level: 'info', event, ...fields }));
+  return {
+    feeModel,
+    onFill: createFillPersistence({
+      db: database,
+      log,
+      estimateFee: (price, quantity) =>
+        feeModel.calculate({ market, side: 'BUY', price, quantity }),
     }),
-  );
-}
-
-async function persistConditionalTrigger(
-  order: ConditionalPaperOrder,
-  pricing: PricingContext,
-): Promise<void> {
-  const group = await pool.query<{
-    groupId: string;
-    sessionId: string;
-    symbol: string;
-    quantity: string;
-  }>(
-    `select oco_group_id::text as "groupId", session_id::text as "sessionId",
-            symbol, quantity::text
-       from orders where id = $1 and oco_group_id is not null`,
-    [order.id],
-  );
-  const row = group.rows[0];
-  if (!row) throw new Error('conditional order has no OCO group');
-  const client = await pool.connect();
-  try {
-    await client.query('begin');
-    await client.query(
-      `update orders
-          set status = case when id = $1 then 'FILLED' else 'CANCELLED' end,
-              filled_quantity = case when id = $1 then quantity else filled_quantity end,
-              is_oco_winner = (id = $1), updated_at = now(), version = version + 1
-        where oco_group_id = $2`,
-      [order.id, row.groupId],
-    );
-    await client.query(
-      `insert into fills (
-         id, order_id, price, quantity, fee, slippage, reference_trade_price,
-         recovery_epoch, market_data_version, leader_fencing_token,
-         is_recovery_fill
-       ) values ($1, $2, $3, $4, 0, 0, $3, $5, $6, $7, $8)`,
-      [
-        randomUUID(),
-        order.id,
-        pricing.referencePrice,
-        row.quantity,
-        pricing.recoveryEpoch.toString(),
-        pricing.marketDataVersion.toString(),
-        pricing.leaderFencingToken.toString(),
-        pricing.recoveryFill === true,
-      ],
-    );
-    await client.query(
-      `update positions
-          set available_quantity = 0, reserved_quantity = 0,
-              total_quantity = 0, version = version + 1
-        where session_id = $1 and symbol = $2`,
-      [row.sessionId, row.symbol],
-    );
-    await client.query(
-      `update reservations set released = true, version = version + 1
-        where oco_group_id = $1 and not released`,
-      [row.groupId],
-    );
-    await client.query(
-      `update oco_groups
-          set status = 'RESOLVED', resolved_at = now(), version = version + 1
-        where id = $1 and status = 'ACTIVE'`,
-      [row.groupId],
-    );
-    await client.query('commit');
-  } catch (error) {
-    await client.query('rollback');
-    throw error;
-  } finally {
-    client.release();
-  }
-  await publishSnapshot(row.sessionId, 'OCO_RESOLVED');
+    onConditionalTrigger: createTriggerPersistence({
+      db: database,
+      feeModelFor: () => feeModel,
+      log,
+    }),
+  };
 }
 
 let marketVersion = 0n;
@@ -597,9 +491,11 @@ async function controlApi(
     const target = await pool.query<{
       market: Market;
       symbol: string;
-    }>('select market_code as market, symbol from orders where id = $1', [
-      input.orderId,
-    ]);
+      sessionId: string;
+    }>(
+      'select market_code as market, symbol, session_id::text as "sessionId" from orders where id = $1',
+      [input.orderId],
+    );
     const row = target.rows[0];
     if (!row) {
       json(response, 404, { error: 'order missing' });
@@ -628,6 +524,9 @@ async function controlApi(
         source: 'WEBSOCKET',
       },
     });
+    // Production publishes the trigger's outbox rows; the harness drives its
+    // browser stream from snapshots, so mirror the resolution to the session.
+    await publishSnapshot(row.sessionId, 'OCO_RESOLVED');
     json(response, 200, { resolved: true });
     return;
   }
@@ -805,20 +704,20 @@ async function executeCancelOrAmend(command: {
   input?: unknown;
 }): Promise<unknown> {
   if (command.action === 'cancel') {
-    const target = await pool.query<{ market: Market }>(
-      'select market_code as market from orders where id = $1 and session_id = $2',
-      [command.orderId, command.sessionId],
-    );
-    const market = target.rows[0]?.market;
-    if (market) await engines.get(market)?.cancelOrder(String(command.orderId));
-    await pool.query(
-      `update orders set status = 'CANCELLED', updated_at = now(), version = version + 1
-        where id = $1 and session_id = $2
-          and status not in ('FILLED','CANCELLED','EXPIRED','REJECTED')`,
-      [command.orderId, command.sessionId],
-    );
-    await publishSnapshot(command.sessionId, 'ORDER_CANCELLED');
-    return { id: command.orderId, status: 'CANCELLED' };
+    if (!unitOfWork) throw new Error('unit of work is not initialized');
+    const cancel = createOrderCancellation({
+      uow: unitOfWork,
+      engines: () => engines.values(),
+      log: (event, fields) =>
+        console.log(JSON.stringify({ level: 'info', event, ...fields })),
+    });
+    const result = await cancel({
+      sessionId: command.sessionId,
+      orderId: String(command.orderId),
+    });
+    if (result.cancelledOrderIds.length > 0)
+      await publishSnapshot(command.sessionId, 'ORDER_CANCELLED');
+    return { id: result.id, status: result.status };
   }
   if (command.action === 'amend')
     throw Object.assign(new Error('amendment is unavailable in E2E'), {
@@ -860,6 +759,13 @@ async function main(): Promise<void> {
       ),
     );
   }
+  // The harness is the only leader: production fill/trigger persistence
+  // re-checks its envelope fencing token (1n) against leader_epochs (§7.1).
+  await pool.query(
+    `insert into leader_epochs (id, market_code, epoch, fencing_token, leader_id)
+     values (gen_random_uuid(), 'KR', 1, 1, 'e2e-harness'), (gen_random_uuid(), 'US', 1, 1, 'e2e-harness')
+     on conflict (market_code) do update set epoch = 1, fencing_token = 1, leader_id = 'e2e-harness'`,
+  );
   const config: AppConfig = {
     nodeEnv: 'test',
     host: '127.0.0.1',
@@ -897,18 +803,8 @@ async function main(): Promise<void> {
     engines.set(
       market,
       new PaperEngine({
-        feeModel: createFeeModel({
-          version: `e2e-${market}`,
-          market,
-          currency,
-          commissionRate: '0',
-          sellTaxRate: '0',
-          roundingDecimals: 2,
-          roundingMode: 'HALF_UP',
-        }),
+        ...ledgerPersistence(market),
         isGateExclusive: () => mode === 'DEGRADED' || mode === 'CANCEL_ONLY',
-        onFill: persistEngineFill,
-        onConditionalTrigger: persistConditionalTrigger,
       }),
     );
     const symbols = market === 'KR' ? ['005930'] : ['AAPL'];

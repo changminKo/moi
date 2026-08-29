@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
-  applyFillToPosition,
+  assertExactMoney,
   type Currency,
+  calculateAverageCost,
   type DecimalString,
   DomainError,
-  decimal,
   type Market,
+  moneyDecimal,
   type Side,
 } from '@moi/trading-core';
 import { sql } from 'kysely';
@@ -27,6 +28,12 @@ export interface SettlementPlanInput {
   readonly consumed: DecimalString;
   /** Terminal fills release whatever the reservation still holds. */
   readonly terminal: boolean;
+  /**
+   * For a non-terminal fill: the exposure the order still needs reserved
+   * (remaining quantity × price + estimated fee). Anything the reservation
+   * holds above this is handed back to `available` (price improvement).
+   */
+  readonly desiredRemaining?: DecimalString;
 }
 
 export interface SettlementPlan {
@@ -35,11 +42,16 @@ export interface SettlementPlan {
   readonly released: boolean;
 }
 
+const money = (value: DecimalString, what: string) =>
+  assertExactMoney(moneyDecimal(value), what);
+
 /**
- * Pure settlement arithmetic shared by cash (BUY) and position (SELL) legs:
- * the consumed amount leaves `total`, first out of the reservation and then
- * out of `available` for any shortfall (price protection keeps that small);
- * a terminal fill hands the unused reservation back to `available`.
+ * Pure settlement arithmetic shared by cash (BUY) and position (SELL) legs,
+ * in the ledger's exact-money domain: the consumed amount leaves `total`,
+ * first out of the reservation and then out of `available` for any shortfall
+ * (price protection keeps that small); a terminal fill hands the unused
+ * reservation back to `available`, a partial fill hands back anything above
+ * the remaining exposure.
  */
 export function planSettlement(
   input: SettlementPlanInput,
@@ -47,30 +59,48 @@ export function planSettlement(
     | 'INSUFFICIENT_AVAILABLE_CASH'
     | 'INSUFFICIENT_AVAILABLE_POSITION',
 ): SettlementPlan {
-  const consumed = decimal(input.consumed);
+  const consumed = money(input.consumed, 'Settlement amount');
   if (consumed.isNegative())
     throw new DomainError(
       'INVARIANT_VIOLATION',
       'settlement amount is negative',
     );
-  const remaining = decimal(input.reservationRemaining);
+  const remaining = money(input.reservationRemaining, 'Reservation remaining');
   const fromReservation = consumed.lessThan(remaining) ? consumed : remaining;
   const shortfall = consumed.minus(fromReservation);
-  const total = decimal(input.balances.total).minus(consumed);
-  let reserved = decimal(input.balances.reserved).minus(fromReservation);
-  let available = decimal(input.balances.available).minus(shortfall);
+  const total = assertExactMoney(
+    money(input.balances.total, 'Balance total').minus(consumed),
+    'Settled total',
+  );
+  let reserved = assertExactMoney(
+    money(input.balances.reserved, 'Balance reserved').minus(fromReservation),
+    'Settled reserved',
+  );
+  let available = assertExactMoney(
+    money(input.balances.available, 'Balance available').minus(shortfall),
+    'Settled available',
+  );
   if (available.isNegative())
     throw new DomainError(
       shortfallCode,
       'fill exceeds the reserved and available balance',
     );
-  let left = remaining.minus(fromReservation);
+  let left = assertExactMoney(
+    remaining.minus(fromReservation),
+    'Reservation left',
+  );
   let released = false;
+  const giveBack = (amount: ReturnType<typeof moneyDecimal>) => {
+    available = assertExactMoney(available.plus(amount), 'Released available');
+    reserved = assertExactMoney(reserved.minus(amount), 'Released reserved');
+    left = assertExactMoney(left.minus(amount), 'Reservation after release');
+  };
   if (input.terminal) {
-    available = available.plus(left);
-    reserved = reserved.minus(left);
-    left = decimal('0');
+    giveBack(left);
     released = true;
+  } else if (input.desiredRemaining !== undefined) {
+    const desired = money(input.desiredRemaining, 'Desired reservation');
+    if (left.greaterThan(desired)) giveBack(left.minus(desired));
   }
   if (reserved.isNegative() || total.isNegative())
     throw new DomainError(
@@ -94,17 +124,29 @@ export interface SettlementFill {
   readonly fee: DecimalString;
 }
 
+export interface SettlementOrder {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly market: Market;
+  readonly symbol: string;
+  readonly side: Side;
+  readonly ocoGroupId?: string | null;
+  /** Needed to recompute the remaining exposure after a partial fill. */
+  readonly type?: 'MARKET' | 'LIMIT' | 'STOP' | 'TAKE_PROFIT' | 'OCO';
+  readonly limitPrice?: DecimalString | null;
+  readonly quantity?: DecimalString;
+  readonly filledQuantityAfter?: DecimalString;
+}
+
 export interface FillSettlementInput {
-  readonly order: {
-    readonly id: string;
-    readonly sessionId: string;
-    readonly market: Market;
-    readonly symbol: string;
-    readonly side: Side;
-    readonly ocoGroupId?: string | null;
-  };
+  readonly order: SettlementOrder;
   readonly fills: readonly SettlementFill[];
   readonly terminal: boolean;
+  /** Fee the remaining quantity would cost at `price`; sizes the kept reservation. */
+  readonly estimateFee?: (
+    price: DecimalString,
+    quantity: DecimalString,
+  ) => DecimalString;
 }
 
 export const currencyFor = (market: Market): Currency =>
@@ -115,9 +157,32 @@ interface ReservationRow {
   amount: string;
 }
 
+/**
+ * Locks the balance row a fill will settle into (wallet for BUY, position for
+ * SELL). Fill persistence calls this FIRST — before it locks the order row —
+ * so fills and cancellations take ledger locks in the same order
+ * (session → balance → order → reservation) and cannot deadlock each other.
+ */
+export async function lockBalances(
+  executor: LedgerExecutor,
+  order: Pick<SettlementOrder, 'sessionId' | 'market' | 'symbol' | 'side'>,
+): Promise<void> {
+  if (order.side === 'BUY') {
+    await sql`
+      select id from wallets where session_id = ${order.sessionId}::uuid
+        and currency = ${currencyFor(order.market)} for update
+    `.execute(executor);
+    return;
+  }
+  await sql`
+    select id from positions where session_id = ${order.sessionId}::uuid
+      and market_code = ${order.market} and symbol = ${order.symbol} for update
+  `.execute(executor);
+}
+
 async function lockReservation(
   executor: LedgerExecutor,
-  input: FillSettlementInput['order'],
+  input: SettlementOrder,
 ): Promise<ReservationRow | undefined> {
   const rows =
     input.ocoGroupId === undefined || input.ocoGroupId === null
@@ -144,12 +209,40 @@ async function writeReservation(
   `.execute(executor);
 }
 
+function remainingExposure(
+  input: FillSettlementInput,
+): DecimalString | undefined {
+  const { order } = input;
+  if (
+    input.terminal ||
+    order.type !== 'LIMIT' ||
+    order.limitPrice === undefined ||
+    order.limitPrice === null ||
+    order.quantity === undefined ||
+    order.filledQuantityAfter === undefined
+  )
+    return undefined;
+  const remaining = assertExactMoney(
+    moneyDecimal(order.quantity).minus(order.filledQuantityAfter),
+    'Remaining quantity',
+  );
+  if (remaining.isNegative() || remaining.isZero()) return '0';
+  const notional = assertExactMoney(
+    remaining.mul(order.limitPrice),
+    'Remaining notional',
+  );
+  const fee =
+    input.estimateFee?.(order.limitPrice, remaining.toString()) ?? '0';
+  return assertExactMoney(notional.plus(fee), 'Remaining exposure').toString();
+}
+
 /**
- * Settles engine fills against the ledger inside the caller's transaction:
- * BUY debits the wallet (consuming the cash reservation) and grows the
- * position at weighted average cost; SELL shrinks the position (consuming
- * the position reservation) and credits the proceeds. Legacy orders without
- * a reservation row settle out of `available` alone.
+ * Settles engine fills against the ledger inside the caller's transaction,
+ * which must already hold the session and the balance row (`lockBalances`)
+ * and the order row: BUY debits the wallet (consuming the cash reservation)
+ * and grows the position at weighted average cost; SELL shrinks the position
+ * (consuming the position reservation) and credits the proceeds. Legacy
+ * orders without a reservation row settle out of `available` alone.
  */
 export async function settleFill(
   executor: LedgerExecutor,
@@ -159,6 +252,7 @@ export async function settleFill(
   const currency = currencyFor(order.market);
   const reservation = await lockReservation(executor, order);
   const remaining = reservation?.amount ?? '0';
+  const desiredRemaining = remainingExposure(input);
   if (order.side === 'BUY') {
     const wallet = (
       await sql<Balances & { id: string }>`
@@ -173,8 +267,19 @@ export async function settleFill(
       );
     const cost = input.fills
       .reduce(
-        (sum, f) => sum.plus(decimal(f.price).mul(f.quantity)).plus(f.fee),
-        decimal('0'),
+        (sum, f) =>
+          assertExactMoney(
+            sum
+              .plus(
+                assertExactMoney(
+                  moneyDecimal(f.price).mul(f.quantity),
+                  'Fill notional',
+                ),
+              )
+              .plus(f.fee),
+            'Fill cost',
+          ),
+        moneyDecimal(0),
       )
       .toString();
     const plan = planSettlement(
@@ -183,6 +288,7 @@ export async function settleFill(
         reservationRemaining: remaining,
         consumed: cost,
         terminal: input.terminal,
+        ...(desiredRemaining === undefined ? {} : { desiredRemaining }),
       },
       'INSUFFICIENT_AVAILABLE_CASH',
     );
@@ -211,7 +317,7 @@ export async function settleFill(
       `session holds no ${order.symbol} position`,
     );
   const quantity = input.fills
-    .reduce((sum, f) => sum.plus(f.quantity), decimal('0'))
+    .reduce((sum, f) => sum.plus(f.quantity), moneyDecimal(0))
     .toString();
   const plan = planSettlement(
     {
@@ -223,6 +329,17 @@ export async function settleFill(
       reservationRemaining: remaining,
       consumed: quantity,
       terminal: input.terminal,
+      ...(desiredRemaining === undefined
+        ? {}
+        : {
+            // A SELL reservation is denominated in shares: keep the unfilled quantity.
+            desiredRemaining: assertExactMoney(
+              moneyDecimal(order.quantity ?? '0').minus(
+                order.filledQuantityAfter ?? '0',
+              ),
+              'Remaining quantity',
+            ).toString(),
+          }),
     },
     'INSUFFICIENT_AVAILABLE_POSITION',
   );
@@ -233,8 +350,19 @@ export async function settleFill(
   await writeReservation(executor, reservation, plan);
   const proceeds = input.fills
     .reduce(
-      (sum, f) => sum.plus(decimal(f.price).mul(f.quantity)).minus(f.fee),
-      decimal('0'),
+      (sum, f) =>
+        assertExactMoney(
+          sum
+            .plus(
+              assertExactMoney(
+                moneyDecimal(f.price).mul(f.quantity),
+                'Fill notional',
+              ),
+            )
+            .minus(f.fee),
+          'Fill proceeds',
+        ),
+      moneyDecimal(0),
     )
     .toString();
   await sql`
@@ -248,7 +376,7 @@ export async function settleFill(
 
 async function growPosition(
   executor: LedgerExecutor,
-  order: FillSettlementInput['order'],
+  order: SettlementOrder,
   fills: readonly SettlementFill[],
 ): Promise<void> {
   const current = (
@@ -257,29 +385,40 @@ async function growPosition(
       where session_id = ${order.sessionId}::uuid and market_code = ${order.market} and symbol = ${order.symbol} for update
     `.execute(executor)
   ).rows[0];
-  const start = {
+  // Cost basis is reconstructed from the stored average (the schema keeps no
+  // total cost); the average itself is written with trading-core's canonical
+  // 10-place rounding so successive fills round the same way the core does.
+  let quantity = moneyDecimal(current?.total_quantity ?? '0');
+  let totalCost = current
+    ? assertExactMoney(
+        moneyDecimal(current.average_cost).mul(current.total_quantity),
+        'Position cost basis',
+      )
+    : moneyDecimal(0);
+  for (const fill of fills) {
+    quantity = quantity.plus(fill.quantity);
+    totalCost = assertExactMoney(
+      totalCost
+        .plus(
+          assertExactMoney(
+            moneyDecimal(fill.price).mul(fill.quantity),
+            'Fill notional',
+          ),
+        )
+        .plus(fill.fee),
+      'Position cost basis',
+    );
+  }
+  const added = assertExactMoney(
+    quantity.minus(current?.total_quantity ?? '0'),
+    'Position increment',
+  ).toString();
+  const averageCost = calculateAverageCost({
     symbol: order.symbol,
-    quantity: current?.total_quantity ?? '0',
-    totalCost: current
-      ? decimal(current.average_cost).mul(current.total_quantity).toString()
-      : '0',
+    quantity: quantity.toString(),
+    totalCost: totalCost.toString(),
     realizedPnl: '0',
-  };
-  const next = fills.reduce(
-    (position, fill) =>
-      applyFillToPosition(position, {
-        symbol: order.symbol,
-        side: 'BUY',
-        price: fill.price,
-        quantity: fill.quantity,
-        fee: fill.fee,
-      }),
-    start,
-  );
-  const added = decimal(next.quantity).minus(start.quantity).toString();
-  const averageCost = decimal(next.quantity).isZero()
-    ? '0'
-    : decimal(next.totalCost).div(next.quantity).toDecimalPlaces(8).toString();
+  });
   if (current === undefined) {
     await sql`
       insert into positions (id, session_id, market_code, symbol, total_quantity, available_quantity, reserved_quantity, average_cost)

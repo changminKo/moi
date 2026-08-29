@@ -1668,4 +1668,354 @@ describe('ProductionRuntime', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  describe('fill / cancel linearisation (Codex lane A)', () => {
+    const krBook = (bundle: FakeProviderBundle, askVolume = '10') =>
+      bundle.streamFor('KR').emitOrderBook({
+        market: 'KR',
+        symbol: '005930',
+        book: {
+          market: 'KR',
+          symbol: '005930',
+          currency: 'KRW',
+          asks: [{ price: '70000', volume: askVolume }],
+          bids: [{ price: '69900', volume: '10' }],
+        },
+        sourceTimestamp: null,
+      });
+    const clientFor = async (origin: string) => {
+      const client = await anonymousSession(origin);
+      const headers = () => ({
+        origin: 'http://127.0.0.1:0',
+        cookie: client.cookie,
+        'x-csrf-token': client.csrf,
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      });
+      const place = (body: Record<string, unknown>) =>
+        json(`${origin}/api/v1/orders`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+      const cancel = (id: string) => {
+        const { 'content-type': _json, ...rest } = headers();
+        return json(`${origin}/api/v1/orders/${id}`, {
+          method: 'DELETE',
+          headers: rest,
+        });
+      };
+      const wallet = async () =>
+        (
+          await observer.query(
+            'select total::text as total, available::text as available, reserved::text as reserved from wallets where session_id = $1 and currency = $2',
+            [client.id, 'KRW'],
+          )
+        ).rows[0];
+      const openReservations = async () =>
+        (
+          await observer.query(
+            'select coalesce(sum(amount), 0)::text as sum from reservations where session_id = $1 and released = false',
+            [client.id],
+          )
+        ).rows[0]?.sum;
+      return { client, headers, place, cancel, wallet, openReservations };
+    };
+    const invariantsHold = async (c: Awaited<ReturnType<typeof clientFor>>) => {
+      const w = await c.wallet();
+      expect(BigInt(w.total)).toBe(BigInt(w.available) + BigInt(w.reserved));
+      expect(w.reserved).toBe(await c.openReservations());
+    };
+
+    it(
+      'a partially filled order releases exactly the shrunk reservation on cancel',
+      async () => {
+        const { origin, bundle } = await start();
+        const c = await clientFor(origin);
+        krBook(bundle, '2');
+        await sleep(200);
+        const placed = await c.place({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '3',
+          limitPrice: '70000',
+        });
+        expect(placed.status, JSON.stringify(placed.body)).toBe(201);
+        const id = String((placed.body as { id?: string }).id);
+        await vi.waitFor(
+          async () => {
+            expect(
+              (
+                await observer.query(
+                  'select status from orders where id = $1',
+                  [id],
+                )
+              ).rows[0]?.status,
+            ).toBe('PARTIALLY_FILLED');
+          },
+          { timeout: 5_000 },
+        );
+        // 2 filled @ 70000 (zero fees in this harness): 140000 spent, 70000 still reserved.
+        expect(await c.wallet()).toEqual({
+          total: '9860000',
+          available: '9790000',
+          reserved: '70000',
+        });
+        await invariantsHold(c);
+        const cancelled = await c.cancel(id);
+        expect(cancelled.status, JSON.stringify(cancelled.body)).toBeLessThan(
+          300,
+        );
+        expect(cancelled.body.status).toBe('CANCELLED');
+        expect(await c.wallet()).toEqual({
+          total: '9860000',
+          available: '9860000',
+          reserved: '0',
+        });
+        await invariantsHold(c);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'cancelling both OCO legs concurrently releases the shared reservation exactly once',
+      async () => {
+        const { origin, bundle } = await start();
+        const c = await clientFor(origin);
+        krBook(bundle);
+        await sleep(200);
+        const oco = await c.place({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'OCO',
+          quantity: '1',
+          legs: [
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'LIMIT',
+              quantity: '1',
+              limitPrice: '60000',
+            },
+            {
+              market: 'KR',
+              symbol: '005930',
+              side: 'BUY',
+              type: 'STOP',
+              quantity: '1',
+              stopPrice: '80000',
+            },
+          ],
+        });
+        expect(oco.status, JSON.stringify(oco.body)).toBe(201);
+        const legId = String((oco.body as { id?: string }).id);
+        const group = (
+          await observer.query(
+            'select oco_group_id::text as g from orders where id = $1',
+            [legId],
+          )
+        ).rows[0]?.g as string;
+        const legs = (
+          await observer.query(
+            'select id::text as id from orders where oco_group_id = $1 order by id',
+            [group],
+          )
+        ).rows.map((r) => r.id as string);
+        const results = await Promise.all(legs.map((leg) => c.cancel(leg)));
+        for (const r of results)
+          expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
+        expect(
+          (
+            await observer.query(
+              'select count(*)::int as n from orders where oco_group_id = $1 and status = $2',
+              [group, 'CANCELLED'],
+            )
+          ).rows[0]?.n,
+        ).toBe(2);
+        expect(
+          (
+            await observer.query(
+              'select status from oco_groups where id = $1',
+              [group],
+            )
+          ).rows[0]?.status,
+        ).toBe('RESOLVED');
+        expect(await c.wallet()).toEqual({
+          total: '10000000',
+          available: '10000000',
+          reserved: '0',
+        });
+        await invariantsHold(c);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'a fill already past the balance lock wins; the racing cancel observes FILLED and no deadlock occurs',
+      async () => {
+        const { origin, bundle } = await start();
+        const c = await clientFor(origin);
+        krBook(bundle);
+        await sleep(200);
+        // Resting order first (ask 70000 > limit), then hold its ORDER row from a
+        // second connection so a marketable book has the fill blocked *after* it
+        // took the wallet lock but before it could touch the order.
+        const placed = await c.place({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '69000',
+        });
+        expect(placed.status, JSON.stringify(placed.body)).toBe(201);
+        const id = String((placed.body as { id?: string }).id);
+        const barrier = new Client({ connectionString: databaseUrl });
+        await barrier.connect();
+        try {
+          await barrier.query('begin');
+          await barrier.query(
+            'select id from orders where id = $1 for update',
+            [id],
+          );
+          // Move the ask down so the resting order becomes marketable: the fill
+          // now blocks on the order row while holding the wallet.
+          bundle.streamFor('KR').emitOrderBook({
+            market: 'KR',
+            symbol: '005930',
+            book: {
+              market: 'KR',
+              symbol: '005930',
+              currency: 'KRW',
+              asks: [{ price: '69000', volume: '10' }],
+              bids: [{ price: '68900', volume: '10' }],
+            },
+            sourceTimestamp: null,
+          });
+          await sleep(300);
+          const cancelling = c.cancel(id); // blocks behind the fill on the wallet row
+          await sleep(300);
+          await barrier.query('commit'); // release: fill commits first, then cancel runs
+          const cancelled = await cancelling;
+          expect(cancelled.status, JSON.stringify(cancelled.body)).toBeLessThan(
+            300,
+          );
+          expect(cancelled.body.status).toBe('FILLED');
+        } finally {
+          await barrier.end();
+        }
+        expect(
+          (
+            await observer.query('select status from orders where id = $1', [
+              id,
+            ])
+          ).rows[0]?.status,
+        ).toBe('FILLED');
+        expect(
+          (
+            await observer.query(
+              'select count(*)::int as n from fills where order_id = $1',
+              [id],
+            )
+          ).rows[0]?.n,
+        ).toBe(1);
+        expect(await c.wallet()).toEqual({
+          total: '9931000',
+          available: '9931000',
+          reserved: '0',
+        });
+        await invariantsHold(c);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'a cancel that commits first makes the racing fill superseded; the engine drops the order',
+      async () => {
+        const { origin, bundle, runtime, logs } = await start();
+        const c = await clientFor(origin);
+        krBook(bundle);
+        await sleep(200);
+        const placed = await c.place({
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          type: 'LIMIT',
+          quantity: '1',
+          limitPrice: '69000',
+        });
+        expect(placed.status, JSON.stringify(placed.body)).toBe(201);
+        const id = String((placed.body as { id?: string }).id);
+        const barrier = new Client({ connectionString: databaseUrl });
+        await barrier.connect();
+        try {
+          // Hold the WALLET row: both the fill and the cancel queue behind it, and
+          // the cancel request is issued first so it is granted first.
+          await barrier.query('begin');
+          await barrier.query(
+            'select id from wallets where session_id = $1 and currency = $2 for update',
+            [c.client.id, 'KRW'],
+          );
+          const cancelling = c.cancel(id);
+          await sleep(300);
+          bundle.streamFor('KR').emitOrderBook({
+            market: 'KR',
+            symbol: '005930',
+            book: {
+              market: 'KR',
+              symbol: '005930',
+              currency: 'KRW',
+              asks: [{ price: '69000', volume: '10' }],
+              bids: [{ price: '68900', volume: '10' }],
+            },
+            sourceTimestamp: null,
+          });
+          await sleep(300);
+          await barrier.query('commit');
+          const cancelled = await cancelling;
+          expect(cancelled.status, JSON.stringify(cancelled.body)).toBeLessThan(
+            300,
+          );
+          expect(cancelled.body.status).toBe('CANCELLED');
+        } finally {
+          await barrier.end();
+        }
+        await vi.waitFor(
+          () => {
+            expect(logs.some((l) => l.event === 'engine.fill_superseded')).toBe(
+              true,
+            );
+          },
+          { timeout: 5_000 },
+        );
+        expect(
+          (
+            await observer.query('select status from orders where id = $1', [
+              id,
+            ])
+          ).rows[0]?.status,
+        ).toBe('CANCELLED');
+        expect(
+          (
+            await observer.query(
+              'select count(*)::int as n from fills where order_id = $1',
+              [id],
+            )
+          ).rows[0]?.n,
+        ).toBe(0);
+        expect(runtime.engineFor('KR').getOrder(id)?.status).toBe('CANCELLED');
+        expect(await c.wallet()).toEqual({
+          total: '10000000',
+          available: '10000000',
+          reserved: '0',
+        });
+        await invariantsHold(c);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  });
 });

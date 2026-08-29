@@ -2169,6 +2169,9 @@ const LOCK_PROBES: Readonly<Record<string, readonly LockProbe[]>> = {
   // and re-locks to pick up the new version — exactly the sequence a
   // cancellation walks (session, balance, order, reservation). The session is
   // held first because retiring a reservation pins it `for key share`.
+  'accounts.lockReservation': [
+    (tx, fixture) => tx.accounts.lockReservation(fixture.reservationId),
+  ],
   'accounts.releaseCash': [
     async (tx, fixture) => {
       await tx.sessions.lock(fixture.sessionId);
@@ -2353,6 +2356,7 @@ const EXPECTED_CLAIMS: Readonly<Record<string, readonly string[]>> = {
   'accounts.recordReservation#1': [],
   'accounts.findOrderReservations#0': [],
   'accounts.findOrderReservations#1': [],
+  'accounts.lockReservation#0': [],
   'accounts.releaseCash#0': [],
   'accounts.releasePosition#0': [],
   'orders.insertOcoGroup#0': [],

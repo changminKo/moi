@@ -4,7 +4,7 @@ import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 import type { ConditionalPaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
-import { settleFill } from './fill-settlement.js';
+import { lockBalances, settleFill } from './fill-settlement.js';
 import {
   allocateAccountSequence,
   runSessionTransaction,
@@ -49,6 +49,28 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
             'trigger rejected: stale leader fencing token',
           );
 
+        // Lock order shared with fills and cancellations: balance first, then
+        // the OCO group, then every leg in ascending id order; settleFill
+        // takes the reservation last.
+        await lockBalances(trx, order);
+        const peek = (
+          await sql<{ oco_group_id: string | null }>`
+            select oco_group_id::text from orders where id = ${order.id}::uuid
+          `.execute(trx)
+        ).rows[0];
+        if (peek === undefined)
+          throw new DomainError(
+            'INVALID_ORDER',
+            'triggered order was not found',
+          );
+        if (peek.oco_group_id !== null) {
+          await sql`
+            select id from oco_groups where id = ${peek.oco_group_id}::uuid for update
+          `.execute(trx);
+          await sql`
+            select id from orders where oco_group_id = ${peek.oco_group_id}::uuid order by id for update
+          `.execute(trx);
+        }
         const row = (
           await sql<{
             oco_group_id: string | null;

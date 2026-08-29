@@ -382,7 +382,23 @@ export class PaperEngine {
           : {}),
       };
       this.#orders.set(order.id, updated);
-      await this.#options.onFill?.(updated, match, pricing);
+      try {
+        await this.#options.onFill?.(updated, match, pricing);
+      } catch (error) {
+        if ((error as { code?: unknown })?.code === 'ORDER_TERMINAL') {
+          // A cancellation committed first: the ledger is the source of
+          // truth, so the order leaves the book without a fill.
+          this.#orders.set(order.id, {
+            ...order,
+            status: 'CANCELLED',
+            version: order.version + 1n,
+          });
+          continue;
+        }
+        // Nothing was committed; keep matching from the pre-fill state.
+        this.#orders.set(order.id, order);
+        throw error;
+      }
       await this.#options.onAudit?.({
         eventType: 'FILL_CREATED',
         orderId: order.id,

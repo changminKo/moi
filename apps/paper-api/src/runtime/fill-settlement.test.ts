@@ -116,4 +116,61 @@ describe('planSettlement', () => {
       ),
     ).toThrow(expect.objectContaining({ code: 'INVARIANT_VIOLATION' }));
   });
+
+  it('keeps exact money beyond 20 significant digits', () => {
+    const plan = planSettlement(
+      {
+        balances: {
+          total: '100000000000000000000.01',
+          available: '100000000000000000000.01',
+          reserved: '0',
+        },
+        reservationRemaining: '0',
+        consumed: '0.02',
+        terminal: false,
+      },
+      'INSUFFICIENT_AVAILABLE_CASH',
+    );
+    expect(plan.balances.total).toBe('99999999999999999999.99');
+    expect(plan.balances.available).toBe('99999999999999999999.99');
+  });
+
+  it('hands back reservation above the remaining exposure after a price-improved partial fill', () => {
+    // LIMIT BUY 10 @ 100 reserved 1000; 5 filled @ 90 cost 450; remaining
+    // exposure is 5 × 100 = 500, so 50 of the 550 left goes back.
+    const plan = planSettlement(
+      {
+        balances: { total: '5000', available: '4000', reserved: '1000' },
+        reservationRemaining: '1000',
+        consumed: '450',
+        terminal: false,
+        desiredRemaining: '500',
+      },
+      'INSUFFICIENT_AVAILABLE_CASH',
+    );
+    expect(plan).toEqual({
+      balances: { total: '4550', available: '4050', reserved: '500' },
+      reservationRemaining: '500',
+      released: false,
+    });
+  });
+
+  it('never grows the reservation when the remaining exposure exceeds what is left', () => {
+    const plan = planSettlement(
+      {
+        balances: { total: '5000', available: '4000', reserved: '1000' },
+        reservationRemaining: '1000',
+        consumed: '600',
+        terminal: false,
+        desiredRemaining: '900',
+      },
+      'INSUFFICIENT_AVAILABLE_CASH',
+    );
+    expect(plan.balances).toEqual({
+      total: '4400',
+      available: '4000',
+      reserved: '400',
+    });
+    expect(plan.reservationRemaining).toBe('400');
+  });
 });

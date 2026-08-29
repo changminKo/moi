@@ -7,11 +7,6 @@ import { buildApp } from '../app.js';
 import type { AppConfig } from '../config.js';
 import { createDatabase, type Database } from '../db/database.js';
 import { migrateToLatest } from '../db/migrate.js';
-import type {
-  LockedPosition,
-  LockedWallet,
-} from '../db/repositories/account-repository.js';
-import type { LockedOrder } from '../db/repositories/order-repository.js';
 import { type TradingTransaction, UnitOfWork } from '../db/unit-of-work.js';
 import { PaperEngine } from '../engine/paper-engine.js';
 import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
@@ -62,6 +57,7 @@ import { leaseAuditPort } from './lease-audit.js';
 import { LeaseRegistry } from './lease-registry.js';
 import { verifyLedgerInvariants } from './ledger-invariants.js';
 import { MarketRuntime } from './market-runtime.js';
+import { createOrderCancellation } from './order-cancellation.js';
 import { createOutboxEventSource } from './outbox-event-source.js';
 import type { FakeProviderBundle, ProviderBundle } from './provider-bundle.js';
 import { ReconnectSupervisor } from './reconnect-supervisor.js';
@@ -80,12 +76,6 @@ const MARKETS: readonly Market[] = ['KR', 'US'];
  * interval before re-acquiring, so a successor already polling (§6.5, §10.2-10)
  * wins the bundle instead of the loser flapping back into leadership.
  */
-const TERMINAL_ORDER_STATUSES = new Set([
-  'FILLED',
-  'CANCELLED',
-  'EXPIRED',
-  'REJECTED',
-]);
 const REELECTION_YIELD_MS = 1_000;
 const MARKET_DENIED: readonly Capability[] = [
   'PLACE',
@@ -200,6 +190,7 @@ export class ProductionRuntime {
   readonly #processSupervisor: ReconnectSupervisor;
   readonly #engines = new Map<Market, PaperEngine>();
   #feeVersionIds: ReadonlyMap<Market, string> = new Map();
+  readonly #cancellation: ReturnType<typeof createOrderCancellation>;
   readonly #stores = new Map<Market, MarketStateStore>();
   #resolveListening: () => void = () => undefined;
   #app: FastifyInstance | undefined;
@@ -226,6 +217,11 @@ export class ProductionRuntime {
           setTimeout(resolve, Math.min(10 * 2 ** (attempt - 1), 100)),
         );
       },
+    });
+    this.#cancellation = createOrderCancellation({
+      uow: this.#uow,
+      engines: () => this.#engines.values(),
+      log: (event, fields) => this.#log(event, fields),
     });
     this.#incidents = new IncidentService({
       repository: createDbIncidentRepository(this.#db, {
@@ -676,6 +672,8 @@ export class ProductionRuntime {
       db: this.#db,
       log: this.#log,
       feeModelVersionId,
+      estimateFee: (price, quantity) =>
+        feeModel.calculate({ market, side: 'BUY', price, quantity }),
       onTransaction: (work) => this.#uow.track(work),
     });
     const persistTrigger = createTriggerPersistence({
@@ -1074,134 +1072,11 @@ export class ProductionRuntime {
         'ORDER_STATE_CONFLICT',
         'only cancellation is available through this command path',
       );
-    const orderId = command.orderId;
-    return await this.#uow.run(async (tx) => {
-      // Read what the cancellation must release before taking any lock, then
-      // walk LEDGER_LOCK_ORDER: session → wallet/position → order → reservation.
-      // Cancelling one OCO leg cancels the bracket: both legs, the group,
-      // and the shared reservation go together (one-cancels-other).
-      const oco = await tx.orders.findOcoLegs(orderId);
-      const reservations = await tx.accounts.findOrderReservations({
-        sessionId: command.sessionId,
-        orderId,
-        wholeGroup: oco !== undefined,
-      });
-      const session = await tx.sessions.lock(command.sessionId);
-      if (session === undefined || session.status !== 'ACTIVE')
-        throw new DomainError(
-          'ACCOUNT_READ_ONLY',
-          'the session cannot accept cancellation',
-        );
-      const wallets = new Map<string, LockedWallet>();
-      const positions = new Map<string, LockedPosition>();
-      for (const reservation of reservations) {
-        if (reservation.kind === 'CASH' && reservation.currency !== null) {
-          const wallet = await tx.accounts.lockWallet({
-            sessionId: command.sessionId,
-            currency: reservation.currency,
-          });
-          if (wallet !== undefined) wallets.set(reservation.id, wallet);
-        } else if (
-          reservation.marketCode !== null &&
-          reservation.symbol !== null
-        ) {
-          const position = await tx.accounts.lockPosition({
-            sessionId: command.sessionId,
-            marketCode: reservation.marketCode,
-            symbol: reservation.symbol,
-          });
-          if (position !== undefined) positions.set(reservation.id, position);
-        }
-      }
-      const group =
-        oco === undefined
-          ? undefined
-          : await tx.orders.lockOcoGroup(oco.groupId);
-      const legs = new Map<string, LockedOrder>();
-      for (const legId of oco?.legIds ?? [orderId]) {
-        const leg = await tx.orders.lock(legId);
-        if (leg !== undefined) legs.set(legId, leg);
-      }
-      const order = legs.get(orderId);
-      if (order === undefined || order.sessionId !== command.sessionId)
-        throw new DomainError('INVALID_ORDER', 'order was not found');
-      if (TERMINAL_ORDER_STATUSES.has(order.status))
-        return { id: order.id, status: order.status };
-      const cancelled: LockedOrder[] = [];
-      for (const leg of legs.values()) {
-        if (TERMINAL_ORDER_STATUSES.has(leg.status)) continue;
-        for (const engine of this.#engines.values())
-          await engine.cancelOrder(leg.id);
-        await tx.orders.update({
-          id: leg.id,
-          expectedVersion: leg.version,
-          status: 'CANCELLED',
-          ...(leg.filledQuantity === undefined
-            ? {}
-            : { filledQuantity: leg.filledQuantity }),
-          ...(oco === undefined ? {} : { ocoGroupId: oco.groupId }),
-        });
-        cancelled.push(leg);
-      }
-      if (group !== undefined && group.status === 'ACTIVE')
-        await tx.orders.resolveOcoGroup({
-          id: group.id,
-          expectedVersion: group.version,
-          resolvedAt: new Date(),
-        });
-      for (const reservation of reservations) {
-        const wallet = wallets.get(reservation.id);
-        const position = positions.get(reservation.id);
-        if (wallet !== undefined)
-          await tx.accounts.releaseCash({
-            wallet,
-            amount: reservation.amount,
-            reservationId: reservation.id,
-          });
-        else if (position !== undefined)
-          await tx.accounts.releasePosition({
-            position,
-            quantity: reservation.amount,
-            reservationId: reservation.id,
-          });
-        else
-          throw new DomainError(
-            'INVARIANT_VIOLATION',
-            `reservation ${reservation.id} has no balance to release into`,
-          );
-      }
-      for (const leg of cancelled) {
-        const payload =
-          oco === undefined
-            ? { orderId: leg.id }
-            : {
-                orderId: leg.id,
-                ocoGroupId: oco.groupId,
-                reason: leg.id === orderId ? 'USER' : 'OCO_SIBLING_CANCELLED',
-              };
-        await tx.audit.append({
-          id: randomUUID(),
-          eventType: 'ORDER_CANCELLED',
-          payload,
-          occurredAt: new Date(),
-          sessionReference: command.sessionId,
-          orderId: leg.id,
-        });
-        const sequence = await tx.sequences.allocate({
-          sessionId: command.sessionId,
-          mutationKind: 'ORDER_CANCELLED',
-        });
-        await tx.outbox.append({
-          id: randomUUID(),
-          eventId: randomUUID(),
-          sessionId: command.sessionId,
-          streamSequence: sequence,
-          eventType: 'ORDER_CANCELLED',
-          payload,
-        });
-      }
-      return { id: order.id, status: 'CANCELLED' };
+    const { id, status } = await this.#cancellation({
+      sessionId: command.sessionId,
+      orderId: command.orderId,
     });
+    return { id, status };
   }
 
   /**

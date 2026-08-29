@@ -79,6 +79,13 @@ export interface OpenReservation {
   readonly symbol: string | null;
 }
 
+export interface LockedReservation {
+  readonly id: string;
+  readonly kind: 'CASH' | 'POSITION';
+  readonly amount: DecimalString;
+  readonly released: boolean;
+}
+
 export interface ReleaseCashInput {
   readonly wallet: LockedWallet;
   readonly amount: DecimalString;
@@ -106,6 +113,14 @@ export interface AccountRepository {
   findOrderReservations(
     key: OrderReservationsKey,
   ): Promise<readonly OpenReservation[]>;
+  /**
+   * Locks one reservation row `for update` and returns its current amount, so
+   * a cancellation releases what the reservation holds NOW — not what an
+   * earlier unlocked read saw before a partial fill shrank it.
+   */
+  lockReservation(
+    reservationId: string,
+  ): Promise<LockedReservation | undefined>;
   /** Hands reserved cash back to `available` and retires the reservation row. */
   releaseCash(input: ReleaseCashInput): Promise<WalletSnapshot>;
   /** Hands reserved quantity back to `available` and retires the reservation row. */
@@ -559,6 +574,29 @@ export async function releasePosition(
   return released;
 }
 
+export async function lockReservation(
+  connection: LedgerConnection,
+  reservationId: string,
+): Promise<LockedReservation | undefined> {
+  const request = snapshotInput({ reservationId });
+  connection.acquireLock({
+    table: 'reservations',
+    key: request.reservationId,
+    strength: 'UPDATE',
+  });
+  const result = await sql<{
+    id: string;
+    kind: 'CASH' | 'POSITION';
+    amount: string;
+    released: boolean;
+  }>`
+    select id::text, kind, amount::text, released from reservations
+    where id = ${request.reservationId}::uuid for update
+  `.execute(connection.executor);
+  const row = result.rows[0];
+  return row === undefined ? undefined : { ...row };
+}
+
 export function createAccountRepository(
   connection: LedgerConnection,
 ): AccountRepository {
@@ -573,6 +611,8 @@ export function createAccountRepository(
       recordReservation(connection, input),
     findOrderReservations: (key: OrderReservationsKey) =>
       findOrderReservations(connection, key),
+    lockReservation: (reservationId: string) =>
+      lockReservation(connection, reservationId),
     releaseCash: (input: ReleaseCashInput) => releaseCash(connection, input),
     releasePosition: (input: ReleasePositionInput) =>
       releasePosition(connection, input),

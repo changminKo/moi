@@ -5,7 +5,7 @@ import type { Database } from '../db/database.js';
 import type { OrderMatch } from '../engine/match-orders.js';
 import type { PaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
-import { settleFill } from './fill-settlement.js';
+import { lockBalances, settleFill } from './fill-settlement.js';
 import {
   allocateAccountSequence,
   runSessionTransaction,
@@ -13,16 +13,43 @@ import {
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
 
+const TERMINAL_STATUSES = ['FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'];
+
 /**
- * Persists an engine fill in one transaction: order status, fills, position,
- * audit, and the user-stream outbox row. The transaction refuses to commit
- * when the lease fencing token no longer matches `leader_epochs` (§7.1).
+ * Raised when the ledger already holds the order in a terminal state (a
+ * cancellation committed first). The engine treats it as "drop this order",
+ * not as a failure.
+ */
+export class OrderTerminalError extends Error {
+  readonly code = 'ORDER_TERMINAL' as const;
+  constructor(
+    readonly orderId: string,
+    readonly status: string,
+  ) {
+    super(`order ${orderId} is already ${status}`);
+  }
+}
+
+export const isOrderTerminalError = (
+  error: unknown,
+): error is OrderTerminalError =>
+  (error as { code?: unknown })?.code === 'ORDER_TERMINAL';
+
+/**
+ * Persists an engine fill in one transaction — order status, fills, ledger
+ * settlement, audit, and the user-stream outbox row — taking ledger locks in
+ * LEDGER_LOCK_ORDER (session → balance → order → reservation) so it can never
+ * deadlock with a cancellation. The transaction refuses to commit when the
+ * lease fencing token no longer matches `leader_epochs` (§7.1) or when the
+ * order is already terminal.
  */
 export function createFillPersistence(deps: {
   readonly db: Database;
   readonly log: LogFn;
   /** Published `fee_model_versions.id` the fill's fee was computed under. */
   readonly feeModelVersionId?: () => string | undefined;
+  /** Fee the remaining quantity would cost; sizes the kept reservation. */
+  readonly estimateFee?: (price: string, quantity: string) => string;
   readonly onTransaction?: <T>(work: () => Promise<T>) => Promise<T>;
 }) {
   const wrap = deps.onTransaction ?? ((work) => work());
@@ -33,6 +60,16 @@ export function createFillPersistence(deps: {
   ): Promise<void> {
     await wrap(() =>
       runSessionTransaction(deps.db, order.sessionId, async (trx) => {
+        await lockBalances(trx, order);
+        const row = (
+          await sql<{ status: string; oco_group_id: string | null }>`
+            select status, oco_group_id::text from orders where id = ${order.id}::uuid for update
+          `.execute(trx)
+        ).rows[0];
+        if (row === undefined)
+          throw new DomainError('INVALID_ORDER', 'filled order was not found');
+        if (TERMINAL_STATUSES.includes(row.status))
+          throw new OrderTerminalError(order.id, row.status);
         const fence = await sql<{ fencing_token: string }>`
           select fencing_token::text from leader_epochs where market_code = ${order.market as Market}
         `.execute(trx);
@@ -74,10 +111,18 @@ export function createFillPersistence(deps: {
             market: order.market as Market,
             symbol: order.symbol,
             side: order.side,
+            ocoGroupId: row.oco_group_id,
+            type: order.type,
+            limitPrice: order.limitPrice ?? null,
+            quantity: order.quantity,
+            filledQuantityAfter: match.filledQuantity,
           },
           fills: match.execution.fills,
           terminal:
             match.nextStatus === 'FILLED' || match.nextStatus === 'CANCELLED',
+          ...(deps.estimateFee === undefined
+            ? {}
+            : { estimateFee: deps.estimateFee }),
         });
         const sequence = await allocateAccountSequence(
           trx,
@@ -101,10 +146,15 @@ export function createFillPersistence(deps: {
         `.execute(trx);
       }),
     ).catch((error: unknown) => {
-      deps.log('engine.fill_rejected', {
-        orderId: order.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      deps.log(
+        isOrderTerminalError(error)
+          ? 'engine.fill_superseded'
+          : 'engine.fill_rejected',
+        {
+          orderId: order.id,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
       throw error;
     });
   };

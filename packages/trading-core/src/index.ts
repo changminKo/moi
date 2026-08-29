@@ -1,7 +1,9 @@
 export {
+  assertExactMoney,
   assertPositiveWholeQuantity,
   canonicalDecimal,
   decimal,
+  moneyDecimal,
 } from './decimal.js';
 export {
   DomainError,
