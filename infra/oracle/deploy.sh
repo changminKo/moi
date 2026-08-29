@@ -48,6 +48,10 @@ withsecrets 'printf %s "$GHCR_TOKEN" | docker login ghcr.io -u changminko --pass
 withsecrets "${COMPOSE[*]} pull --quiet"
 
 echo "== migrations (new image, old release still serving)"
+# First deploy: no release is running yet, so the datastore the job connects to
+# must be started here. --no-recreate leaves an already running postgres/redis
+# untouched; --wait blocks until their healthchecks pass.
+withsecrets "${COMPOSE[*]} up -d --no-recreate --wait postgres redis"
 withsecrets "${COMPOSE[*]} run --rm --no-deps -T paper-api node apps/paper-api/dist/migrate-cli.js"
 
 echo "== stop-then-start"
