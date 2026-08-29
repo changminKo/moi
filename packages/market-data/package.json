@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@moi/trading-core": "workspace:*",
-    "ws": "8.18.1",
+    "ws": "8.21.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
