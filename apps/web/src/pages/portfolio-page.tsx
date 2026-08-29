@@ -2,6 +2,8 @@ import { FillHistory } from '../features/orders/fill-history';
 import { OpenOrders } from '../features/orders/open-orders';
 import { PositionsTable } from '../features/portfolio/positions-table';
 import { usePortfolioStream } from '../features/portfolio/use-portfolio-stream';
+import './portfolio-page.css';
+
 export function PortfolioPage() {
   const { snapshot, isLoading } = usePortfolioStream();
   if (isLoading) return <section aria-busy="true">Loading portfolio…</section>;

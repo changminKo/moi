@@ -4,6 +4,7 @@ import { apiClient as defaultApiClient } from '../../lib/api-client';
 import { presentationForReason } from '../system/system-status-provider';
 import { type OrderDraft, type Side, validateOrderDraft } from './order-form';
 import { useOrderMutations } from './use-order-mutations';
+import './order-ticket.css';
 
 export function OrderTicket({
   market = 'US',
@@ -59,34 +60,38 @@ export function OrderTicket({
   };
   return (
     <form
-      className="panel order-ticket"
+      className={`panel order-ticket ${side === 'SELL' ? 'is-sell' : 'is-buy'}`}
       onSubmit={submit}
       aria-labelledby="order-ticket-title"
     >
       <h2 id="order-ticket-title">Order ticket</h2>
-      <fieldset>
+      <fieldset className="side-toggle">
         <legend>Side</legend>
-        <label>
-          <input
-            type="radio"
-            name="side"
-            checked={side === 'BUY'}
-            onChange={() => setSide('BUY')}
-          />{' '}
-          Buy
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="side"
-            checked={side === 'SELL'}
-            onChange={() => setSide('SELL')}
-          />{' '}
-          Sell
-        </label>
+        <div className="side-toggle-options">
+          <label className="is-buy">
+            <input
+              className="side-toggle-radio"
+              type="radio"
+              name="side"
+              checked={side === 'BUY'}
+              onChange={() => setSide('BUY')}
+            />{' '}
+            Buy
+          </label>
+          <label className="is-sell">
+            <input
+              className="side-toggle-radio"
+              type="radio"
+              name="side"
+              checked={side === 'SELL'}
+              onChange={() => setSide('SELL')}
+            />{' '}
+            Sell
+          </label>
+        </div>
       </fieldset>
       <fieldset>
-        <legend>Order type</legend>
+        <legend className="sr-only">Order type</legend>
         <label htmlFor="order-kind">Type</label>
         <select
           id="order-kind"

@@ -2,6 +2,7 @@ import Decimal from 'decimal.js';
 import { useRef, useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
+import { formatDecimal } from '../../lib/format-number';
 import { presentationForReason } from '../system/system-status-provider';
 import { useOrderMutations } from './use-order-mutations';
 
@@ -63,10 +64,12 @@ export function OpenOrders({
                   {text(order, 'symbol')} {status}
                 </span>
                 <span>
-                  Filled {filled} / Remaining{' '}
-                  {quantity && filled !== quantity
-                    ? new Decimal(quantity).sub(filled).toString()
-                    : '0'}
+                  Filled {formatDecimal(filled)} / Remaining{' '}
+                  {formatDecimal(
+                    quantity && filled !== quantity
+                      ? new Decimal(quantity).sub(filled).toString()
+                      : '0',
+                  )}
                 </span>
                 {siblings?.length ? (
                   <span> OCO sibling: {siblings.join(', ')}</span>

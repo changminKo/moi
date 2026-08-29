@@ -5,6 +5,8 @@ import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
 import { newIdempotencyKey } from '../../lib/idempotency';
 import { presentationForReason } from '../system/system-status-provider';
+import './wallet.css';
+
 export function FxTicket({
   apiClient = defaultApiClient,
   invalidateQueries = () => undefined,
@@ -58,7 +60,7 @@ export function FxTicket({
     }
   };
   return (
-    <section className="panel" aria-labelledby="fx-title">
+    <section className="panel fx-ticket" aria-labelledby="fx-title">
       <h2 id="fx-title">Virtual FX</h2>
       <label htmlFor="fx-amount">Amount</label>
       <input
@@ -77,7 +79,7 @@ export function FxTicket({
       ))}
       {error && <p role="alert">{error}</p>}
       {quote && (
-        <div aria-live="polite">
+        <div aria-live="polite" className="fx-quote">
           <p>Rate: {quote.rate}</p>
           <p>Fee: {quote.fee}</p>
           <p>Source: {quote.sourceAmount}</p>

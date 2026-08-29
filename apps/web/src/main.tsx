@@ -5,8 +5,10 @@ import { BrowserRouter } from 'react-router-dom';
 import { App } from './app';
 import { SessionProvider } from './features/session/session-provider';
 import { queryClient } from './lib/query-client';
-import './styles/globals.css';
 import './styles/tokens.css';
+import './styles/fonts.css';
+import './styles/base.css';
+import './styles/shell.css';
 
 const root = document.getElementById('root');
 

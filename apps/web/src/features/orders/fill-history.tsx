@@ -1,3 +1,5 @@
+import { formatDecimal } from '../../lib/format-number';
+
 export type Fill = Readonly<Record<string, unknown>>;
 export function FillHistory({ fills = [] }: { fills?: readonly Fill[] }) {
   return (
@@ -9,10 +11,11 @@ export function FillHistory({ fills = [] }: { fills?: readonly Fill[] }) {
         <ul>
           {fills.map((fill, index) => (
             <li key={String(fill.id ?? index)}>
-              {String(fill.symbol ?? '')} {String(fill.quantity ?? '')} @{' '}
-              {String(fill.price ?? '')}
+              {String(fill.symbol ?? '')}{' '}
+              {formatDecimal(String(fill.quantity ?? ''))} @{' '}
+              {formatDecimal(String(fill.price ?? ''))}
               {typeof fill.fee === 'string' && fill.fee !== '0' && (
-                <span> · fee {fill.fee}</span>
+                <span> · fee {formatDecimal(fill.fee)}</span>
               )}
               {fill.recoveryFill === true && <span> Recovery fill</span>}
             </li>
