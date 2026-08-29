@@ -90,6 +90,11 @@ points to; when they disagree, the spec wins and the plan/this file is fixed.
   example Codex deep reviews split by ledger vs runtime), findings ranked
   BLOCKER/HIGH/MEDIUM/LOW with file:line, each finding either fixed with a
   test or recorded as an explicit exception.
+- Dependencies: Dependabot opens weekly PRs (npm dev-tooling grouped, GitHub
+  Actions separately). Merge only when the protected-branch checks are green;
+  `@types/node` stays on the Node 24 major (`.nvmrc`); a runtime dependency
+  bump (`ws`, `pg`, `kysely`, `fastify`) needs the drill to pass 3× like any
+  other change, and `@dependabot rebase` after `main` moves.
 - Preserve other people's untracked work (`.cursor/`, `.omc/`, `.codegraph/`,
   `.superpowers/`) and never rewrite history that has been pushed.
 
