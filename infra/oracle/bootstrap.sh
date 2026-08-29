@@ -50,7 +50,9 @@ fi
 echo "== firewall: allow 80/443 (Oracle images drop them by default)"
 for port in 80 443; do
   if ! sudo iptables -C INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null; then
-    sudo iptables -I INPUT 5 -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    # Insert at the top: Oracle images end the chain with REJECT, and any
+    # assumed position could land behind it.
+    sudo iptables -I INPUT 1 -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
   fi
 done
 sudo netfilter-persistent save >/dev/null
