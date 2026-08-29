@@ -127,6 +127,10 @@ PostgreSQL, and Redis. Its `finally` path cancelled all test orders and restored
   a separate trust boundary.
 - [x] The clean-room and release suites use deterministic fakes and disposable
   Testcontainers; no test or CI job contacts Toss or a real broker.
+- [ ] Alerting channel proven: `notify.sh info test` from the host received in
+  Discord; one CI failure embed and one `main` success embed observed from
+  `.github/workflows/notify.yml`; a `Moi status` line and a `deploy finished`
+  embed observed after a deploy (`docs/runbooks/alerting.md`).
 
 ## Clean-room gate
 

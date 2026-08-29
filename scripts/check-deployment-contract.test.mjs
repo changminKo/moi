@@ -113,4 +113,23 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it('fails when an alerting script carries a literal Discord webhook URL', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/notify.sh');
+      writeFileSync(
+        file,
+        `${readFileSync(file, 'utf8')}\n# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456789/abcDEF_ghi-jkl\n`,
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /infra\/oracle\/notify\.sh appears to contain a literal secret/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

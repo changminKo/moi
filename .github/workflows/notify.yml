@@ -1,0 +1,65 @@
+name: Notify
+
+# Discord digest of the CI and image-publish workflows. Failures are always
+# announced; successes only for main, so pull-request noise stays out of the
+# channel. Without the DISCORD_WEBHOOK secret the job exits quietly.
+on:
+  workflow_run:
+    workflows: ["CI", "Publish images"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  discord:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event.workflow_run.conclusion != 'success'
+      || github.event.workflow_run.head_branch == 'main'
+    env:
+      WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      WORKFLOW: ${{ github.event.workflow_run.name }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      ACTOR: ${{ github.event.workflow_run.actor.login }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Post embed
+        if: ${{ env.WEBHOOK != '' }}
+        # Every field goes through jq --arg, so branch names or titles cannot
+        # break out of the JSON.
+        run: |
+          set -euo pipefail
+          case "$CONCLUSION" in
+            success) color=3066993 ;;
+            failure|timed_out|startup_failure) color=15026253 ;;
+            *) color=9807270 ;;
+          esac
+          payload="$(jq -cn \
+            --arg title "$WORKFLOW: $CONCLUSION" \
+            --arg repo "$REPO" \
+            --arg branch "$BRANCH" \
+            --arg sha "${SHA:0:7}" \
+            --arg actor "$ACTOR" \
+            --arg url "$RUN_URL" \
+            --argjson color "$color" \
+            '{embeds: [{title: $title, url: $url, color: $color, fields: [
+               {name: "repo", value: $repo, inline: true},
+               {name: "branch", value: $branch, inline: true},
+               {name: "commit", value: $sha, inline: true},
+               {name: "by", value: $actor, inline: true}
+             ]}]}')"
+          curl -fsS --max-time 15 -o /dev/null \
+            -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
+      - name: Report a failed notification
+        # The workflow is not in its own `workflows:` list (that would loop);
+        # a broken embed step announces itself with a plain message instead.
+        if: ${{ failure() && env.WEBHOOK != '' }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg content "Notify workflow failed for $WORKFLOW ($BRANCH): $RUN_URL" '{content: $content}')"
+          curl -fsS --max-time 15 -o /dev/null \
+            -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"

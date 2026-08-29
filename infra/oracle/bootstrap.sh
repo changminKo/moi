@@ -8,9 +8,10 @@
 # installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
 # firewall (Oracle images ship iptables rules that drop everything else),
 # clones the repository to /opt/moi, prepares /etc/moi (age key, encrypted
-# secrets, moi.env) and installs the systemd unit. It never asks for or writes
-# a secret: you place /etc/moi/secrets.enc.env yourself (see the deployment
-# guide) and only then `systemctl start moi`.
+# secrets, moi.env) and installs the systemd units (stack, status timer,
+# failure alert). It never asks for or writes a secret: you place
+# /etc/moi/secrets.enc.env yourself (see the deployment guide) and only then
+# `systemctl start moi`.
 set -euo pipefail
 
 REPO="${MOI_REPO:-https://github.com/changminKo/moi.git}"
@@ -20,7 +21,7 @@ SOPS_VERSION="${SOPS_VERSION:-3.13.3}"
 arch="$(dpkg --print-architecture)" # arm64 | amd64
 echo "== packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq ca-certificates curl git gnupg age netfilter-persistent iptables-persistent
+sudo apt-get install -y -qq ca-certificates curl git gnupg jq age netfilter-persistent iptables-persistent
 
 echo "== docker (official repository)"
 if ! command -v docker >/dev/null; then
@@ -102,9 +103,13 @@ API_DOMAIN=api.example.com
 ENV
   sudo chmod 0600 /etc/moi/moi.env
 fi
-sudo install -m 0644 /opt/moi/infra/oracle/moi.service /etc/systemd/system/moi.service
+sudo install -m 0644 /opt/moi/infra/oracle/*.service /opt/moi/infra/oracle/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable moi >/dev/null
+# Status timer (Discord on change): enabled here, started by the first
+# deploy.sh once a release is serving — a no-op until DISCORD_WEBHOOK_URL is in
+# the sops file.
+sudo systemctl enable moi-status.timer >/dev/null
 
 echo
 echo "Host age public key (encrypt /etc/moi/secrets.enc.env for it):"

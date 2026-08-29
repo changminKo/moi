@@ -5,6 +5,10 @@ Description=Moi paper-trading stack (docker compose)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
+# A failed start/stop is announced on Discord (infra/oracle/moi-alert@.service).
+# Only start/stop failures of this oneshot unit fire it; a container that dies
+# later is caught by moi-status.timer.
+OnFailure=moi-alert@%n.service
 
 [Service]
 Type=oneshot

@@ -317,6 +317,60 @@ requires, and the artefacts are the same ones the local smoke uses.
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
 
+## Alerting (Discord)
+
+One Discord channel webhook carries CI results, deploys and host status. The
+webhook URL is a secret: it goes into the GitHub repository secrets and the
+host's sops file — never into the repository, chat, or a shell history line
+that echoes it.
+
+1. **Channel webhook.** Discord → channel → *Edit channel* → *Integrations* →
+   *Webhooks* → *New webhook* → *Copy URL*.
+2. **GitHub Actions** (`.github/workflows/notify.yml`): in a terminal,
+   `gh secret set DISCORD_WEBHOOK` and paste the URL at the prompt. The
+   workflow posts every `CI` / `Publish images` failure and every success on
+   `main`; with the secret absent it exits without posting.
+3. **Host** (`infra/oracle/notify.sh`): add `DISCORD_WEBHOOK_URL` to the
+   production sops file on the workstation
+   (`sops set … '["DISCORD_WEBHOOK_URL"]' '"<url>"'`), copy it to
+   `/etc/moi/secrets.enc.env` as in step 5 above, then `deploy.sh` (or
+   `systemctl restart moi-status.timer`). Three producers use it:
+   - `moi-status.timer` → `status-check.sh` every 5 minutes: readiness,
+     runtime, KR/US states, placement, memory, swap, disk → one status line,
+     posted when it differs from the last **delivered** line (`FAIL` / `WARN` /
+     `recovered`); the state file is written only after a successful post, so
+     a transition that hits a Discord outage is retried on the next tick. A
+     `heartbeat` embed goes out when nothing has been delivered for 24 hours
+     (`MOI_STATUS_HEARTBEAT_HOURS`), so silence is never mistaken for health.
+     This is the only producer that sees a container dying after start-up
+     (compose `restart: unless-stopped` restarts it; a restart loop shows up as
+     readiness/market flapping in the status line). The check is skipped while
+     `deploy.sh` holds `/run/moi-deploy.lock`.
+   - `OnFailure=moi-alert@%n.service` on `moi.service` and
+     `moi-status.service`: fires **only** when systemd fails to start or stop
+     the oneshot unit (sops key, compose interpolation, Docker down) and posts
+     the unit's journal tail. `moi.service` is `RemainAfterExit=yes`, so a
+     container crash later does not fail the unit and does not fire this.
+   - `deploy.sh`: `deploy started`, `deploy finished: <sha>` (only after the
+     verification step observed readiness, both markets `NORMAL` and
+     placement enabled), or `deploy failed` with the step that broke —
+     including an interrupted deploy (SIGINT/SIGTERM/SIGHUP) and a run that
+     ended without reaching verification.
+   Without the variable every producer is a silent no-op. `notify.sh` is
+   fail-open by default (a rejected post is logged, exit 0) so a Discord outage
+   can never fail a deploy; only the status check runs it with `NOTIFY_STRICT=1`
+   to drive its retry. Titles and descriptions are masked before leaving the
+   host (credentials in URLs, `KEY|TOKEN|SECRET|PASSWORD=…` assignments,
+   webhook URLs) and capped at 1,500 characters. The deployment-contract
+   checker scans `notify.yml` and every `infra/oracle/*.{sh,service,timer}` for
+   a literal webhook URL.
+4. **Test**: `sudo SOPS_AGE_KEY_FILE=/etc/moi/age.key sops exec-env /etc/moi/secrets.enc.env '/opt/moi/infra/oracle/notify.sh info test'`.
+
+What each alert means and the first response: `docs/runbooks/alerting.md`.
+Host-down detection needs an external probe (the timer cannot report a dead
+host); a free external monitor pointed at `https://<domain>/health/ready`
+with its own Discord integration covers that gap.
+
 ## Local run
 
 The compose file is the production shape (`MARKET_DATA_ADAPTER=toss`, secrets

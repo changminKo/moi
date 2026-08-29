@@ -1,0 +1,16 @@
+# Periodic health line for the Oracle reference host; fired by moi-status.timer.
+# Installed by bootstrap.sh / deploy.sh to /etc/systemd/system/.
+[Unit]
+Description=Moi host + stack status check (Discord on change)
+After=moi.service
+# A crash of the check itself (not a bad status) is announced too.
+OnFailure=moi-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/moi
+EnvironmentFile=/etc/moi/moi.env
+Environment=SOPS_AGE_KEY_FILE=/etc/moi/age.key
+# Only DISCORD_WEBHOOK_URL is consumed from the decrypted environment; the
+# check itself talks to the public API edge and reads free/df.
+ExecStart=/usr/bin/sops exec-env /etc/moi/secrets.enc.env /opt/moi/infra/oracle/status-check.sh
