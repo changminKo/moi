@@ -1,0 +1,14 @@
+# TLS edge for the Moi compose stack. Certificates come from Let's Encrypt
+# automatically; both hosts must resolve to this machine's reserved public IP.
+{$WEB_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:8080
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	# WebSocket upgrades (/api/v1/stream) are proxied transparently.
+	reverse_proxy paper-api:3000 {
+		flush_interval -1
+	}
+}

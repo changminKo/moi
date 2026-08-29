@@ -1,0 +1,23 @@
+# systemd unit for the Moi compose stack on the Oracle reference host.
+# Installed by infra/oracle/bootstrap.sh to /etc/systemd/system/moi.service.
+[Unit]
+Description=Moi paper-trading stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/moi
+EnvironmentFile=/etc/moi/moi.env
+Environment=SOPS_AGE_KEY_FILE=/etc/moi/age.key
+# Secrets are decrypted into the environment of docker compose only; they are
+# never written to disk. `stop` respects the 45 s stop_grace_period so the
+# leader drains (CANCEL_ONLY -> outbox drain -> lease release) before exit.
+ExecStart=/usr/bin/sops exec-env /etc/moi/secrets.enc.env '/usr/bin/docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml up -d'
+ExecStop=/usr/bin/sops exec-env /etc/moi/secrets.enc.env '/usr/bin/docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml stop'
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
