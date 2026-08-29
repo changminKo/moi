@@ -283,8 +283,11 @@ requires, and the artefacts are the same ones the local smoke uses.
    `systemctl restart moi` (compose recreates containers stop-then-start, the
    45 s grace period lets the leader drain) → readiness and market-data health.
    Roll back by pinning `MOI_IMAGE_TAG=<commit sha>` in `/etc/moi/moi.env`.
-   The GHCR packages must be public (package settings → Change visibility) or
-   the host must `docker login ghcr.io` with a read-only token.
+   The GHCR packages are private: create a classic PAT with only
+   `read:packages`, store it as `GHCR_TOKEN` in the sops file, and `deploy.sh`
+   logs docker in with it before pulling. Every published image is scanned by
+   Trivy (fixable HIGH/CRITICAL fail the publish) and carries an SBOM and
+   provenance attestation; the `main` tag moves only after a clean scan.
 8. **Operate.** `sudo journalctl -u moi -f`, the runbooks in `docs/runbooks/`,
    and `pg_dump` through `docker compose exec postgres` for backups (see
    *Backup and restore*). Oracle may reclaim Always Free compute that stays

@@ -5,6 +5,10 @@ name: Publish images
 # (1 GB Micro or A1) pulls `ghcr.io/changminko/moi-{paper-api,web}:main`.
 # No secrets or provider settings are baked in — everything arrives through
 # the compose environment at run time.
+#
+# The images are pushed under the commit sha first, scanned with Trivy, and
+# only a clean scan (no HIGH/CRITICAL with a fix available) moves the `main`
+# tag. The packages stay private: hosts authenticate with a read-only token.
 
 on:
   push:
@@ -46,8 +50,22 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/changminko/moi-${{ matrix.name }}:main
-            ghcr.io/changminko/moi-${{ matrix.name }}:${{ github.sha }}
+          provenance: true
+          sbom: true
+          tags: ghcr.io/changminko/moi-${{ matrix.name }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ghcr.io/changminko/moi-${{ matrix.name }}:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote to main
+        run: docker buildx imagetools create -t ghcr.io/changminko/moi-${{ matrix.name }}:main ghcr.io/changminko/moi-${{ matrix.name }}:${{ github.sha }}
