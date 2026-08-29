@@ -2242,7 +2242,16 @@ describe('ProductionRuntime', () => {
         expect(
           (admin.body as { result?: { cancelled?: number; failed?: number } })
             .result,
-        ).toEqual({ cancelled: 3, failed: 0 });
+        ).toMatchObject({ cancelled: 3, failed: 0 });
+        // The sweep is bracketed by durable audit rows (issue #10).
+        const sweep = (
+          await observer.query(
+            "select event_type from audit_events where event_type like 'CANCEL_ALL_%' order by occurred_at",
+          )
+        ).rows.map((r) => r.event_type);
+        expect(sweep[0]).toBe('CANCEL_ALL_STARTED');
+        expect(sweep).toContain('CANCEL_ALL_PASS');
+        expect(sweep.at(-1)).toBe('CANCEL_ALL_COMPLETED');
         expect(
           (
             await observer.query(
