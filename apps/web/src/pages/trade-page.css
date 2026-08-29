@@ -1,0 +1,29 @@
+.trade-page {
+  display: grid;
+  gap: var(--space-5);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.trade-col {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .trade-page {
+    grid-template-columns: var(--col-side) minmax(0, 1fr) var(--col-ticket);
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  .trade-page {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trade-col-main {
+    grid-column: 1 / -1;
+    order: -1;
+  }
+}

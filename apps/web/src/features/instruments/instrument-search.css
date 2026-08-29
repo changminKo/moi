@@ -1,0 +1,76 @@
+.instrument-search label {
+  margin-top: 0;
+}
+
+.instrument-search input {
+  font-family: var(--font-body);
+  font-size: var(--type-body);
+}
+
+.instrument-list {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  max-height: 34rem;
+  overflow-y: auto;
+}
+
+.instrument-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.instrument-list li > button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "market name" "market symbol";
+  column-gap: var(--space-3);
+  align-items: center;
+  flex: 1;
+  min-height: 3.5rem;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  background: transparent;
+  border-radius: var(--radius-md);
+}
+
+.instrument-list li > button:hover {
+  background: var(--color-surface-raised);
+}
+
+.instrument-list li > button.is-selected {
+  background: var(--color-down-soft);
+}
+
+.instrument-market {
+  grid-area: market;
+  display: grid;
+  place-items: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  color: #a9c4ec;
+  background: #26364c;
+  border-radius: 50%;
+  font-size: var(--type-xs);
+}
+
+.instrument-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-body);
+}
+
+.instrument-symbol {
+  grid-area: symbol;
+  color: var(--color-muted);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+.instrument-list .status-badge {
+  color: var(--color-muted);
+  background: var(--color-surface-sunken);
+}

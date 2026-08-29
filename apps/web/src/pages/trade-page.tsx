@@ -13,6 +13,8 @@ import type { ApiClient } from '../lib/api-client';
 import { apiClient as defaultApiClient } from '../lib/api-client';
 import type { Instrument, Wallet } from '../lib/api-types';
 import { queryClient } from '../lib/query-client';
+import './trade-page.css';
+
 export function TradePage({
   apiClient = defaultApiClient,
 }: {
@@ -62,38 +64,45 @@ export function TradePage({
   return (
     <QueryClientProvider client={queryClient}>
       <div className="trade-page">
-        <InstrumentSearch
-          query={query}
-          onQuery={setQuery}
-          instruments={instruments}
-          onSelect={select}
-        />
-        {selected && !selected.tradable && (
-          <p role="alert">SYMBOL_NOT_TRADABLE</p>
-        )}
-        <QuotePanel quote={quote} />
-        {selected && (
-          <OrderTicket
-            market={selected.market}
-            symbol={selected.symbol}
+        <div className="trade-col trade-col-side">
+          <InstrumentSearch
+            query={query}
+            onQuery={setQuery}
+            instruments={instruments}
+            onSelect={select}
+            selected={selected}
+          />
+        </div>
+        <div className="trade-col trade-col-main">
+          {selected && !selected.tradable && (
+            <p role="alert">SYMBOL_NOT_TRADABLE</p>
+          )}
+          <QuotePanel quote={quote} />
+        </div>
+        <div className="trade-col trade-col-ticket">
+          {selected && (
+            <OrderTicket
+              market={selected.market}
+              symbol={selected.symbol}
+              apiClient={apiClient}
+              capability={{
+                canPlace: selected.tradable && availability.place.enabled,
+                reasonCodes: availability.place.reasons,
+              }}
+            />
+          )}
+          <WalletSummary wallets={wallets} />
+          <FxTicket
             apiClient={apiClient}
+            invalidateQueries={() => {
+              void apiClient.get('/api/v1/portfolio');
+            }}
             capability={{
-              canPlace: selected.tradable && availability.place.enabled,
-              reasonCodes: availability.place.reasons,
+              canFx: availability.fx.enabled,
+              reasonCodes: availability.fx.reasons,
             }}
           />
-        )}
-        <WalletSummary wallets={wallets} />
-        <FxTicket
-          apiClient={apiClient}
-          invalidateQueries={() => {
-            void apiClient.get('/api/v1/portfolio');
-          }}
-          capability={{
-            canFx: availability.fx.enabled,
-            reasonCodes: availability.fx.reasons,
-          }}
-        />
+        </div>
       </div>
     </QueryClientProvider>
   );
