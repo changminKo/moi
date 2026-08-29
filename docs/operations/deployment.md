@@ -223,6 +223,67 @@ cycles; readiness never turns green within `start_period`.
 | `postgres`, `redis` with volumes, no `ports` | managed PostgreSQL / Redis, private networking | managed add-ons on the private network |
 | `${VAR:?}` | `Secret` + `envFrom` | provider secret store |
 
+## Reference production host: Oracle Cloud Always Free
+
+The reference production deployment is one Oracle Cloud *Always Free* VM
+running the compose stack behind a Caddy TLS edge (`infra/oracle/`). It costs
+nothing, the VM's reserved public IP is the static egress address Toss
+requires, and the artefacts are the same ones the local smoke uses.
+
+1. **VM.** Region `ap-seoul-1` (or `ap-chuncheon-1`), shape `VM.Standard.A1.Flex`
+   (2 OCPU / 12 GB is plenty; the free allowance is 4 OCPU / 24 GB in total),
+   image Ubuntu 24.04 (aarch64), boot volume 50–100 GB. If A1 capacity is
+   unavailable retry later or use `VM.Standard.E2.1.Micro` (amd64, 1 GB —
+   tight but workable). Assign a **reserved** public IP so it survives
+   stop/start.
+2. **Network.** In the VCN security list allow ingress TCP 22 (your IP only),
+   80 and 443 from `0.0.0.0/0`. Nothing else: PostgreSQL and Redis stay on the
+   compose network. The OS firewall is opened by the bootstrap script.
+3. **DNS.** Point two A records at the reserved IP, e.g. `app.<domain>` and
+   `api.<domain>` (`WEB_DOMAIN` / `API_DOMAIN`). Caddy obtains certificates
+   from Let's Encrypt on first start.
+4. **Bootstrap** (once, as the default `ubuntu` user):
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/changminKo/moi/main/infra/oracle/bootstrap.sh | bash
+   ```
+
+   It installs Docker, sops and age, clones the repository to `/opt/moi`,
+   creates the host's own age identity at `/etc/moi/age.key`, writes a
+   placeholder `/etc/moi/moi.env`, installs `moi.service`, and prints the host
+   age **public** key. Log out and back in once for docker group membership.
+5. **Secrets.** On your workstation, encrypt the production secrets for the
+   host key (add the host's `age1…` as a second recipient so you can still
+   decrypt locally) and copy only the encrypted file:
+
+   ```bash
+   sops --encrypt --age <host age1…>,<your age1…> --input-type dotenv --output-type dotenv \
+     ~/.config/moi/secrets.prod.env > ~/.config/moi/secrets.prod.enc.env
+   scp ~/.config/moi/secrets.prod.enc.env ubuntu@<ip>:/tmp/ && \
+     ssh ubuntu@<ip> 'sudo install -m 0600 /tmp/secrets.prod.enc.env /etc/moi/secrets.enc.env && rm /tmp/secrets.prod.enc.env'
+   ```
+
+   `PUBLIC_ORIGIN=https://app.<domain>`, `PUBLIC_API_ORIGIN=https://api.<domain>`,
+   `DATABASE_URL=postgres://moi:<pw>@postgres:5432/moi`. Set `WEB_DOMAIN` /
+   `API_DOMAIN` in `/etc/moi/moi.env`.
+6. **Egress registration.** Register the reserved IP in the Toss developer
+   console and record it in `infra/provider-allowlist.yaml` with
+   `environment: production` in a commit. The production preflight refuses
+   `--skip-egress` / `--egress-ip`, so it can only pass from the host itself.
+7. **Deploy** (each release):
+
+   ```bash
+   /opt/moi/infra/oracle/deploy.sh main
+   ```
+
+   fetch → `preflight --environment production` → image build on the host →
+   `systemctl restart moi` (compose recreates containers stop-then-start, the
+   45 s grace period lets the leader drain) → readiness and market-data health.
+8. **Operate.** `sudo journalctl -u moi -f`, the runbooks in `docs/runbooks/`,
+   and `pg_dump` through `docker compose exec postgres` for backups (see
+   *Backup and restore*). Oracle may reclaim Always Free compute that stays
+   idle; a serving `paper-api` is never idle by that measure.
+
 ## Local run
 
 The compose file is the production shape (`MARKET_DATA_ADAPTER=toss`, secrets
