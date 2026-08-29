@@ -79,7 +79,7 @@ describe('validateEnvironment', () => {
 });
 
 describe('provider allow list', () => {
-  it('parses the committed file (empty until an address is registered)', () => {
+  it('parses the committed file into well-formed entries', () => {
     const text = spawnSync(
       'cat',
       [join(root, 'infra/provider-allowlist.yaml')],
@@ -87,7 +87,18 @@ describe('provider allow list', () => {
         encoding: 'utf8',
       },
     ).stdout;
-    assert.deepEqual(parseAllowlist(text), []);
+    const entries = parseAllowlist(text);
+    for (const entry of entries) {
+      assert.match(entry.address, /^(\d{1,3}\.){3}\d{1,3}$|:/);
+      assert.ok(entry.environment.length > 0);
+      assert.ok(!Number.isNaN(Date.parse(entry.registeredAt)));
+      assert.ok(entry.registeredBy.length > 0);
+    }
+    // Production is registered only once a static address exists.
+    assert.match(
+      checkEgress('203.0.113.1', entries, 'production') ?? '',
+      /no egress address is registered for production/,
+    );
   });
   it('accepts a registered address for its environment only', () => {
     const list = parseAllowlist(allowlistYaml);
