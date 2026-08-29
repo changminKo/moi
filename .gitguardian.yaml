@@ -1,0 +1,14 @@
+# ggshield / GitGuardian policy for this repository.
+#
+# The only tolerated "secret-looking" content is the public response example
+# pinned byte-for-byte from Toss Securities' official OpenAPI document
+# (provenance and SHA-256 recorded next to the contract). Everything else that
+# looks like a credential is a real finding: rotate first, then fix.
+version: 2
+secret:
+  ignored_paths:
+    - packages/market-data/contracts/toss/openapi.json
+  show_secrets: false
+  # Never ignore anything by matching the secret value itself; ignore by path
+  # (above) or by the fingerprint the dashboard assigns after triage.
+  ignore_known_secrets: true
