@@ -1,4 +1,5 @@
 import type { Wallet } from '../../lib/api-types';
+import './wallet.css';
 
 function displayAmount(currency: Wallet['currency'], value: string): string {
   const [whole, fraction] = value.split('.');
