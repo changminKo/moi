@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/changminKo/moi/main/infra/oracle/bootstrap.sh | bash
 #
-# Installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
+# Creates a 4 GB swapfile (the E2.1.Micro fallback host has 1 GB of RAM),
+# installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
 # firewall (Oracle images ship iptables rules that drop everything else),
 # clones the repository to /opt/moi, prepares /etc/moi (age key, encrypted
 # secrets, moi.env) and installs the systemd unit. It never asks for or writes
@@ -47,11 +48,18 @@ if ! command -v sops >/dev/null; then
   sudo dpkg -i /tmp/sops.deb && rm /tmp/sops.deb
 fi
 
-echo "== swap (2 GB): the Micro shape has 1 GB of RAM"
-if ! swapon --show | grep -q /swapfile; then
-  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
-  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+echo "== swap (4 GB): the E2.1.Micro fallback host has 1 GB of RAM"
+if ! sudo swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  sudo fallocate -l 4G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=none
+  sudo chmod 600 /swapfile
+  sudo mkswap -q /swapfile
+  sudo swapon /swapfile
 fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+# A 1 GB host must start swapping early, otherwise the OOM killer wins first.
+printf 'vm.swappiness=80\nvm.vfs_cache_pressure=50\n' | sudo tee /etc/sysctl.d/99-moi-swap.conf >/dev/null
+sudo sysctl -q --system
+free -h
 
 echo "== firewall: allow 80/443 (Oracle images drop them by default)"
 for port in 80 443; do
