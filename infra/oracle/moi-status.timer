@@ -1,11 +1,12 @@
 # Runs moi-status.service every 5 minutes (first run 2 minutes after boot).
+# Monotonic timer: no Persistent= — a missed tick is simply the next tick.
+# Enabled by bootstrap.sh / deploy.sh; started by deploy.sh once a release is up.
 [Unit]
 Description=Moi status check every 5 minutes
 
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
-Persistent=true
 Unit=moi-status.service
 
 [Install]

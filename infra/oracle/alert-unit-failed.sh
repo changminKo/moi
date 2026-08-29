@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # OnFailure= handler: announce a failed systemd unit with its journal tail.
-#   alert-unit-failed.sh <unit>
-# Runs under `sops exec-env` (moi-alert.service) so DISCORD_WEBHOOK_URL is set.
+#   alert-unit-failed.sh <unit>        (default: moi)
+# Runs under `sops exec-env` (moi-alert.service, moi-status-alert.service) so
+# DISCORD_WEBHOOK_URL is set. notify.sh masks credentials in the tail.
 set -uo pipefail
 unit="${1:-moi}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

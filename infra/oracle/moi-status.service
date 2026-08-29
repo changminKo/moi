@@ -3,6 +3,8 @@
 [Unit]
 Description=Moi host + stack status check (Discord on change)
 After=moi.service
+# A crash of the check itself (not a bad status) is announced too.
+OnFailure=moi-alert@%n.service
 
 [Service]
 Type=oneshot

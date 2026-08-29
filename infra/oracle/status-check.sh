@@ -6,21 +6,34 @@
 #   <ok|warn|fail> ready=<code> runtime=<state> KR=<state> US=<state> \
 #     placement=<bool> mem_avail=<pct>% swap_used=<pct>% disk_used=<pct>%
 #
-# and posted to Discord through notify.sh only when it differs from the last
-# recorded line, so a steady state (good or bad) is announced once.
+# and posted to Discord through notify.sh when it differs from the last
+# *delivered* line, so a steady state (good or bad) is announced once. The
+# state file is written only after a successful post: a transition that hits a
+# Discord outage is retried on the next tick instead of being lost. A
+# heartbeat (`ok`) is posted when nothing has been delivered for
+# MOI_STATUS_HEARTBEAT_HOURS (default 24), so silence never means "healthy".
 #
 # Levels: fail when readiness is not 200, the runtime is not SERVING, a market
 # is not NORMAL or placement is disabled; warn when memory available < 15 %,
 # swap used > 50 % or the root disk > 85 %; ok otherwise.
 #
 # Every collector is overridable for tests:
-#   MOI_STATUS_API_BASE   default https://$API_DOMAIN (the Caddy edge)
-#   MOI_STATUS_STATE_FILE default /var/lib/moi/status.last
-#   PATH                  `curl`, `free`, `df` are resolved from PATH
+#   MOI_STATUS_API_BASE         default https://$API_DOMAIN (the Caddy edge)
+#   MOI_STATUS_STATE_FILE       default /var/lib/moi/status.last (line + epoch of last post)
+#   MOI_STATUS_HEARTBEAT_HOURS  default 24
+#   MOI_STATUS_NOW              epoch seconds override (tests)
+#   MOI_STATUS_DEPLOY_LOCK      default /run/moi-deploy.lock (present → exit 0, no probe)
+#   PATH                        `curl`, `free`, `df`, `jq` are resolved from PATH
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# deploy.sh holds this lock for the whole release (deploy-lib.sh); the restart
+# window is announced by the deploy itself, not as an outage.
+deploy_lock="${MOI_STATUS_DEPLOY_LOCK:-/run/moi-deploy.lock}"
+[ -e "$deploy_lock" ] && exit 0
 api="${MOI_STATUS_API_BASE:-https://${API_DOMAIN:-localhost}}"
 state_file="${MOI_STATUS_STATE_FILE:-/var/lib/moi/status.last}"
+heartbeat_hours="${MOI_STATUS_HEARTBEAT_HOURS:-24}"
+now="${MOI_STATUS_NOW:-$(date -u +%s)}"
 
 MEM_AVAIL_MIN=15
 SWAP_USED_MAX=50
@@ -62,8 +75,23 @@ fi
 line="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement mem_avail=${mem_avail_pct}% swap_used=${swap_used_pct}% disk_used=${disk_used_pct}%"
 echo "$line"
 
-previous=""
-[ -f "$state_file" ] && previous="$(cat "$state_file")"
+# State file: line 1 = last delivered status line, line 2 = epoch of that post.
+previous=""; last_post=0
+if [ -f "$state_file" ]; then
+  previous="$(sed -n 1p "$state_file")"
+  last_post="$(sed -n 2p "$state_file")"
+  case "$last_post" in ''|*[!0-9]*) last_post=0 ;; esac
+fi
+heartbeat_due=0
+[ $(( now - last_post )) -ge $(( heartbeat_hours * 3600 )) ] && heartbeat_due=1
+
+post() { NOTIFY_STRICT=1 "$here/notify.sh" "$@"; }
+record() {
+  local dir; dir="$(dirname "$state_file")"
+  [ -d "$dir" ] || mkdir -p -m 0700 "$dir"
+  printf '%s\n%s\n' "$line" "$now" > "$state_file"
+}
+
 if [ "$line" != "$previous" ]; then
   prev_level="${previous%% *}"
   title="Moi status $(printf %s "$level" | tr '[:lower:]' '[:upper:]')"
@@ -72,9 +100,16 @@ if [ "$line" != "$previous" ]; then
   fi
   description="$line"
   [ -n "$previous" ] && description="$line"$'\n'"previous: $previous"
-  "$here/notify.sh" "$level" "$title" "$description"
-  dir="$(dirname "$state_file")"
-  [ -d "$dir" ] || mkdir -p -m 0700 "$dir"
-  printf '%s\n' "$line" > "$state_file"
+  if post "$level" "$title" "$description"; then
+    record
+  else
+    echo "status-check: post failed, will retry next tick" >&2
+  fi
+elif [ "$heartbeat_due" = 1 ]; then
+  if post ok "Moi status heartbeat" "$line"; then
+    record
+  else
+    echo "status-check: heartbeat post failed, will retry next tick" >&2
+  fi
 fi
 exit 0
