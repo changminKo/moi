@@ -65,6 +65,24 @@ describe('validateEnvironment', () => {
     assert.match(problems.DATABASE_URL, /localhost/);
     assert.match(problems.TOSS_CLIENT_ID, /at least 8 letters/);
   });
+  it('requires the application origins to match the TLS edge domains when present', () => {
+    const ok = validateEnvironment({
+      ...goodEnv(),
+      WEB_DOMAIN: 'app.moi.example',
+      API_DOMAIN: 'api.moi.example',
+    });
+    assert.deepEqual(ok, []);
+    const bad = validateEnvironment({
+      ...goodEnv(),
+      WEB_DOMAIN: 'other.example',
+      API_DOMAIN: 'api.moi.example',
+    });
+    assert.deepEqual(
+      bad.map((f) => f.variable),
+      ['PUBLIC_ORIGIN'],
+    );
+    assert.match(bad[0].problem, /https:\/\/other\.example/);
+  });
   it('refuses environment overrides of the compose literals', () => {
     const failures = validateEnvironment({
       ...goodEnv(),

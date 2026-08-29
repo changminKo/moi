@@ -13,9 +13,12 @@ WorkingDirectory=/opt/moi
 EnvironmentFile=/etc/moi/moi.env
 # MOI_IMAGE_TAG may be set in moi.env to pin a published image; default main.
 Environment=SOPS_AGE_KEY_FILE=/etc/moi/age.key
-# Secrets are decrypted into the environment of docker compose only; they are
-# never written to disk. `stop` respects the 45 s stop_grace_period so the
-# leader drains (CANCEL_ONLY -> outbox drain -> lease release) before exit.
+# Secrets are decrypted into the environment of docker compose only; this
+# unit never writes them to a file. Docker itself records container
+# environment in its metadata (/var/lib/docker, `docker inspect`), readable by
+# root only — an accepted exposure, documented in the deployment guide.
+# `stop` respects the 45 s stop_grace_period so the leader drains
+# (CANCEL_ONLY -> outbox drain -> lease release) before exit.
 ExecStart=/usr/bin/sops exec-env /etc/moi/secrets.enc.env '/usr/bin/docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml up -d'
 ExecStop=/usr/bin/sops exec-env /etc/moi/secrets.enc.env '/usr/bin/docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml stop'
 TimeoutStopSec=90

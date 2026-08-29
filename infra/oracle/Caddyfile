@@ -1,12 +1,20 @@
 # TLS edge for the Moi compose stack. Certificates come from Let's Encrypt
 # automatically; both hosts must resolve to this machine's reserved public IP.
-{$WEB_DOMAIN} {
+(hardening) {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	encode zstd gzip
+}
+
+{$WEB_DOMAIN} {
+	import hardening
 	reverse_proxy web:8080
 }
 
 {$API_DOMAIN} {
-	encode zstd gzip
+	import hardening
+	# Prometheus scrapes stay private: the public edge never proxies /metrics.
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
 	# WebSocket upgrades (/api/v1/stream) are proxied transparently.
 	reverse_proxy paper-api:3000 {
 		flush_interval -1
