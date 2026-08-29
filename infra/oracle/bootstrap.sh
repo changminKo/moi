@@ -4,7 +4,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/changminKo/moi/main/infra/oracle/bootstrap.sh | bash
 #
-# Installs Docker + compose plugin, sops and age, opens 80/443 in the OS
+# Installs Docker + compose plugin, Node 24 + pnpm, sops and age, opens 80/443 in the OS
 # firewall (Oracle images ship iptables rules that drop everything else),
 # clones the repository to /opt/moi, prepares /etc/moi (age key, encrypted
 # secrets, moi.env) and installs the systemd unit. It never asks for or writes
@@ -32,6 +32,15 @@ if ! command -v docker >/dev/null; then
   sudo usermod -aG docker "$USER"
 fi
 
+echo "== node 24 (for the preflight and the pnpm workspace on the host)"
+if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]; then
+  curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - >/dev/null
+  sudo apt-get install -y -qq nodejs
+fi
+sudo corepack enable
+corepack prepare pnpm@11.22.0 --activate >/dev/null
+node --version; pnpm --version
+
 echo "== sops ${SOPS_VERSION}"
 if ! command -v sops >/dev/null; then
   curl -fsSL -o /tmp/sops.deb "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops_${SOPS_VERSION}_${arch}.deb"
@@ -41,7 +50,9 @@ fi
 echo "== firewall: allow 80/443 (Oracle images drop them by default)"
 for port in 80 443; do
   if ! sudo iptables -C INPUT -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null; then
-    sudo iptables -I INPUT 5 -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    # Insert at the top: Oracle images end the chain with REJECT, and any
+    # assumed position could land behind it.
+    sudo iptables -I INPUT 1 -p tcp --dport "$port" -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
   fi
 done
 sudo netfilter-persistent save >/dev/null

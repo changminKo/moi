@@ -21,6 +21,7 @@ git pull -q --ff-only origin "$REF" 2>/dev/null || true
 git log --oneline -1
 
 echo "== toolchain"
+[ "$(node -p 'process.versions.node.split(".")[0]')" = "24" ] || { echo "Node 24 required (run infra/oracle/bootstrap.sh)"; exit 1; }
 command -v pnpm >/dev/null || sudo corepack enable
 corepack prepare pnpm@11.22.0 --activate >/dev/null
 pnpm install --frozen-lockfile --silent
