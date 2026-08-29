@@ -453,10 +453,14 @@ describe('graceful leader handoff drill (§10.2)', () => {
       );
       expect(harness.ws.peakConcurrentConnections).toBe(2);
       expect(harness.ws.evictions).toBe(0);
+      // Both provider connections were closed before the successor opened
+      // its own: the connection log (event-based, not the 100 ms sampler,
+      // which can miss a window of a few milliseconds) shows a moment with
+      // zero connections after the loss.
       expect(
-        harness.wsConnectionSamples
-          .filter((s) => s.t > lossAt)
-          .some((s) => s.connections === 0),
+        harness.ws.lifecycle
+          .filter((e) => e.t > lossAt)
+          .some((e) => e.event === 'close' && e.concurrent === 0),
       ).toBe(true);
       expect((await harness.ready(p3)).status).toBe(200);
       const p3Reasons = reasons(await harness.trading(p3));

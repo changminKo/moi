@@ -65,6 +65,16 @@ export class FakeTossWsServer {
   #dropRemaining = 0;
   #peak = 0;
   #evictions = 0;
+  /**
+   * Every connection open/close with the concurrency observed right after it.
+   * Event-based, so a zero-connection window of a few milliseconds is
+   * recorded even when a periodic sampler would miss it.
+   */
+  readonly lifecycle: {
+    t: number;
+    event: 'open' | 'close';
+    concurrent: number;
+  }[] = [];
   #pongs = 0;
   #declares = 0;
   #handshakes: number[] = [];
@@ -221,6 +231,11 @@ export class FakeTossWsServer {
       };
       this.#connections.push(connection);
       this.#peak = Math.max(this.#peak, this.#connections.length);
+      this.lifecycle.push({
+        t: Date.now(),
+        event: 'open',
+        concurrent: this.#connections.length,
+      });
       while (this.#connections.length > FAKE_WS_MAX_CONNECTIONS) {
         const oldest = this.#connections[0] as Connection;
         this.#evictions += 1;
@@ -372,6 +387,13 @@ export class FakeTossWsServer {
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
     connection.idleTimer = null;
     const index = this.#connections.indexOf(connection);
-    if (index >= 0) this.#connections.splice(index, 1);
+    if (index >= 0) {
+      this.#connections.splice(index, 1);
+      this.lifecycle.push({
+        t: Date.now(),
+        event: 'close',
+        concurrent: this.#connections.length,
+      });
+    }
   }
 }

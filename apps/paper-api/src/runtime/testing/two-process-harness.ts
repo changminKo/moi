@@ -571,6 +571,7 @@ export class TwoProcessHarness {
             evictions: this.ws.evictions,
           },
           wsConnectionSamples: this.wsConnectionSamples,
+          wsLifecycle: this.ws.lifecycle,
           leaderEpochSamples: this.leaderEpochSamples,
           observations: this.observations,
           processes: this.processes.map((p) => ({
