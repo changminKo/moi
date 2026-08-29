@@ -1,0 +1,175 @@
+# Prometheus alerting rules for the paper-api process.
+#
+# Metric names and label sets mirror apps/paper-api/src/observability/metrics.ts.
+# Rule labels stay within the bounded set {severity, market, state,
+# cause_group, tx_type, lock_type}; every rule links exactly one committed
+# runbook. Notification grouping and cooldown live in alertmanager.yaml.
+groups:
+  - name: moi-immediate
+    rules:
+      - alert: InvariantViolation
+        expr: increase(invariant_violation_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger invariant {{ $labels.invariant_type }} violated in {{ $labels.market }}"
+          runbook: docs/runbooks/emergency-cancel-only.md
+      - alert: TransactionalAuditFailure
+        expr: increase(transactional_audit_failure_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit write failed inside a ledger transaction"
+          runbook: docs/runbooks/emergency-cancel-only.md
+      - alert: EmergencyLatchActive
+        expr: emergency_latch_active == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Emergency latch is engaged; trading is CANCEL_ONLY"
+          runbook: docs/runbooks/emergency-cancel-only.md
+      - alert: SafetyIncidentActive
+        expr: safety_incident_active == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Safety incident active ({{ $labels.scope_type }}, {{ $labels.cause_group }})"
+          runbook: docs/runbooks/emergency-cancel-only.md
+
+  - name: moi-market-data
+    rules:
+      - alert: MarketDataDegradedSustained
+        expr: market_data_health{state="DEGRADED"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          state: DEGRADED
+        annotations:
+          summary: "{{ $labels.market }} market data DEGRADED for more than 5 minutes"
+          runbook: docs/runbooks/market-data-degraded.md
+      - alert: MarketDataRecoveringSustained
+        expr: market_data_health{state="RECOVERING"} == 1
+        for: 2m
+        labels:
+          severity: warning
+          state: RECOVERING
+        annotations:
+          summary: "{{ $labels.market }} stuck in RECOVERING for more than 2 minutes"
+          runbook: docs/runbooks/market-data-degraded.md
+      - alert: RecoveryDurationExceeded
+        expr: recovery_duration_seconds > 60
+        labels:
+          severity: warning
+        annotations:
+          summary: "Market-data recovery exceeded 60 seconds"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: FeedReconnectFlapping
+        expr: increase(feed_reconnect_total[10m]) >= 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Toss feed reconnected 3+ times in 10 minutes"
+          runbook: docs/runbooks/market-data-degraded.md
+
+  - name: moi-database
+    rules:
+      - alert: TransactionErrors
+        expr: increase(transaction_error_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ledger transaction errors ({{ $labels.tx_type }})"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: DbLockWaitHigh
+        expr: db_lock_wait_seconds > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database lock wait above 5s ({{ $labels.lock_type }})"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: OutboxLagHigh
+        expr: outbox_oldest_pending_seconds > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Oldest pending outbox event older than 30s; user streams are stale"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+
+  - name: moi-runtime
+    rules:
+      - alert: ProviderConnectionsAboveLimit
+        expr: provider_connections_open > 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than two provider connections are open from this process"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: LeaderLeaseWaitLong
+        expr: leader_lease_wait_seconds > 60
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.market }} leader lease has been pending for over 60s (previous process still alive?)"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: ProviderAuthFailed
+        expr: increase(provider_token_refresh_total{result="auth_failed"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider token refresh failed authentication"
+          runbook: docs/runbooks/market-data-degraded.md
+      - alert: ShutdownForced
+        expr: increase(shutdown_forced_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A shutdown exceeded its drain deadline and forced progress"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: LeaderReelection
+        expr: increase(leader_reelection_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Leader lease for {{ $labels.market }} was lost; the process re-elected globally"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: LeaderBundleSplit
+        expr: count(count by (instance) (leader_lease_held == 1)) > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Two instances hold leader leases at once; restart the later one"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: HttpAdmissionRejectedOutsideDrain
+        expr: increase(http_admission_rejected_total[5m]) > 0 and on() (max(runtime_state{state="DRAINING"}) == 0)
+        labels:
+          severity: warning
+        annotations:
+          summary: "The HTTP admission gate rejected requests while not draining"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md
+      - alert: OutboxClaimsOutsideServing
+        expr: increase(outbox_claims_total{mode="periodic"}[2m]) > 0 unless on() (max(runtime_state{state="SERVING"}) == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Periodic outbox claims observed while the process is not SERVING"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: OutboxShutdownDrainOutsideDraining
+        expr: increase(outbox_claims_total{mode="shutdown_drain"}[2m]) > 0 unless on() (max(runtime_state{state="DRAINING"}) == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Shutdown-drain claims observed outside DRAINING"
+          runbook: docs/runbooks/redis-or-leader-loss.md
+      - alert: StreamReplayOverflow
+        expr: increase(stream_replay_overflow_total[10m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "User-stream replay queues are overflowing; outbox or database latency is high"
+          runbook: docs/runbooks/postgres-or-outbox-lag.md

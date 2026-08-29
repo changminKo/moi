@@ -1,0 +1,119 @@
+import { describe, expect, it } from 'vitest';
+import { type AppDependencies, buildApp } from './app.js';
+import type { AppConfig } from './config.js';
+import { ZERO_FEE_SCHEDULES } from './config.js';
+
+const testConfig = (): AppConfig => ({
+  nodeEnv: 'test',
+  host: '127.0.0.1',
+  port: 0,
+  publicOrigin: 'https://paper.example.test',
+  databaseUrl: 'postgres://test/test',
+  redisUrl: 'redis://127.0.0.1:6379',
+  sessionHashKeys: ['test-session-hash-key'],
+  csrfSecret: 'test-csrf-secret',
+  marketDataAdapter: 'fake',
+  shutdownDrainDeadlineMs: 30_000,
+  recoveryStabilityMs: 0,
+  fees: ZERO_FEE_SCHEDULES,
+});
+
+const fakeDependencies = (): AppDependencies => ({
+  clock: { now: () => 1_700_000_000_000 },
+  requestId: () => 'test-request-id',
+  registerRoutes: async (app) => {
+    app.post<{ Body: { known: string } }>('/test/validation', {
+      schema: {
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['known'],
+          properties: { known: { type: 'string' } },
+        },
+      },
+      handler: async () => ({ ok: true }),
+    });
+  },
+});
+
+describe('paper API application', () => {
+  it('returns a request id and stable not-found envelope', async () => {
+    const app = await buildApp(testConfig(), fakeDependencies());
+    const response = await app.inject({ method: 'GET', url: '/missing' });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      code: 'NOT_FOUND',
+      message: 'Route not found',
+      retryable: false,
+      requestId: expect.any(String),
+    });
+    await app.close();
+  });
+
+  it('rejects an origin outside the configured allowlist with a stable error', async () => {
+    const app = await buildApp(testConfig(), fakeDependencies());
+    const response = await app.inject({
+      method: 'GET',
+      url: '/missing',
+      headers: { origin: 'https://evil.example.test' },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({
+      code: 'FORBIDDEN',
+      retryable: false,
+      requestId: expect.any(String),
+    });
+    await app.close();
+  });
+
+  it('rejects request bodies larger than 64 KiB with a stable non-retryable error', async () => {
+    const app = await buildApp(testConfig(), fakeDependencies());
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test/validation',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ known: 'x'.repeat(70_000) }),
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toMatchObject({
+      code: 'PAYLOAD_TOO_LARGE',
+      retryable: false,
+      requestId: expect.any(String),
+    });
+    await app.close();
+  });
+
+  it('rejects unknown request fields with a stable validation error', async () => {
+    const app = await buildApp(testConfig(), fakeDependencies());
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test/validation',
+      headers: { 'content-type': 'application/json' },
+      payload: { known: 'ok', unexpected: true },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      retryable: false,
+      requestId: expect.any(String),
+    });
+    await app.close();
+  });
+
+  it('redacts authentication, cookie, csrf, and session token fields from logs', async () => {
+    const app = await buildApp(testConfig(), fakeDependencies());
+    expect(app.redactedLogPaths).toEqual(
+      expect.arrayContaining([
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'req.headers.x-csrf-token',
+        'req.headers.x-session-token',
+      ]),
+    );
+    await app.close();
+  });
+});

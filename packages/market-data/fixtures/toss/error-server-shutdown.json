@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": 1,
+  "contract": {
+    "spec": "asyncapi.json",
+    "advertisedVersion": "1.2.2",
+    "message": "connection/errorFrame",
+    "example": "serverShutdown"
+  },
+  "sanitized": {
+    "source": "published contract example",
+    "notes": "Derived from the pinned AsyncAPI example. The frame the server sends immediately before closing on deploy; it carries no request id and no credential."
+  },
+  "frame": {
+    "type": "error",
+    "error": {
+      "code": "server-shutdown",
+      "message": "서버가 재시작됩니다. 재연결해주세요."
+    }
+  }
+}

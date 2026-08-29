@@ -1,0 +1,808 @@
+import {
+  type Currency,
+  type DecimalString,
+  DomainError,
+  type Market,
+  type OrderStatus,
+  type OrderType,
+  type Quantity,
+  type Side,
+} from '@moi/trading-core';
+import type { IsolationLevel } from 'kysely';
+import {
+  type Database,
+  type LedgerTransaction,
+  snapshotInput,
+  toJsonText,
+} from './database.js';
+import {
+  createLockOrderGuard,
+  type LockOrderGuard,
+  type LockTarget,
+  type UniqueKeyClaim,
+} from './lock-order.js';
+import {
+  type AccountRepository,
+  createAccountRepository,
+} from './repositories/account-repository.js';
+import {
+  type AccountSequenceRepository,
+  createAccountSequenceRepository,
+} from './repositories/account-sequence-repository.js';
+import {
+  type AuditRepository,
+  createAuditRepository,
+} from './repositories/audit-repository.js';
+import {
+  createIdempotencyRepository,
+  type IdempotencyRepository,
+} from './repositories/idempotency-repository.js';
+import {
+  createOrderRepository,
+  type OrderRepository,
+} from './repositories/order-repository.js';
+import {
+  createOutboxRepository,
+  type OutboxRepository,
+} from './repositories/outbox-repository.js';
+import {
+  createPortfolioRepository,
+  type PortfolioReadRepository,
+} from './repositories/portfolio-repository.js';
+import {
+  createSessionRepository,
+  type SessionRepository,
+} from './repositories/session-repository.js';
+
+/**
+ * The persistence-layer handle for one open transaction: the Kysely executor
+ * plus the lock-order guard. Repositories receive it; application services
+ * never do. `TradingTransaction` is what an application service receives, and
+ * it reaches this object only through closures — no reflection over a
+ * `TradingTransaction` can find the Kysely instance.
+ */
+export interface LedgerConnection extends LockOrderGuard {
+  readonly executor: LedgerTransaction;
+}
+
+/** Everything an application service may do inside one transaction. */
+export interface TradingTransaction {
+  readonly sessions: SessionRepository;
+  readonly sequences: AccountSequenceRepository;
+  readonly accounts: AccountRepository;
+  readonly orders: OrderRepository;
+  readonly audit: AuditRepository;
+  readonly outbox: OutboxRepository;
+  readonly idempotency: IdempotencyRepository;
+  readonly portfolio: PortfolioReadRepository;
+}
+
+/**
+ * Waits before a retry attempt, given the attempt that just failed and the
+ * PostgreSQL SQLSTATE that failed it.
+ *
+ * It is injected so that no production wall-clock sleep can leak into a test and
+ * no test has to tolerate one: the suite passes a recorder that returns
+ * immediately, and the SQLSTATE argument lets it assert that the retry was
+ * driven by a real 40001 or 40P01 rather than by anything a test could fake.
+ */
+export type BackoffSchedule = (
+  attempt: number,
+  sqlState: string,
+) => Promise<void>;
+
+export interface UnitOfWorkOptions {
+  readonly backoff: BackoffSchedule;
+  /**
+   * Retries after the first attempt. Three by default, so a serialization
+   * failure or deadlock is executed at most four times in total.
+   */
+  readonly maxRetries?: number;
+  /**
+   * Left unset, PostgreSQL's `read committed` applies, which is the level the
+   * lock order is designed for: explicit `for update` locks serialise the
+   * conflicting mutations, so serialization failures do not arise from ordinary
+   * traffic. `serializable` is available for work that needs snapshot-wide
+   * consistency and accepts 40001 as its cost.
+   */
+  readonly isolationLevel?: IsolationLevel;
+  /** Observes each row lock as it is taken. Diagnostics and tests only. */
+  readonly onLock?: (target: LockTarget) => void;
+  /** Observes each unique-key claim. Diagnostics and tests only. */
+  readonly onClaim?: (claim: UniqueKeyClaim) => void;
+}
+
+const DEFAULT_MAX_RETRIES = 3;
+const SERIALIZATION_FAILURE = '40001';
+const DEADLOCK_DETECTED = '40P01';
+
+/**
+ * A transaction whose commit was sent but whose result nobody can observe — the
+ * connection died mid-commit. It may have committed and it may not have, so it
+ * must never be replayed: a replay of an already-committed trading mutation is
+ * a double effect. Recovery belongs to the caller's idempotency key, not to a
+ * retry loop.
+ */
+export class UnknownCommitOutcomeError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'the transaction commit outcome is unknown and must not be replayed',
+      { cause },
+    );
+    this.name = 'UnknownCommitOutcomeError';
+  }
+}
+
+/**
+ * Reads the SQLSTATE of a thrown value exactly once.
+ *
+ * Only an `Error` is trusted to carry one: the `pg` driver throws
+ * `DatabaseError`, so requiring an Error instance costs nothing and stops a
+ * plain object from claiming a retryable SQLSTATE and being replayed.
+ */
+function sqlStateOf(error: unknown): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const code: unknown = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** The SQLSTATE this failure may be retried under, or undefined for none. */
+function retryableSqlState(error: unknown): string | undefined {
+  // A domain error is a decision, never a transient condition. Checking it
+  // first also means a domain error can never be replayed by claiming a
+  // retryable SQLSTATE.
+  if (error instanceof DomainError) {
+    return undefined;
+  }
+  const sqlState = sqlStateOf(error);
+  if (sqlState === SERIALIZATION_FAILURE || sqlState === DEADLOCK_DETECTED) {
+    return sqlState;
+  }
+  return undefined;
+}
+
+function createLedgerConnection(
+  executor: LedgerTransaction,
+  onLock: ((target: LockTarget) => void) | undefined,
+  onClaim: ((claim: UniqueKeyClaim) => void) | undefined,
+): LedgerConnection {
+  return { executor, ...createLockOrderGuard(onLock, onClaim) };
+}
+
+function createTradingTransaction(
+  connection: LedgerConnection,
+): TradingTransaction {
+  const transaction = {
+    sessions: createSessionRepository(connection),
+    sequences: createAccountSequenceRepository(connection),
+    accounts: createAccountRepository(connection),
+    orders: createOrderRepository(connection),
+    audit: createAuditRepository(connection),
+    outbox: createOutboxRepository(connection),
+    idempotency: createIdempotencyRepository(connection),
+  } as TradingTransaction;
+  // Read-model access is intentionally non-enumerable: the lock-accounting
+  // contract reflects mutation repositories to ensure every lock is probed,
+  // while portfolio reads take no locks and remain an injectable same-tx seam.
+  Object.defineProperty(transaction, 'portfolio', {
+    value: createPortfolioRepository(connection),
+    enumerable: false,
+  });
+  return Object.freeze(transaction);
+}
+
+/**
+ * The one transaction boundary of the ledger.
+ *
+ * The Kysely instance is held in a private field, so not even reflection over a
+ * `UnitOfWork` can reach it, and `run` hands the work a `TradingTransaction`
+ * rather than a transaction handle. Everything a mutation writes — ledger rows,
+ * audit history, outbox events, the idempotency record — commits together or
+ * rolls back together.
+ */
+export class UnitOfWork {
+  readonly #db: Database;
+  readonly #backoff: BackoffSchedule;
+  readonly #maxRetries: number;
+  readonly #isolationLevel: IsolationLevel | undefined;
+  readonly #onLock: ((target: LockTarget) => void) | undefined;
+  readonly #onClaim: ((claim: UniqueKeyClaim) => void) | undefined;
+
+  constructor(db: Database, options: UnitOfWorkOptions) {
+    const settings = snapshotInput({
+      backoff: options.backoff,
+      maxRetries: options.maxRetries ?? DEFAULT_MAX_RETRIES,
+      isolationLevel: options.isolationLevel,
+      onLock: options.onLock,
+      onClaim: options.onClaim,
+    });
+    if (!Number.isInteger(settings.maxRetries) || settings.maxRetries < 0) {
+      throw new RangeError('maxRetries must be a non-negative integer');
+    }
+
+    this.#db = db;
+    this.#backoff = settings.backoff;
+    this.#maxRetries = settings.maxRetries;
+    this.#isolationLevel = settings.isolationLevel;
+    this.#onLock = settings.onLock;
+    this.#onClaim = settings.onClaim;
+  }
+
+  /**
+   * Runs `work` in one transaction, retrying only PostgreSQL serialization
+   * failures (40001) and deadlocks (40P01).
+   *
+   * Three outcomes are deliberately never retried: a domain error, because it
+   * is a decision and not a transient condition; any other driver error,
+   * because nothing says a second attempt would fare differently; and a failure
+   * once the commit has been sent, because the transaction's fate is then
+   * unobservable and a replay could double the effect. The one exception to
+   * that last rule is a commit that fails with 40001 or 40P01, which PostgreSQL
+   * only reports after aborting the transaction — a known outcome, and safe to
+   * retry.
+   */
+  async run<T>(work: (tx: TradingTransaction) => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      let commitSent = false;
+      try {
+        const builder =
+          this.#isolationLevel === undefined
+            ? this.#db.transaction()
+            : this.#db.transaction().setIsolationLevel(this.#isolationLevel);
+        return await builder.execute(async (trx) => {
+          const result = await work(
+            createTradingTransaction(
+              createLedgerConnection(trx, this.#onLock, this.#onClaim),
+            ),
+          );
+          commitSent = true;
+          return result;
+        });
+      } catch (error) {
+        const sqlState = retryableSqlState(error);
+        if (sqlState === undefined) {
+          throw commitSent ? new UnknownCommitOutcomeError(error) : error;
+        }
+        if (attempt > this.#maxRetries) {
+          const exhausted = new DomainError(
+            'SERVICE_UNAVAILABLE',
+            `the transaction still failed with SQLSTATE ${sqlState} after ${attempt} attempts`,
+          );
+          // The caller gets a domain error, but a post-mortem needs the driver's
+          // own `detail`, `hint` and backend pid, which only the cause carries.
+          exhausted.cause = error;
+          throw exhausted;
+        }
+        await this.#backoff(attempt, sqlState);
+      }
+    }
+  }
+}
+
+export interface TradingMutationOrder {
+  readonly id: string;
+  readonly marketCode: Market;
+  readonly symbol: string;
+  readonly orderType: OrderType;
+  readonly side: Side;
+  readonly quantity: Quantity;
+  readonly status: OrderStatus;
+  readonly limitPrice?: DecimalString;
+  readonly stopPrice?: DecimalString;
+}
+
+export interface TradingMutationCash {
+  readonly currency: Currency;
+  readonly amount: DecimalString;
+}
+
+export interface TradingMutationPosition {
+  readonly marketCode: Market;
+  readonly symbol: string;
+  readonly quantity: Quantity;
+}
+
+export interface TradingMutationAudit {
+  readonly id: string;
+  readonly eventType: string;
+  readonly payload: unknown;
+  readonly occurredAt: Date;
+  readonly sessionReference?: string;
+}
+
+export interface TradingMutationOutbox {
+  readonly id: string;
+  readonly eventId: string;
+  readonly streamSequence?: bigint;
+  readonly eventType: string;
+  readonly payload: unknown;
+}
+
+export interface TradingMutationResponse {
+  readonly statusCode: number;
+  readonly body: unknown;
+}
+
+export interface TradingMutationInput {
+  readonly sessionId: string;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  /** When present, allocate the outbox sequence inside this mutation. */
+  readonly mutationKind?: string;
+  readonly order: TradingMutationOrder;
+  readonly audit: TradingMutationAudit;
+  readonly outbox: TradingMutationOutbox;
+  readonly response: TradingMutationResponse;
+  readonly cash?: TradingMutationCash;
+  readonly position?: TradingMutationPosition;
+  /** Id of the reservation row recorded for `cash` / `position`. */
+  readonly reservationId?: string;
+  readonly ocoGroupId?: string;
+  /**
+   * Orders that already exist and must be pinned by this mutation — the other
+   * leg of an OCO pair, for instance. They are locked in ascending id order
+   * regardless of the order they arrive in.
+   */
+  readonly siblingOrderIds?: readonly string[];
+}
+
+export interface TradingMutationResult {
+  /** True when the idempotency key already had a recorded result. */
+  readonly replayed: boolean;
+  readonly statusCode: number;
+  readonly body: unknown;
+  /** Present when this mutation atomically allocated a fresh sequence. */
+  readonly sequence?: bigint;
+}
+
+export type OcoPlacementReservation =
+  | Readonly<{
+      id: string;
+      kind: 'CASH';
+      currency: Currency;
+      amount: DecimalString;
+    }>
+  | Readonly<{
+      id: string;
+      kind: 'POSITION';
+      marketCode: Market;
+      symbol: string;
+      amount: Quantity;
+    }>;
+
+export interface OcoPlacementInput {
+  readonly sessionId: string;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  /** When present, allocate the outbox sequence inside this mutation. */
+  readonly mutationKind?: string;
+  readonly groupId: string;
+  readonly legs: readonly [TradingMutationOrder, TradingMutationOrder];
+  readonly reservation: OcoPlacementReservation;
+  readonly audit: TradingMutationAudit;
+  readonly outbox: TradingMutationOutbox;
+  readonly response: TradingMutationResponse;
+}
+
+/** Commits an OCO pair and its one shared reservation as one ledger mutation. */
+export async function commitOcoPlacement(
+  unitOfWork: UnitOfWork,
+  input: OcoPlacementInput,
+): Promise<TradingMutationResult> {
+  const firstLeg = input.legs[0];
+  const secondLeg = input.legs[1];
+  const reservation = input.reservation;
+  const audit = input.audit;
+  const outbox = input.outbox;
+  const response = input.response;
+  const request = snapshotInput({
+    sessionId: input.sessionId,
+    idempotencyKey: input.idempotencyKey,
+    requestHash: input.requestHash,
+    mutationKind: input.mutationKind,
+    groupId: input.groupId,
+    firstLeg,
+    secondLeg,
+    reservation,
+    audit,
+    outbox,
+    responseStatusCode: response.statusCode,
+    responseBody: toJsonText(response.body, 'the response body'),
+  });
+  const responseBody: unknown = JSON.parse(request.responseBody);
+
+  return await unitOfWork.run(async (tx) => {
+    const session = await tx.sessions.lock(request.sessionId);
+    if (session === undefined || session.status !== 'ACTIVE') {
+      throw new DomainError(
+        'ACCOUNT_READ_ONLY',
+        `session ${request.sessionId} cannot accept mutations`,
+      );
+    }
+
+    const claim = await tx.idempotency.begin({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      requestHash: request.requestHash,
+    });
+    if (claim.state === 'COMPLETED') {
+      return {
+        replayed: true,
+        statusCode: claim.statusCode,
+        body: claim.body,
+      };
+    }
+    if (claim.state === 'IN_PROGRESS') {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        `idempotency key ${request.idempotencyKey} is already in progress`,
+      );
+    }
+    await tx.idempotency.complete({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+    });
+
+    if (request.reservation.kind === 'CASH') {
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: request.sessionId,
+        currency: request.reservation.currency,
+      });
+      if (wallet === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_CASH',
+          `session ${request.sessionId} holds no ${request.reservation.currency} wallet`,
+        );
+      }
+      await tx.accounts.reserveCash({
+        wallet,
+        amount: request.reservation.amount,
+      });
+    } else {
+      const position = await tx.accounts.lockPosition({
+        sessionId: request.sessionId,
+        marketCode: request.reservation.marketCode,
+        symbol: request.reservation.symbol,
+      });
+      if (position === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_POSITION',
+          `session ${request.sessionId} holds no ${request.reservation.symbol} position`,
+        );
+      }
+      await tx.accounts.reservePosition({
+        position,
+        quantity: request.reservation.amount,
+      });
+    }
+
+    await tx.orders.insertOcoGroup({
+      id: request.groupId,
+      sessionId: request.sessionId,
+    });
+    for (const leg of [request.firstLeg, request.secondLeg]) {
+      await tx.orders.insert({
+        id: leg.id,
+        sessionId: request.sessionId,
+        marketCode: leg.marketCode,
+        symbol: leg.symbol,
+        orderType: leg.orderType,
+        side: leg.side,
+        quantity: leg.quantity,
+        status: leg.status,
+        ...(leg.limitPrice === undefined ? {} : { limitPrice: leg.limitPrice }),
+        ...(leg.stopPrice === undefined ? {} : { stopPrice: leg.stopPrice }),
+        ocoGroupId: request.groupId,
+      });
+    }
+    await tx.accounts.recordReservation({
+      id: request.reservation.id,
+      sessionId: request.sessionId,
+      ocoGroupId: request.groupId,
+      kind: request.reservation.kind,
+      amount: request.reservation.amount,
+      ...(request.reservation.kind === 'CASH'
+        ? { currency: request.reservation.currency }
+        : {
+            marketCode: request.reservation.marketCode,
+            symbol: request.reservation.symbol,
+          }),
+    });
+    await tx.audit.append({
+      id: request.audit.id,
+      eventType: request.audit.eventType,
+      payload: request.audit.payload,
+      occurredAt: request.audit.occurredAt,
+      orderId: request.firstLeg.id,
+      ...(request.audit.sessionReference === undefined
+        ? {}
+        : { sessionReference: request.audit.sessionReference }),
+    });
+    const sequence =
+      request.mutationKind === undefined
+        ? request.outbox.streamSequence
+        : await tx.sequences.allocate({
+            sessionId: request.sessionId,
+            mutationKind: request.mutationKind,
+          });
+    if (sequence === undefined) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'an outbox sequence or mutation kind is required',
+      );
+    }
+    await tx.outbox.append({
+      id: request.outbox.id,
+      eventId: request.outbox.eventId,
+      sessionId: request.sessionId,
+      streamSequence: sequence,
+      eventType: request.outbox.eventType,
+      payload: request.outbox.payload,
+    });
+    return {
+      replayed: false,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+      ...(request.mutationKind === undefined ? {} : { sequence }),
+    };
+  });
+}
+
+/**
+ * Commits one trading mutation atomically.
+ *
+ * The whole point of this function is that there is exactly one transaction:
+ * the reservation, the order row, the audit event, the outbox event, and the
+ * idempotency record either all exist afterwards or none of them do. Locks are
+ * taken strictly down `LEDGER_LOCK_ORDER` — session, the idempotency claim and
+ * the record it retires, wallet, position, OCO group, sibling orders by
+ * ascending id, then the order insert (which only re-pins rows this transaction
+ * already holds) and the outbox claim — and every caller-supplied value is
+ * snapshotted once before any of it is used.
+ *
+ * The result is recorded against the idempotency key immediately after the key
+ * is claimed rather than at the end, because the claim and the record are the
+ * same row and therefore the same position in the lock order. Nothing observes
+ * the difference: every write of this function commits together or not at all.
+ */
+export async function commitTradingMutation(
+  unitOfWork: UnitOfWork,
+  input: TradingMutationInput,
+): Promise<TradingMutationResult> {
+  // One read of every field, nested containers included. Reading a container
+  // twice — `input.order.id` and then `input.order.symbol` — would let an
+  // accessor hand back two different orders, so each container is captured
+  // once first and only the capture is read afterwards. Nothing below this
+  // block reads `input` again.
+  const order = input.order;
+  const audit = input.audit;
+  const outbox = input.outbox;
+  const response = input.response;
+  const cash = input.cash;
+  const position = input.position;
+  const request = snapshotInput({
+    sessionId: input.sessionId,
+    idempotencyKey: input.idempotencyKey,
+    requestHash: input.requestHash,
+    mutationKind: input.mutationKind,
+    orderId: order.id,
+    orderMarketCode: order.marketCode,
+    orderSymbol: order.symbol,
+    orderType: order.orderType,
+    orderSide: order.side,
+    orderQuantity: order.quantity,
+    orderStatus: order.status,
+    orderLimitPrice: order.limitPrice,
+    orderStopPrice: order.stopPrice,
+    auditId: audit.id,
+    auditEventType: audit.eventType,
+    auditPayload: audit.payload,
+    auditOccurredAt: audit.occurredAt,
+    auditSessionReference: audit.sessionReference,
+    outboxId: outbox.id,
+    outboxEventId: outbox.eventId,
+    outboxStreamSequence: outbox.streamSequence,
+    outboxEventType: outbox.eventType,
+    outboxPayload: outbox.payload,
+    responseStatusCode: response.statusCode,
+    responseBody: toJsonText(response.body, 'the response body'),
+    cashCurrency: cash?.currency,
+    cashAmount: cash?.amount,
+    positionMarketCode: position?.marketCode,
+    positionSymbol: position?.symbol,
+    positionQuantity: position?.quantity,
+    reservationId: input.reservationId,
+    ocoGroupId: input.ocoGroupId,
+    siblingOrderIds: [...new Set(input.siblingOrderIds ?? [])].sort(),
+  });
+  const responseBody: unknown = JSON.parse(request.responseBody);
+
+  return await unitOfWork.run(async (tx) => {
+    const session = await tx.sessions.lock(request.sessionId);
+    if (session === undefined || session.status !== 'ACTIVE') {
+      throw new DomainError(
+        'ACCOUNT_READ_ONLY',
+        `session ${request.sessionId} cannot accept mutations`,
+      );
+    }
+
+    const claim = await tx.idempotency.begin({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      requestHash: request.requestHash,
+    });
+    if (claim.state === 'COMPLETED') {
+      return {
+        replayed: true,
+        statusCode: claim.statusCode,
+        body: claim.body,
+      };
+    }
+    if (claim.state === 'IN_PROGRESS') {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        `idempotency key ${request.idempotencyKey} is already in progress`,
+      );
+    }
+
+    await tx.idempotency.complete({
+      sessionId: request.sessionId,
+      key: request.idempotencyKey,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+    });
+
+    if (
+      request.cashCurrency !== undefined &&
+      request.cashAmount !== undefined
+    ) {
+      const wallet = await tx.accounts.lockWallet({
+        sessionId: request.sessionId,
+        currency: request.cashCurrency,
+      });
+      if (wallet === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_CASH',
+          `session ${request.sessionId} holds no ${request.cashCurrency} wallet`,
+        );
+      }
+      await tx.accounts.reserveCash({ wallet, amount: request.cashAmount });
+    }
+
+    if (
+      request.positionMarketCode !== undefined &&
+      request.positionSymbol !== undefined &&
+      request.positionQuantity !== undefined
+    ) {
+      const position = await tx.accounts.lockPosition({
+        sessionId: request.sessionId,
+        marketCode: request.positionMarketCode,
+        symbol: request.positionSymbol,
+      });
+      if (position === undefined) {
+        throw new DomainError(
+          'INSUFFICIENT_AVAILABLE_POSITION',
+          `session ${request.sessionId} holds no ${request.positionSymbol} position`,
+        );
+      }
+      await tx.accounts.reservePosition({
+        position,
+        quantity: request.positionQuantity,
+      });
+    }
+
+    if (request.ocoGroupId !== undefined) {
+      const group = await tx.orders.lockOcoGroup(request.ocoGroupId);
+      if (group === undefined || group.status !== 'ACTIVE') {
+        throw new DomainError(
+          'ORDER_STATE_CONFLICT',
+          `OCO group ${request.ocoGroupId} is not active`,
+        );
+      }
+    }
+
+    for (const siblingOrderId of request.siblingOrderIds) {
+      const sibling = await tx.orders.lock(siblingOrderId);
+      if (sibling === undefined) {
+        throw new DomainError(
+          'ORDER_STATE_CONFLICT',
+          `order ${siblingOrderId} does not exist`,
+        );
+      }
+    }
+
+    await tx.orders.insert({
+      id: request.orderId,
+      sessionId: request.sessionId,
+      marketCode: request.orderMarketCode,
+      symbol: request.orderSymbol,
+      orderType: request.orderType,
+      side: request.orderSide,
+      quantity: request.orderQuantity,
+      status: request.orderStatus,
+      ...(request.orderLimitPrice === undefined
+        ? {}
+        : { limitPrice: request.orderLimitPrice }),
+      ...(request.orderStopPrice === undefined
+        ? {}
+        : { stopPrice: request.orderStopPrice }),
+      ...(request.ocoGroupId === undefined
+        ? {}
+        : { ocoGroupId: request.ocoGroupId }),
+    });
+
+    if (
+      request.cashCurrency !== undefined &&
+      request.cashAmount !== undefined &&
+      request.reservationId !== undefined
+    ) {
+      await tx.accounts.recordReservation({
+        id: request.reservationId,
+        sessionId: request.sessionId,
+        orderId: request.orderId,
+        kind: 'CASH',
+        currency: request.cashCurrency,
+        amount: request.cashAmount,
+      });
+    } else if (
+      request.positionMarketCode !== undefined &&
+      request.positionSymbol !== undefined &&
+      request.positionQuantity !== undefined &&
+      request.reservationId !== undefined
+    ) {
+      await tx.accounts.recordReservation({
+        id: request.reservationId,
+        sessionId: request.sessionId,
+        orderId: request.orderId,
+        kind: 'POSITION',
+        marketCode: request.positionMarketCode,
+        symbol: request.positionSymbol,
+        amount: request.positionQuantity,
+      });
+    }
+
+    await tx.audit.append({
+      id: request.auditId,
+      eventType: request.auditEventType,
+      payload: request.auditPayload,
+      occurredAt: request.auditOccurredAt,
+      orderId: request.orderId,
+      ...(request.auditSessionReference === undefined
+        ? {}
+        : { sessionReference: request.auditSessionReference }),
+    });
+
+    const sequence =
+      request.mutationKind === undefined
+        ? request.outboxStreamSequence
+        : await tx.sequences.allocate({
+            sessionId: request.sessionId,
+            mutationKind: request.mutationKind,
+          });
+    if (sequence === undefined) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'an outbox sequence or mutation kind is required',
+      );
+    }
+    await tx.outbox.append({
+      id: request.outboxId,
+      eventId: request.outboxEventId,
+      sessionId: request.sessionId,
+      streamSequence: sequence,
+      eventType: request.outboxEventType,
+      payload: request.outboxPayload,
+    });
+
+    return {
+      replayed: false,
+      statusCode: request.responseStatusCode,
+      body: responseBody,
+      ...(request.mutationKind === undefined ? {} : { sequence }),
+    };
+  });
+}

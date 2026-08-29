@@ -1,0 +1,29 @@
+{
+  "fixtureVersion": 1,
+  "contract": {
+    "spec": "asyncapi.json",
+    "advertisedVersion": "1.2.2",
+    "message": "realtime-orderbook/orderbookStream",
+    "example": "orderbookMessage"
+  },
+  "sanitized": {
+    "source": "published contract example",
+    "notes": "Derived from the pinned AsyncAPI example, widened to two levels per side. Public depth only: no credential and no account field exists on this frame."
+  },
+  "frame": {
+    "type": "message",
+    "topic": "orderbook:kr:005930",
+    "data": {
+      "timestamp": "2026-06-18T23:30:00.000+09:00",
+      "currency": "KRW",
+      "asks": [
+        { "price": "71500", "volume": "5" },
+        { "price": "71600", "volume": "12" }
+      ],
+      "bids": [
+        { "price": "71400", "volume": "10" },
+        { "price": "71300", "volume": "7" }
+      ]
+    }
+  }
+}

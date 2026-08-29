@@ -1,0 +1,25 @@
+{
+  "provenanceVersion": 1,
+  "provider": "Toss Securities Open API",
+  "retrievedAt": "2026-08-24T06:01:08Z",
+  "retrievedWith": "curl --fail --silent --show-error",
+  "notes": "These two files are pinned bytes, never regenerated at test time. Tests read them from disk and assert the SHA-256 values below, so a silent upstream change fails the suite instead of quietly changing what the parser accepts.",
+  "contracts": [
+    {
+      "file": "asyncapi.json",
+      "url": "https://openapi.tossinvest.com/openapi-docs/latest/asyncapi.json",
+      "specName": "asyncapi",
+      "specVersion": "3.0.0",
+      "advertisedVersion": "1.2.2",
+      "sha256": "130251057fd9535a3e276099f9166b445f8c51f505f30540758e4b209231282e"
+    },
+    {
+      "file": "openapi.json",
+      "url": "https://openapi.tossinvest.com/openapi-docs/latest/openapi.json",
+      "specName": "openapi",
+      "specVersion": "3.1.0",
+      "advertisedVersion": "1.2.14",
+      "sha256": "a7b32ba754401d13fa649ba91eebd212420eb1afab28e9c2c0d6ea8d43055fed"
+    }
+  ]
+}

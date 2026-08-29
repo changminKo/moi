@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    // The contract tests hash the pinned spec bytes off disk, so this project
+    // needs the Node typings. They are named rather than auto-discovered
+    // because this toolchain does not auto-include `node_modules/@types`.
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

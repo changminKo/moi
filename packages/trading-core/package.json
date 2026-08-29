@@ -1,0 +1,16 @@
+{
+  "name": "@moi/trading-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run --passWithNoTests --dir src",
+    "typecheck": "tsc --build --pretty false"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0"
+  }
+}

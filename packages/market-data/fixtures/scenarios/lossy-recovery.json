@@ -1,0 +1,58 @@
+{
+  "seed": 220826,
+  "market": "US",
+  "symbol": "AAPL",
+  "actions": [
+    {
+      "atMs": 0,
+      "type": "healthyTrade",
+      "price": "100",
+      "epoch": 1,
+      "fencingToken": 1,
+      "marketDataVersion": 1
+    },
+    {
+      "atMs": 5,
+      "type": "restingStop",
+      "side": "SELL",
+      "stopPrice": "90",
+      "quantity": "1"
+    },
+    { "atMs": 10, "type": "transportClose", "causeCode": "TRANSPORT_CLOSED" },
+    { "atMs": 20, "type": "droppedUnseenCrossingTrade", "price": "88" },
+    {
+      "atMs": 30,
+      "type": "recoveredRestPriceBook",
+      "price": "88",
+      "epoch": 2,
+      "fencingToken": 2,
+      "marketDataVersion": 1
+    },
+    {
+      "atMs": 40,
+      "type": "staleOldEpochFrame",
+      "price": "88",
+      "epoch": 1,
+      "fencingToken": 1,
+      "marketDataVersion": 2
+    },
+    { "atMs": 50, "type": "leaderHandoff", "epoch": 2, "fencingToken": 3 },
+    {
+      "atMs": 60,
+      "type": "currentEpochTrade",
+      "price": "87",
+      "epoch": 2,
+      "fencingToken": 3,
+      "marketDataVersion": 3
+    }
+  ],
+  "expected": {
+    "historicalFills": 0,
+    "recoveryFills": { "min": 0, "max": 1 },
+    "staleFrameRejected": true,
+    "balancedLedger": true,
+    "incidentChain": 1,
+    "terminalOrdersNeverRearm": true,
+    "permutationsDeterministic": true
+  }
+}

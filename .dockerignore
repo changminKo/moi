@@ -1,0 +1,36 @@
+# Version control and developer tooling never enter a build context.
+.git
+.github
+.codegraph
+.cursor
+.omc
+**/.omc
+**/.cursor
+**/.codegraph
+.superpowers
+**/.superpowers
+.turbo
+**/.turbo
+
+# Secrets and local environment files.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Dependencies and build outputs are recreated inside the builder stage.
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/playwright-report
+**/test-results
+**/*.tsbuildinfo
+
+# Tests, docs, and infrastructure are not runtime inputs.
+**/*.test.*
+**/*.spec.*
+**/test
+apps/e2e
+docs
+infra

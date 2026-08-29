@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # CI never opens an external market connection; every test uses the
+  # in-process fake feed and local containers.
+  MOI_MARKET_DATA: fake
+
+jobs:
+  verify:
+    name: Check, test, build, e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint and format
+        run: pnpm check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit and integration tests
+        # One workspace at a time: the integration suites are container-bound
+        # and the runner has four cores.
+        run: pnpm turbo run test --concurrency=1
+
+      - name: Deployment contract
+        run: pnpm check:deployment
+
+      - name: Deployment tooling tests
+        run: pnpm test:deployment && pnpm test:preflight
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright browser
+        run: pnpm --filter @moi/e2e exec playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        run: pnpm --filter @moi/e2e test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/e2e/playwright-report
+            apps/e2e/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+  handoff-drill:
+    name: Leader handoff drill
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Runs alone: the drill spawns two production processes against loopback
+      # fakes and samples lease state every 100 ms, so it never shares the
+      # parallel test job's CPU/Docker budget.
+      - name: Two-process leader handoff drill (3 consecutive runs)
+        run: |
+          for run in 1 2 3; do
+            pnpm --filter @moi/paper-api test:drill
+          done
+
+      - name: Upload drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leader-handoff-evidence
+          path: apps/paper-api/test-results/leader-handoff
+          retention-days: 14
+          if-no-files-found: ignore
