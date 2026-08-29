@@ -94,10 +94,12 @@ describe('provider allow list', () => {
       assert.ok(!Number.isNaN(Date.parse(entry.registeredAt)));
       assert.ok(entry.registeredBy.length > 0);
     }
-    // Production is registered only once a static address exists.
+    // The Oracle reference host's reserved address is the only production
+    // registration; anything else is refused.
+    assert.equal(checkEgress('138.2.53.206', entries, 'production'), undefined);
     assert.match(
       checkEgress('203.0.113.1', entries, 'production') ?? '',
-      /no egress address is registered for production/,
+      /not registered for production/,
     );
   });
   it('accepts a registered address for its environment only', () => {

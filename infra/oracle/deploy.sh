@@ -5,7 +5,7 @@
 #
 # 1. fetch the ref, 2. production preflight (secrets, compose config, and the
 # host's real egress address against infra/provider-allowlist.yaml — overrides
-# are refused for production), 3. build images on this host (arm64 or amd64),
+# are refused for production), 3. pull the images CI published to GHCR,
 # 4. restart the stack through systemd so the old leader drains before the new
 # one starts (compose recreates containers stop-then-start; no surge).
 set -euo pipefail
@@ -29,8 +29,9 @@ pnpm install --frozen-lockfile --silent
 echo "== preflight (production)"
 sops exec-env /etc/moi/secrets.enc.env 'pnpm preflight:deploy --environment production'
 
-echo "== build"
-sops exec-env /etc/moi/secrets.enc.env 'docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml build --quiet'
+echo "== pull images (${MOI_IMAGE_TAG:-main})"
+# Hosts never build (a 1 GB Micro cannot); CI publishes multi-arch images.
+sops exec-env /etc/moi/secrets.enc.env 'docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml pull --quiet'
 
 echo "== stop-then-start"
 sudo systemctl restart moi

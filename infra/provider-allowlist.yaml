@@ -13,6 +13,11 @@ registered_egress_ips:
     registered_at: 2026-08-30
     registered_by: rhckdals123@gmail.com
     note: developer workstation egress for the local Toss smoke; not a production address
+  - address: 138.2.53.206
+    environment: production
+    registered_at: 2026-08-30
+    registered_by: rhckdals123@gmail.com
+    note: Oracle Cloud ap-osaka-1 reserved public IP of the moi-prod host (infra/oracle)
 # Entry shape (one per static egress address):
 #   - address: 203.0.113.10
 #     environment: production
