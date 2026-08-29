@@ -1,6 +1,6 @@
 # Deployment guide
 
-Skipjack ships as two images and two managed data stores. This guide is
+Moi ships as two images and two managed data stores. This guide is
 provider-neutral: `infra/compose.yaml` is the reference topology, and the
 section *Mapping onto hosted platforms* explains how the same roles land on a
 PaaS or Kubernetes. `pnpm check:deployment` enforces the invariants below
@@ -26,7 +26,7 @@ persistent volumes.
 > not evidence that this candidate is approved for public deployment.
 
 Run exactly one `paper-api` replica (one leader replica). The single `paper-api` process both serves HTTP and owns exactly one leader
-per market (`skipjack.leader-markets` label). Running more than one
+per market (`moi.leader-markets` label). Running more than one
 `paper-api` replica is outside the MVP: a second replica would open a second
 pair of Toss connections and race for the lease.
 
@@ -125,7 +125,7 @@ the markets never leave `RECOVERING`. Therefore:
   to HTTPS. HSTS `max-age=31536000; includeSubDomains`.
 - The session cookie is `Secure`, `HttpOnly`, `SameSite=Lax`. The web and
   API origins must therefore be **same-site** (for example
-  `app.skipjack.example` and `api.skipjack.example`) so `SameSite=Lax`
+  `app.moi.example` and `api.moi.example`) so `SameSite=Lax`
   cookies accompany fetches. Cross-site origins are not supported.
 - `PUBLIC_ORIGIN` on the API and `PUBLIC_API_ORIGIN` on the web must match the
   externally visible origins exactly (scheme, host, port).
@@ -170,8 +170,8 @@ the markets never leave `RECOVERING`. Therefore:
      be configured for `maxSurge: 0` / `Recreate` for `paper-api`.
    - `web` may roll normally; it is stateless.
 4. **Verify** — before a release, run the two-process handoff drill (loopback
-   fake provider, Docker required): `pnpm --filter @skipjack/paper-api build &&
-   pnpm --filter @skipjack/paper-api test:drill`. It must pass three consecutive times
+   fake provider, Docker required): `pnpm --filter @moi/paper-api build &&
+   pnpm --filter @moi/paper-api test:drill`. It must pass three consecutive times
    with `peakConcurrentConnections === 2` and `evictions === 0`; evidence is
    written to `apps/paper-api/test-results/leader-handoff/`. Then verify with
    the checks in any runbook's *Verification* section:
@@ -228,7 +228,7 @@ cycles; readiness never turns green within `start_period`.
 export PUBLIC_ORIGIN=http://localhost:8080 PUBLIC_API_ORIGIN=http://localhost:3000 \
   POSTGRES_PASSWORD=$(openssl rand -hex 16) CSRF_SECRET=$(openssl rand -hex 32) \
   ADMIN_API_KEY=$(openssl rand -hex 32) SESSION_HASH_KEYS=$(openssl rand -hex 32)
-export DATABASE_URL="postgres://skipjack:${POSTGRES_PASSWORD}@postgres:5432/skipjack"
+export DATABASE_URL="postgres://moi:${POSTGRES_PASSWORD}@postgres:5432/moi"
 docker compose -f infra/compose.yaml config --quiet
 docker compose -f infra/compose.yaml up --build
 ```

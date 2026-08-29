@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError, type Market } from '@skipjack/trading-core';
+import { DomainError, type Market } from '@moi/trading-core';
 import type { OrderPlacementService } from './order-placement-service.js';
 import {
   type AmendOrderInput,

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { FakeConnectionLedger } from '@skipjack/market-data';
+import { FakeConnectionLedger } from '@moi/market-data';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
@@ -149,7 +149,7 @@ const leaseBackendPid = async (leaderId: string, market: string) =>
     (
       await observer.query(
         'select pid from pg_stat_activity where application_name = $1',
-        [`skipjack-lease-${market}-${leaderId}`],
+        [`moi-lease-${market}-${leaderId}`],
       )
     ).rows[0]?.pid,
   );

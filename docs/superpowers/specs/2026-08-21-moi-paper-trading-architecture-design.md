@@ -1,17 +1,17 @@
-# Skipjack 실시간 가상투자 아키텍처 설계
+# Moi 실시간 가상투자 아키텍처 설계
 
 - 작성일: 2026-08-21
 - 상태: 대화형 설계 승인 완료, 문서 검토 요청
-- 대상 저장소: `skipjack` 공개 모노레포
-- 후속 저장소: `skipjack-bot` 비공개 개인 실거래 봇
+- 대상 저장소: `moi` 공개 모노레포
+- 후속 저장소: `moi-bot` 비공개 개인 실거래 봇
 
 ## 1. 요약
 
-Skipjack은 토스증권 Open API의 국내·미국 주식 시세를 이용하는 서버 권위형 실시간 가상투자 서비스다. 비회원 사용자는 익명 세션으로 KRW 10,000,000의 초기 자산을 받고, KRW/USD 지갑과 가상 환전을 이용해 시장가·지정가·스탑·익절·OCO 주문을 낼 수 있다. 가상 체결 엔진은 실제 호가 깊이를 사용해 부분 체결과 슬리피지를 계산하지만 거래소 큐 순서나 가상 사용자의 주문이 실제 시장에 미치는 영향은 모사하지 않는다.
+Moi은 토스증권 Open API의 국내·미국 주식 시세를 이용하는 서버 권위형 실시간 가상투자 서비스다. 비회원 사용자는 익명 세션으로 KRW 10,000,000의 초기 자산을 받고, KRW/USD 지갑과 가상 환전을 이용해 시장가·지정가·스탑·익절·OCO 주문을 낼 수 있다. 가상 체결 엔진은 실제 호가 깊이를 사용해 부분 체결과 슬리피지를 계산하지만 거래소 큐 순서나 가상 사용자의 주문이 실제 시장에 미치는 영향은 모사하지 않는다.
 
-공개 `skipjack`은 웹 UI, 가상투자 API, 거래 도메인 코어, 토스 시세 게이트웨이와 `PaperBroker`를 포함한다. 실제 계좌 주문, 계좌 식별자, 실거래 전략과 리스크 정책은 별도의 비공개 `skipjack-bot`에만 둔다. 의존 방향은 항상 `skipjack-bot -> skipjack 공개 패키지`다.
+공개 `moi`은 웹 UI, 가상투자 API, 거래 도메인 코어, 토스 시세 게이트웨이와 `PaperBroker`를 포함한다. 실제 계좌 주문, 계좌 식별자, 실거래 전략과 리스크 정책은 별도의 비공개 `moi-bot`에만 둔다. 의존 방향은 항상 `moi-bot -> moi 공개 패키지`다.
 
-설계의 가장 중요한 제약은 토스 WebSocket 시세가 LOSSY이고 유실 감지용 sequence와 구독 직후 초기 스냅샷을 제공하지 않는다는 점이다. 따라서 Skipjack은 누락 이벤트를 추정하거나 소급 체결하지 않는다. 장애 중에는 거래를 멈추고, REST 최신 현재가와 호가를 새 기준으로 삼아 결정적으로 복구한다.
+설계의 가장 중요한 제약은 토스 WebSocket 시세가 LOSSY이고 유실 감지용 sequence와 구독 직후 초기 스냅샷을 제공하지 않는다는 점이다. 따라서 Moi은 누락 이벤트를 추정하거나 소급 체결하지 않는다. 장애 중에는 거래를 멈추고, REST 최신 현재가와 호가를 새 기준으로 삼아 결정적으로 복구한다.
 
 ## 2. 목표와 비목표
 
@@ -91,7 +91,7 @@ Skipjack은 토스증권 Open API의 국내·미국 주식 시세를 이용하�
 공개 저장소는 pnpm workspace와 Turborepo를 사용한다.
 
 ```text
-skipjack/
+moi/
 ├── apps/
 │   ├── web/                 # React/TypeScript 사용자 UI
 │   └── paper-api/           # 장기 실행 API, 시세 연결, 가상 체결
@@ -106,7 +106,7 @@ skipjack/
 
 ### 4.2 비공개 실거래 저장소
 
-`skipjack-bot`에는 다음만 둔다.
+`moi-bot`에는 다음만 둔다.
 
 - 실제 주문을 전송하는 `TossBroker`
 - 실제 OAuth 토큰과 계좌 식별자
@@ -130,7 +130,7 @@ flowchart LR
     PG --> Outbox[Transactional Outbox]
     Outbox --> API
     Redis[(Redis)] -. rate limits/cache only .-> API
-    PrivateBot[private skipjack-bot] --> PublicPackages[public trading packages]
+    PrivateBot[private moi-bot] --> PublicPackages[public trading packages]
 ```
 
 - PostgreSQL은 주문, 자산, 안전 incident, 감사와 outbox의 유일한 권위 상태다.
@@ -595,7 +595,7 @@ MVP 이후에는 다음 순서로 확장한다.
 
 1. 공개 거래 코어의 API 안정화와 정확한 버전의 공개 패키지 배포
 2. recorded market replay와 백테스트 도구
-3. 비공개 `skipjack-bot`에서 shadow 실행
+3. 비공개 `moi-bot`에서 shadow 실행
 4. 공개 `PaperBroker`와 동일 전략 계약을 사용한 paper 검증
 5. 비공개 reconciliation, 계좌 risk limit와 2인 승인 수준의 live safety 추가
 6. 소액 canary live 후 제한적인 개인 live 운영

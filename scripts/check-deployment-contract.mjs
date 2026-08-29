@@ -245,8 +245,8 @@ check('compose topology', () => {
     1,
     'exactly one paper-api replica by default',
   );
-  assert.equal(api.labels?.['skipjack.role'], 'http+market-data-leader');
-  const markets = String(api.labels?.['skipjack.leader-markets'] ?? '')
+  assert.equal(api.labels?.['moi.role'], 'http+market-data-leader');
+  const markets = String(api.labels?.['moi.leader-markets'] ?? '')
     .split(',')
     .map((m) => m.trim())
     .filter(Boolean);
@@ -260,13 +260,13 @@ check('compose topology', () => {
   for (const [name, service] of Object.entries(services)) {
     if (name === 'paper-api') continue;
     assert.equal(
-      service.labels?.['skipjack.leader-markets'],
+      service.labels?.['moi.leader-markets'],
       undefined,
       `${name} must not claim leadership`,
     );
   }
-  const liveness = api.labels?.['skipjack.liveness-path'];
-  const readiness = api.labels?.['skipjack.readiness-path'];
+  const liveness = api.labels?.['moi.liveness-path'];
+  const readiness = api.labels?.['moi.readiness-path'];
   assert.equal(liveness, '/health/live');
   assert.equal(readiness, '/health/ready');
   assert.notEqual(
@@ -620,8 +620,8 @@ check('ci workflow', () => {
     'pnpm test',
     'pnpm check:deployment',
     'pnpm build',
-    'pnpm --filter @skipjack/e2e exec playwright install --with-deps chromium',
-    'pnpm --filter @skipjack/e2e test:e2e',
+    'pnpm --filter @moi/e2e exec playwright install --with-deps chromium',
+    'pnpm --filter @moi/e2e test:e2e',
   ]) {
     assert.ok(
       runs.split('\n').some((l) => l.trim() === command),

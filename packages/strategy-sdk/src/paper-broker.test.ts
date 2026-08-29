@@ -7,7 +7,7 @@ import {
   type Quantity,
   type Side,
   type WalletSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import type {
   CancelOrderCommand,

@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 export interface StoredHttpResponse {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string>>;

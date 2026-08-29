@@ -33,7 +33,7 @@ class Deferred<T = void> {
   }
 }
 
-const ORIGIN = 'https://app.skipjack.test';
+const ORIGIN = 'https://app.moi.test';
 const TRADABLE = new Set(['US:AAPL', 'KR:005930', 'US:MSFT']);
 const E = (
   sequence: number,

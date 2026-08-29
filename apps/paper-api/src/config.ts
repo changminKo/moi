@@ -1,4 +1,4 @@
-import { TOSS_CONTRACT_SERVERS } from '@skipjack/market-data';
+import { TOSS_CONTRACT_SERVERS } from '@moi/market-data';
 import { z } from 'zod';
 
 export class ConfigError extends Error {

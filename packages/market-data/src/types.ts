@@ -11,7 +11,7 @@ import type {
   Market,
   OrderBookSnapshot,
   Quantity,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 
 export type MarketDataChannel = 'trade' | 'orderBook';
 

@@ -1,5 +1,5 @@
 {
-  "name": "@skipjack/strategy-sdk",
+  "name": "@moi/strategy-sdk",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"
   },
   "dependencies": {
-    "@skipjack/trading-core": "workspace:*"
+    "@moi/trading-core": "workspace:*"
   },
   "devDependencies": {
     "vitest": "4.1.11"

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import { Client, type PoolClient } from 'pg';
 import type { MetricsRegistry } from '../observability/metrics.js';
 
@@ -327,7 +327,7 @@ async function openConnection(
   if (options.clientFactory !== undefined) return options.clientFactory();
   const client = new Client({
     connectionString: options.connectionString ?? process.env.DATABASE_URL,
-    application_name: `skipjack-lease-${market}-${options.leaderId ?? 'unknown'}`,
+    application_name: `moi-lease-${market}-${options.leaderId ?? 'unknown'}`,
   });
   await client.connect();
   return client as unknown as LeaseConnection;

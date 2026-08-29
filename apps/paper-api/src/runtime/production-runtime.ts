@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { Market } from '@skipjack/trading-core';
-import { createFeeModel, DomainError } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
+import { createFeeModel, DomainError } from '@moi/trading-core';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { buildApp } from '../app.js';

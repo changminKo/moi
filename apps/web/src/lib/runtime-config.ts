@@ -4,20 +4,20 @@ type RuntimeConfigInput = Readonly<{ apiOrigin: string }>;
 
 declare global {
   interface Window {
-    __SKIPJACK_RUNTIME_CONFIG__?: RuntimeConfigInput;
+    __MOI_RUNTIME_CONFIG__?: RuntimeConfigInput;
   }
 }
 
 const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 export function readRuntimeConfig(
-  input: RuntimeConfigInput = window.__SKIPJACK_RUNTIME_CONFIG__ ?? {
+  input: RuntimeConfigInput = window.__MOI_RUNTIME_CONFIG__ ?? {
     apiOrigin: window.location.origin,
   },
   options: Readonly<{ production?: boolean }> = {
     production:
       import.meta.env.PROD &&
-      import.meta.env.VITE_SKIPJACK_ALLOW_LOCAL_HTTP !== 'true',
+      import.meta.env.VITE_MOI_ALLOW_LOCAL_HTTP !== 'true',
   },
 ): RuntimeConfig {
   let parsed: URL;

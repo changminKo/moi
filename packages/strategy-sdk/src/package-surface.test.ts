@@ -46,7 +46,7 @@ describe('published surface', () => {
     // `broker-contract.ts` is published, and it drives a test runner, so the
     // runner has to be a declared dependency rather than an ambient root hoist.
     expect(declared).toContain('vitest');
-    expect(declared).toContain('@skipjack/trading-core');
+    expect(declared).toContain('@moi/trading-core');
   });
 
   it('keeps compiled test files out of the build', () => {

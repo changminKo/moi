@@ -1,4 +1,4 @@
-import { createFeeModel } from '@skipjack/trading-core';
+import { createFeeModel } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import { PaperEngine } from './engine/paper-engine.js';
 import { FxService } from './modules/fx/fx-service.js';

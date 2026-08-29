@@ -132,7 +132,7 @@ export class SessionService {
     }
     const nonce = this.#codec.issue().token;
     const csrfToken = csrf(this.#csrfSecret, session.id, nonce);
-    const setCookie = `skipjack_session=${token}; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/; HttpOnly;${this.#secureCookie ? ' Secure;' : ''} SameSite=Lax`;
+    const setCookie = `moi_session=${token}; Max-Age=${SESSION_MAX_AGE_SECONDS}; Path=/; HttpOnly;${this.#secureCookie ? ' Secure;' : ''} SameSite=Lax`;
     if (!token) throw new Error('session token was not issued');
     return { session, token, csrfToken, setCookie };
   }

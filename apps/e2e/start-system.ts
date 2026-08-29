@@ -9,8 +9,8 @@ import {
 } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FakeMarketData } from '@skipjack/market-data';
-import { createFeeModel, decimal } from '@skipjack/trading-core';
+import { FakeMarketData } from '@moi/market-data';
+import { createFeeModel, decimal } from '@moi/trading-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { Pool } from 'pg';
 import {
@@ -699,7 +699,7 @@ async function runPnpm(args: readonly string[]): Promise<void> {
       cwd: workspaceRoot,
       env: {
         ...process.env,
-        VITE_SKIPJACK_ALLOW_LOCAL_HTTP: 'true',
+        VITE_MOI_ALLOW_LOCAL_HTTP: 'true',
       },
       stdio: 'inherit',
     });
@@ -832,9 +832,9 @@ async function main(): Promise<void> {
   await Promise.all([API_PORT, WEB_PORT, CONTROL_PORT].map(assertPortFree));
   postgres = await new GenericContainer('postgres:16-alpine')
     .withEnvironment({
-      POSTGRES_USER: 'skipjack',
-      POSTGRES_PASSWORD: 'skipjack',
-      POSTGRES_DB: 'skipjack',
+      POSTGRES_USER: 'moi',
+      POSTGRES_PASSWORD: 'moi',
+      POSTGRES_DB: 'moi',
     })
     .withExposedPorts(5432)
     .withWaitStrategy(
@@ -848,9 +848,9 @@ async function main(): Promise<void> {
   pool = new Pool({
     host: postgres.getHost(),
     port: postgres.getMappedPort(5432),
-    user: 'skipjack',
-    password: 'skipjack',
-    database: 'skipjack',
+    user: 'moi',
+    password: 'moi',
+    database: 'moi',
   });
   for (const migration of ['001_ledger.sql', '002_audit_partitions.sql']) {
     await pool.query(
@@ -865,7 +865,7 @@ async function main(): Promise<void> {
     host: '127.0.0.1',
     port: API_PORT,
     publicOrigin,
-    databaseUrl: `postgresql://skipjack:skipjack@${postgres.getHost()}:${postgres.getMappedPort(5432)}/skipjack`,
+    databaseUrl: `postgresql://moi:moi@${postgres.getHost()}:${postgres.getMappedPort(5432)}/moi`,
     redisUrl: `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`,
     sessionHashKeys: [randomBytes(32).toString('base64url')],
     csrfSecret: randomBytes(32).toString('base64url'),
@@ -1142,12 +1142,12 @@ async function main(): Promise<void> {
     }),
     { mode: 0o600 },
   );
-  await runPnpm(['--filter', '@skipjack/web', 'build']);
+  await runPnpm(['--filter', '@moi/web', 'build']);
   webProcess = spawn(
     'pnpm',
     [
       '--filter',
-      '@skipjack/web',
+      '@moi/web',
       'preview',
       '--host',
       '127.0.0.1',
@@ -1158,13 +1158,13 @@ async function main(): Promise<void> {
       cwd: workspaceRoot,
       env: {
         ...process.env,
-        SKIPJACK_DEV_API_ORIGIN: `http://127.0.0.1:${API_PORT}`,
+        MOI_DEV_API_ORIGIN: `http://127.0.0.1:${API_PORT}`,
       },
       stdio: 'inherit',
     },
   );
   await waitForWeb();
-  console.log(`Skipjack E2E system ready at ${publicOrigin}`);
+  console.log(`Moi E2E system ready at ${publicOrigin}`);
 }
 
 process.once('SIGTERM', () => void cleanup().finally(() => process.exit(0)));

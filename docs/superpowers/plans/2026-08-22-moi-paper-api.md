@@ -1,4 +1,4 @@
-# Skipjack Paper API Implementation Plan
+# Moi Paper API Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** The Plan 1–2 stack plus Fastify 5.12.1, @fastify/cookie 11.1.2, @fastify/cors 11.3.0, @fastify/helmet 13.1.1, @fastify/websocket 11.3.0, @fastify/rate-limit 11.2.0, Zod 4.4.3, Pino 10.3.1, ioredis 6.0.0, prom-client 15.1.3, and Node.js crypto.
 
-**Spec:** `docs/superpowers/specs/2026-08-21-skipjack-paper-trading-architecture-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-21-moi-paper-trading-architecture-design.md`
 
 ## Global Constraints
 
@@ -62,7 +62,7 @@ it('returns a request id and stable not-found envelope', async () => {
 
 - [ ] **Step 2: Run and verify the app is missing**
 
-Run: `pnpm --filter @skipjack/paper-api test -- app.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- app.test.ts`
 
 Expected: FAIL because `buildApp` does not exist.
 
@@ -95,7 +95,7 @@ Validate environment with Zod at process start; `server.ts` alone opens sockets,
 
 - [ ] **Step 4: Run app, type, and redaction tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- app.test.ts && pnpm --filter @skipjack/paper-api typecheck`
+Run: `pnpm --filter @moi/paper-api test -- app.test.ts && pnpm --filter @moi/paper-api typecheck`
 
 Expected: PASS and logs redact authorization, cookie, CSRF, and session-token fields.
 
@@ -143,7 +143,7 @@ it('stores only an HMAC hash and returns the raw token once', async () => {
 
 - [ ] **Step 2: Run session tests and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- session-token.test.ts session-service.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- session-token.test.ts session-service.integration.test.ts`
 
 Expected: FAIL.
 
@@ -155,7 +155,7 @@ On 30 inactive days, one cleanup transaction acquires account gates, creates an 
 
 - [ ] **Step 4: Run cookie, rotation, CSRF, concurrency, and expiry tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- session-token.test.ts session-service.integration.test.ts session-routes.test.ts session-cleanup.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- session-token.test.ts session-service.integration.test.ts session-routes.test.ts session-cleanup.integration.test.ts`
 
 Expected: PASS: concurrent bootstrap cannot initialize one token twice; old hash key authenticates during rotation; invalid Origin and CSRF return 403; expiry leaves no reservation.
 
@@ -207,7 +207,7 @@ it('rejects an exchange quote after ten seconds', async () => {
 
 - [ ] **Step 2: Run and verify missing instrument/FX services**
 
-Run: `pnpm --filter @skipjack/paper-api test -- instrument-routes.test.ts fx-service.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- instrument-routes.test.ts fx-service.integration.test.ts`
 
 Expected: FAIL.
 
@@ -242,7 +242,7 @@ Validate all 80 identifiers against one dated Toss catalog snapshot during imple
 
 - [ ] **Step 4: Run route, decimal, replay, and concurrent-exchange tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- instrument-routes.test.ts whitelist-service.integration.test.ts market-calendar-service.integration.test.ts fx-service.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- instrument-routes.test.ts whitelist-service.integration.test.ts market-calendar-service.integration.test.ts fx-service.integration.test.ts`
 
 Expected: PASS with no cross-currency mutation and exact original response replay.
 
@@ -290,7 +290,7 @@ it('allows cancel but rejects place while CANCEL_ONLY', async () => {
 
 - [ ] **Step 2: Run order route tests and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- order-routes.integration.test.ts canonical-request.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- order-routes.integration.test.ts canonical-request.test.ts`
 
 Expected: FAIL.
 
@@ -310,7 +310,7 @@ Persist deterministic success/rejection with the command transaction; do not per
 
 - [ ] **Step 4: Run validation, replay, race, market-session, and OCO route tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- order-routes.integration.test.ts canonical-request.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- order-routes.integration.test.ts canonical-request.test.ts`
 
 Expected: PASS, including same-key concurrent requests and active-leg counting where one OCO consumes two legs.
 
@@ -351,7 +351,7 @@ it('returns wallets, positions, reservations, active orders, and latest durable 
 
 - [ ] **Step 2: Run and verify routes are missing**
 
-Run: `pnpm --filter @skipjack/paper-api test -- portfolio-routes.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- portfolio-routes.integration.test.ts`
 
 Expected: FAIL.
 
@@ -361,7 +361,7 @@ Use one read-only repeatable-read transaction so wallets, positions, reservation
 
 - [ ] **Step 4: Run consistency and authorization tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- portfolio-routes.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- portfolio-routes.integration.test.ts`
 
 Expected: PASS when a fill commits concurrently; response is entirely before or after the fill, never mixed.
 
@@ -401,7 +401,7 @@ it('replays committed account events and permits eventId deduplication', async (
 
 - [ ] **Step 2: Run and verify stream modules are missing**
 
-Run: `pnpm --filter @skipjack/paper-api test -- stream-routes.test.ts outbox-publisher.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- stream-routes.test.ts outbox-publisher.integration.test.ts`
 
 Expected: FAIL.
 
@@ -426,7 +426,7 @@ Validate the WebSocket handshake Origin and session cookie before upgrade. Allow
 
 - [ ] **Step 4: Run reconnect, slow-client, and authorization tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- stream-routes.test.ts outbox-publisher.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- stream-routes.test.ts outbox-publisher.integration.test.ts`
 
 Expected: PASS; slow clients are disconnected without blocking the outbox poller, and one session cannot subscribe to another session.
 
@@ -476,7 +476,7 @@ it('blocks place but allows locally limited cancel when Redis is down', async ()
 
 - [ ] **Step 2: Run and verify modules are missing**
 
-Run: `pnpm --filter @skipjack/paper-api test -- health-routes.test.ts admin-routes.integration.test.ts rate-limits.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- health-routes.test.ts admin-routes.integration.test.ts rate-limits.test.ts`
 
 Expected: FAIL.
 
@@ -490,7 +490,7 @@ Implement session 5/s burst 10 mutation, cancel 10/s burst 20, IP 20/s burst 40,
 
 - [ ] **Step 4: Run health, cardinality, rate, admin-lockout, and CAS tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- health-routes.test.ts admin-routes.integration.test.ts rate-limits.test.ts metrics.test.ts logger.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- health-routes.test.ts admin-routes.integration.test.ts rate-limits.test.ts metrics.test.ts logger.test.ts`
 
 Expected: PASS; `/metrics` contains no high-cardinality identifier and an audit outage prevents incident release.
 
@@ -537,7 +537,7 @@ Inject crash points immediately before ledger commit and immediately after commi
 
 - [ ] **Step 3: Run the entire API suite**
 
-Run: `pnpm --filter @skipjack/paper-api test -- api.acceptance.integration.test.ts api.crash-recovery.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- api.acceptance.integration.test.ts api.crash-recovery.integration.test.ts`
 
 Expected: PASS with PostgreSQL/Redis Testcontainers and fake market data.
 

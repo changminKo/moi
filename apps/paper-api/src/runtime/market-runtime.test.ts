@@ -2,8 +2,8 @@ import {
   FakeMarketData,
   type MarketSnapshotSource,
   type RecoverySnapshot,
-} from '@skipjack/market-data';
-import { DomainError, type Market } from '@skipjack/trading-core';
+} from '@moi/market-data';
+import { DomainError, type Market } from '@moi/trading-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import type { LeaderLease } from '../market-data/leader-lease.js';

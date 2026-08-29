@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import { chooseRecoveryLeg } from './conditional-trigger.js';
 import type { PricingContext } from './pricing-context.js';
 

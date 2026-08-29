@@ -114,7 +114,7 @@ PostgreSQL, and Redis. Its `finally` path cancelled all test orders and restored
 
 ## Clean-room gate
 
-The final clean clone was `/tmp/skipjack-task9-final.oy8C20/repo`, with no
+The final clean clone was `/tmp/moi-task9-final.oy8C20/repo`, with no
 developer environment files copied. The candidate changes were committed only
 inside that disposable clone so `git diff --exit-code` could validate the exact
 required order. The temporary clone remains on disk for inspection.
@@ -127,7 +127,7 @@ required order. The temporary clone remains on disk for inspection.
 | 2026-08-26T06:05:10Z | same | `pnpm test` | pass; 66 files / 1,026 tests |
 | 2026-08-26T06:05:10Z | same | `pnpm check:deployment` | pass |
 | 2026-08-26T06:05:10Z | same | `pnpm build` | pass |
-| 2026-08-26T06:05:10Z | same | `pnpm --filter @skipjack/e2e test:e2e` | pass; 18/18 desktop and mobile |
+| 2026-08-26T06:05:10Z | same | `pnpm --filter @moi/e2e test:e2e` | pass; 18/18 desktop and mobile |
 | 2026-08-26T06:05:10Z | same | `git diff --exit-code` | pass |
 | 2026-08-26T06:05:10Z | same | Gitleaks + production audit | pass |
 | 2026-08-26T06:05:10Z | same | both image builds + Trivy | pass; 0 HIGH/CRITICAL |

@@ -7,7 +7,7 @@ import {
   planOcoReservation,
   planReservation,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import {
   commitOcoPlacement,
   commitTradingMutation,

@@ -5,7 +5,7 @@
 # cause_group, tx_type, lock_type}; every rule links exactly one committed
 # runbook. Notification grouping and cooldown live in alertmanager.yaml.
 groups:
-  - name: skipjack-immediate
+  - name: moi-immediate
     rules:
       - alert: InvariantViolation
         expr: increase(invariant_violation_total[5m]) > 0
@@ -36,7 +36,7 @@ groups:
           summary: "Safety incident active ({{ $labels.scope_type }}, {{ $labels.cause_group }})"
           runbook: docs/runbooks/emergency-cancel-only.md
 
-  - name: skipjack-market-data
+  - name: moi-market-data
     rules:
       - alert: MarketDataDegradedSustained
         expr: market_data_health{state="DEGRADED"} == 1
@@ -71,7 +71,7 @@ groups:
           summary: "Toss feed reconnected 3+ times in 10 minutes"
           runbook: docs/runbooks/market-data-degraded.md
 
-  - name: skipjack-database
+  - name: moi-database
     rules:
       - alert: TransactionErrors
         expr: increase(transaction_error_total[5m]) > 0
@@ -98,7 +98,7 @@ groups:
           summary: "Oldest pending outbox event older than 30s; user streams are stale"
           runbook: docs/runbooks/postgres-or-outbox-lag.md
 
-  - name: skipjack-runtime
+  - name: moi-runtime
     rules:
       - alert: ProviderConnectionsAboveLimit
         expr: provider_connections_open > 2

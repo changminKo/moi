@@ -1,4 +1,4 @@
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import {
   ALL_CAPABILITIES,
   type Capability,

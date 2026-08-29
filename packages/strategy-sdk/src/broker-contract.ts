@@ -1,5 +1,5 @@
 /**
- * The executable Broker contract, published as `@skipjack/strategy-sdk/testing`.
+ * The executable Broker contract, published as `@moi/strategy-sdk/testing`.
  *
  * This is a source module rather than a test file so an implementation outside
  * this package can import and run it. It declares no vendor, server, or browser
@@ -15,7 +15,7 @@ import {
   type OrderType,
   transitionOrder,
   type WalletSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { beforeEach, expect, it } from 'vitest';
 import {
   type Broker,

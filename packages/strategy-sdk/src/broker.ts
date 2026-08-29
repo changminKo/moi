@@ -10,7 +10,7 @@ import {
   type Quantity,
   type Side,
   type WalletSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 
 import {
   assertCommandObject,

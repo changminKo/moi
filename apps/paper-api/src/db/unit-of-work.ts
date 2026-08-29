@@ -7,7 +7,7 @@ import {
   type OrderType,
   type Quantity,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type { IsolationLevel } from 'kysely';
 import {
   type Database,

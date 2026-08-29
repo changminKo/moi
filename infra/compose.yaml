@@ -1,4 +1,4 @@
-# Provider-neutral reference topology for the Skipjack public MVP.
+# Provider-neutral reference topology for the Moi public MVP.
 #
 # One public web service, one single-replica paper-api process that serves
 # HTTP and owns exactly one fenced market-data leader per market, PostgreSQL,
@@ -8,20 +8,20 @@
 # Every secret is injected at runtime through required interpolation
 # (`${VAR:?message}`); nothing sensitive is committed here.
 
-name: skipjack
+name: moi
 
 services:
   web:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
-    image: skipjack/web:local
+    image: moi/web:local
     ports:
       - "${WEB_PORT:-8080}:8080"
     environment:
       NODE_ENV: production
       PORT: "8080"
-      PUBLIC_API_ORIGIN: "${PUBLIC_API_ORIGIN:?public API origin, e.g. https://api.skipjack.example}"
+      PUBLIC_API_ORIGIN: "${PUBLIC_API_ORIGIN:?public API origin, e.g. https://api.moi.example}"
     depends_on:
       paper-api:
         condition: service_healthy
@@ -40,13 +40,13 @@ services:
       - /tmp
     restart: unless-stopped
     labels:
-      skipjack.role: web
+      moi.role: web
 
   paper-api:
     build:
       context: ..
       dockerfile: apps/paper-api/Dockerfile
-    image: skipjack/paper-api:local
+    image: moi/paper-api:local
     ports:
       - "${API_PORT:-3000}:3000"
     deploy:
@@ -57,7 +57,7 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3000"
-      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.skipjack.example}"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.moi.example}"
       DATABASE_URL: "${DATABASE_URL:?postgres connection string with the paper-api role}"
       REDIS_URL: redis://redis:6379
       SESSION_HASH_KEYS: "${SESSION_HASH_KEYS:?comma-separated session hash keys, newest first}"
@@ -93,28 +93,28 @@ services:
       - /tmp
     restart: unless-stopped
     labels:
-      skipjack.role: http+market-data-leader
-      skipjack.leader-markets: KR,US
-      skipjack.liveness-path: /health/live
-      skipjack.readiness-path: /health/ready
+      moi.role: http+market-data-leader
+      moi.leader-markets: KR,US
+      moi.liveness-path: /health/live
+      moi.readiness-path: /health/ready
 
   postgres:
     image: postgres:17.5-alpine
     environment:
-      POSTGRES_DB: skipjack
-      POSTGRES_USER: skipjack
+      POSTGRES_DB: moi
+      POSTGRES_USER: moi
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?database password}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U skipjack -d skipjack"]
+      test: ["CMD-SHELL", "pg_isready -U moi -d moi"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 10s
     restart: unless-stopped
     labels:
-      skipjack.role: database
+      moi.role: database
 
   redis:
     image: redis:7.4.4-alpine
@@ -128,7 +128,7 @@ services:
       retries: 5
     restart: unless-stopped
     labels:
-      skipjack.role: leader-lease-and-fanout
+      moi.role: leader-lease-and-fanout
 
 volumes:
   postgres-data: {}

@@ -3,9 +3,9 @@ import type {
   MarketEvent,
   MarketSnapshotSource,
   TokenProvider,
-} from '@skipjack/market-data';
-import { reconnectDelayMs } from '@skipjack/market-data';
-import type { Market, OrderBookSnapshot } from '@skipjack/trading-core';
+} from '@moi/market-data';
+import { reconnectDelayMs } from '@moi/market-data';
+import type { Market, OrderBookSnapshot } from '@moi/trading-core';
 import type { MarketHealthMachine } from '../market-data/health-machine.js';
 import type { LeaderLease } from '../market-data/leader-lease.js';
 import type {

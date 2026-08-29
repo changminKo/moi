@@ -9,11 +9,11 @@ export function App() {
     <SystemStatusProvider>
       <div className="app-shell">
         <header className="site-header">
-          <a className="brand" href="/trade" aria-label="Skipjack 거래로 이동">
+          <a className="brand" href="/trade" aria-label="Moi 거래로 이동">
             <span className="brand-mark" aria-hidden="true">
               S
             </span>
-            <span>Skipjack</span>
+            <span>Moi</span>
           </a>
           <nav aria-label="주요 메뉴">
             <NavLink

@@ -1,4 +1,4 @@
-import type { DecimalString, OrderBookSnapshot } from '@skipjack/trading-core';
+import type { DecimalString, OrderBookSnapshot } from '@moi/trading-core';
 import { snapshotInput } from '../db/database.js';
 
 /** The complete market-data provenance attached to an execution. */

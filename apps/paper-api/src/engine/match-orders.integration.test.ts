@@ -1,4 +1,4 @@
-import { createFeeModel } from '@skipjack/trading-core';
+import { createFeeModel } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import { matchOrder } from './match-orders.js';
 import { createPricingContext } from './pricing-context.js';

@@ -1,4 +1,4 @@
-import type { OrderBookSnapshot } from '@skipjack/trading-core';
+import type { OrderBookSnapshot } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import manifest from '../package.json' with { type: 'json' };
 import buildConfig from '../tsconfig.json' with { type: 'json' };

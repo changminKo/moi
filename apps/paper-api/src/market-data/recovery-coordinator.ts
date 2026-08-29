@@ -2,7 +2,7 @@ import type {
   DecimalString,
   Market,
   OrderBookSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type { LeaderLease } from './leader-lease.js';
 import type { MarketStateStore } from './market-state-store.js';
 import { SnapshotRateLimiter } from './snapshot-rate-limiter.js';

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig } from './config.js';
 
 const BASE = {
-  PUBLIC_ORIGIN: 'https://app.skipjack.test',
-  DATABASE_URL: 'postgres://u:p@db:5432/skipjack',
+  PUBLIC_ORIGIN: 'https://app.moi.test',
+  DATABASE_URL: 'postgres://u:p@db:5432/moi',
   REDIS_URL: 'redis://redis:6379',
   SESSION_HASH_KEYS: 'k1,k2',
   CSRF_SECRET: 'c'.repeat(32),

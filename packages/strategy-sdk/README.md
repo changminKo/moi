@@ -1,11 +1,11 @@
-# @skipjack/strategy-sdk
+# @moi/strategy-sdk
 
 The strategy-facing contract: the `Broker` interface a trading strategy is
 written against, the `PaperBroker` adapter that speaks to the paper API, and the
 executable contract suite every `Broker` implementation must pass.
 
 ```ts
-import { PaperBroker, type Broker } from '@skipjack/strategy-sdk';
+import { PaperBroker, type Broker } from '@moi/strategy-sdk';
 ```
 
 ## Order commands
@@ -144,7 +144,7 @@ outside this package can satisfy the property `runBrokerContract` enforces
 without hand-rolling the boundary.
 
 ```ts
-import { readPlaceOrderCommand, type Broker } from '@skipjack/strategy-sdk';
+import { readPlaceOrderCommand, type Broker } from '@moi/strategy-sdk';
 
 const myBroker: Pick<Broker, 'placeOrder'> = {
   async placeOrder(command) {
@@ -206,7 +206,7 @@ import {
   CONTRACT_TERMINAL_ORDER_ID,
   CONTRACT_OPEN_ORDER_ID,
   CONTRACT_QUOTE_ID,
-} from '@skipjack/strategy-sdk/testing';
+} from '@moi/strategy-sdk/testing';
 
 describe('my broker', () => {
   runBrokerContract(() => ({
@@ -222,7 +222,7 @@ describe('my broker', () => {
 The factory must build a harness over real state transitions; a forwarding mock
 proves nothing about replay. The suite drives `vitest`, which is why it lives
 behind `./testing` and not on the main entry point — the main entry's runtime
-graph is `@skipjack/trading-core` and nothing else.
+graph is `@moi/trading-core` and nothing else.
 
 What the suite requires of an implementation, beyond replay and the state
 transitions:

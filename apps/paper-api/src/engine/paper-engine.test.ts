@@ -1,4 +1,4 @@
-import { createFeeModel } from '@skipjack/trading-core';
+import { createFeeModel } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import { PaperEngine } from './paper-engine.js';
 
@@ -141,7 +141,7 @@ describe('PaperEngine', () => {
 
 describe('PaperEngine.restoreOrder', () => {
   it('registers a persisted order without matching and keeps its filled quantity', async () => {
-    const { createFeeModel } = await import('@skipjack/trading-core');
+    const { createFeeModel } = await import('@moi/trading-core');
     const fills: unknown[] = [];
     const engine = new PaperEngine({
       feeModel: createFeeModel({

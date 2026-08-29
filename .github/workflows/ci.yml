@@ -15,7 +15,7 @@ concurrency:
 env:
   # CI never opens an external market connection; every test uses the
   # in-process fake feed and local containers.
-  SKIPJACK_MARKET_DATA: fake
+  MOI_MARKET_DATA: fake
 
 jobs:
   verify:
@@ -56,10 +56,10 @@ jobs:
         run: pnpm build
 
       - name: Install Playwright browser
-        run: pnpm --filter @skipjack/e2e exec playwright install --with-deps chromium
+        run: pnpm --filter @moi/e2e exec playwright install --with-deps chromium
 
       - name: End-to-end tests
-        run: pnpm --filter @skipjack/e2e test:e2e
+        run: pnpm --filter @moi/e2e test:e2e
 
       - name: Upload Playwright report
         if: failure()
@@ -101,7 +101,7 @@ jobs:
       - name: Two-process leader handoff drill (3 consecutive runs)
         run: |
           for run in 1 2 3; do
-            pnpm --filter @skipjack/paper-api test:drill
+            pnpm --filter @moi/paper-api test:drill
           done
 
       - name: Upload drill evidence

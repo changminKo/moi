@@ -1,6 +1,6 @@
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { MetricsRegistry } from '../../observability/metrics.js';
 import type { LayeredRateLimiter } from '../../plugins/rate-limits.js';

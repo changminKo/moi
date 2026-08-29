@@ -288,7 +288,7 @@ describe('public release drill', () => {
       );
       expect(bootstrap.status).toBe(200);
       const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0];
-      expect(cookie).toMatch(/^skipjack_session=/);
+      expect(cookie).toMatch(/^moi_session=/);
 
       const portfolio = await fetch(`${server.origin}/api/v1/portfolio`, {
         headers: { cookie: cookie as string },
@@ -381,7 +381,7 @@ describe('public release drill', () => {
       );
       expect(bootstrap.status).toBe(200);
       cookie = bootstrap.headers.get('set-cookie')?.split(';')[0] ?? '';
-      expect(cookie).toMatch(/^skipjack_session=/);
+      expect(cookie).toMatch(/^moi_session=/);
     } finally {
       await stopChild(source.child);
     }
@@ -401,7 +401,7 @@ describe('public release drill', () => {
       '--dbname',
       postgres.getDatabase(),
       '--format=custom',
-      '--file=/tmp/skipjack-release.dump',
+      '--file=/tmp/moi-release.dump',
     ]);
     expect(dump.exitCode).toBe(0);
 
@@ -410,7 +410,7 @@ describe('public release drill', () => {
     ).start();
     try {
       const archiveStream = await postgres.copyArchiveFromContainer(
-        '/tmp/skipjack-release.dump',
+        '/tmp/moi-release.dump',
       );
       if (!(archiveStream instanceof Readable)) {
         throw new Error(
@@ -426,7 +426,7 @@ describe('public release drill', () => {
         restored.getDatabase(),
         '--no-owner',
         '--no-privileges',
-        '/tmp/skipjack-release.dump',
+        '/tmp/moi-release.dump',
       ]);
       expect(restore.exitCode, restore.stderr).toBe(0);
 

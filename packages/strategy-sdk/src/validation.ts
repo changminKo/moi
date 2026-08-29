@@ -3,7 +3,7 @@ import {
   DomainError,
   decimal,
   type Quantity,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 
 /**
  * Boundary predicates shared by the command validator and the response decoder.

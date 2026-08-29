@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createFeeModel } from '@skipjack/trading-core';
+import { createFeeModel } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import type { MarketEnvelope } from '../market-data/market-state-store.js';
 import {

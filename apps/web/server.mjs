@@ -1,5 +1,5 @@
 /**
- * Production static server for the Skipjack web bundle.
+ * Production static server for the Moi web bundle.
  *
  * Deliberately small: GET/HEAD only, paths confined to `dist`, an explicit
  * MIME allowlist, security headers on every response, immutable caching for
@@ -80,7 +80,7 @@ export function renderRuntimeConfig(apiOrigin) {
     .replaceAll('&', '\\u0026')
     .replaceAll(' ', '\\u2028')
     .replaceAll(' ', '\\u2029');
-  return `window.__SKIPJACK_RUNTIME_CONFIG__ = Object.freeze(${json});\n`;
+  return `window.__MOI_RUNTIME_CONFIG__ = Object.freeze(${json});\n`;
 }
 
 function buildCsp(apiOrigin) {

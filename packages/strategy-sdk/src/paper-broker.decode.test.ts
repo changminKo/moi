@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import type { PlaceOrderCommand } from './broker.js';
 import {

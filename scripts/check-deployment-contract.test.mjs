@@ -34,7 +34,7 @@ const TRACKED = [
 ];
 
 function copyRepo(mutate) {
-  const dir = mkdtempSync(join(tmpdir(), 'skipjack-contract-'));
+  const dir = mkdtempSync(join(tmpdir(), 'moi-contract-'));
   for (const entry of TRACKED)
     cpSync(join(root, entry), join(dir, entry), { recursive: true });
   cpSync(

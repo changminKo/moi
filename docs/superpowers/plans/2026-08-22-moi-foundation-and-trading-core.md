@@ -1,14 +1,14 @@
-# Skipjack Foundation and Trading Core Implementation Plan
+# Moi Foundation and Trading Core Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create the pinned TypeScript monorepo, pure trading domain, PostgreSQL ledger, transactional audit/outbox, and deterministic unit and integration tests on which every later Skipjack subsystem depends.
+**Goal:** Create the pinned TypeScript monorepo, pure trading domain, PostgreSQL ledger, transactional audit/outbox, and deterministic unit and integration tests on which every later Moi subsystem depends.
 
 **Architecture:** Keep market-independent rules in `packages/trading-core` as pure functions over decimal strings and immutable snapshots. Keep PostgreSQL migrations and repositories private to `apps/paper-api`; expose transactions through narrow repository interfaces so later market-engine and HTTP layers cannot bypass invariants.
 
 **Tech Stack:** Node.js 24.19.0 LTS, pnpm 11.22.0, Turborepo 2.10.11, TypeScript 7.0.2, Biome 2.5.9, Vitest 4.1.11, fast-check 4.9.0, Decimal.js 10.6.0, Kysely 0.29.5, pg 8.21.3, Testcontainers 12.1.0, PostgreSQL 17.
 
-**Spec:** `docs/superpowers/specs/2026-08-21-skipjack-paper-trading-architecture-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-21-moi-paper-trading-architecture-design.md`
 
 ## Global Constraints
 
@@ -29,9 +29,9 @@
 
 This is plan 1 of 4. Complete it before:
 
-1. `2026-08-22-skipjack-market-data-and-paper-engine.md`
-2. `2026-08-22-skipjack-paper-api.md`
-3. `2026-08-22-skipjack-web-and-operations.md`
+1. `2026-08-22-moi-market-data-and-paper-engine.md`
+2. `2026-08-22-moi-paper-api.md`
+3. `2026-08-22-moi-web-and-operations.md`
 
 ---
 
@@ -59,7 +59,7 @@ This is plan 1 of 4. Complete it before:
 
 **Interfaces:**
 - Consumes: Node.js installed on the worker machine.
-- Produces: `pnpm check`, `pnpm test`, `pnpm typecheck`, and `pnpm build` workspace commands; workspace package names `@skipjack/trading-core`, `@skipjack/strategy-sdk`, and `@skipjack/paper-api`.
+- Produces: `pnpm check`, `pnpm test`, `pnpm typecheck`, and `pnpm build` workspace commands; workspace package names `@moi/trading-core`, `@moi/strategy-sdk`, and `@moi/paper-api`.
 
 - [ ] **Step 1: Write the runtime guard before installing dependencies**
 
@@ -67,7 +67,7 @@ This is plan 1 of 4. Complete it before:
 // scripts/check-runtime.mjs
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major !== 24 || minor < 19) {
-  console.error(`Skipjack requires Node 24.19.x; received ${process.version}`);
+  console.error(`Moi requires Node 24.19.x; received ${process.version}`);
   process.exit(1);
 }
 ```
@@ -76,13 +76,13 @@ if (major !== 24 || minor < 19) {
 
 Run: `node scripts/check-runtime.mjs`
 
-Expected: FAIL on the current Node 20 environment with `Skipjack requires Node 24.19.x`.
+Expected: FAIL on the current Node 20 environment with `Moi requires Node 24.19.x`.
 
 - [ ] **Step 3: Create the pinned workspace manifests**
 
 ```json
 {
-  "name": "skipjack",
+  "name": "moi",
   "private": true,
   "packageManager": "pnpm@11.22.0",
   "engines": { "node": ">=24.19.0 <25" },
@@ -126,7 +126,7 @@ Expected: runtime guard passes, a lockfile is generated, and all empty package c
 
 ```bash
 git add .nvmrc .gitignore package.json pnpm-workspace.yaml turbo.json tsconfig.base.json biome.json scripts packages apps pnpm-lock.yaml
-git commit -m "chore: initialize skipjack workspace"
+git commit -m "chore: initialize moi workspace"
 ```
 
 ---
@@ -163,7 +163,7 @@ describe('decimal primitives', () => {
 
 - [ ] **Step 2: Run the tests and confirm missing exports**
 
-Run: `pnpm --filter @skipjack/trading-core test -- decimal.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- decimal.test.ts`
 
 Expected: FAIL because `canonicalDecimal` and `assertPositiveWholeQuantity` do not exist.
 
@@ -194,7 +194,7 @@ Define `DomainErrorCode` as a closed union containing the stable spec codes plus
 
 - [ ] **Step 4: Run unit, type, and formatting checks**
 
-Run: `pnpm --filter @skipjack/trading-core test && pnpm --filter @skipjack/trading-core typecheck && pnpm check`
+Run: `pnpm --filter @moi/trading-core test && pnpm --filter @moi/trading-core typecheck && pnpm check`
 
 Expected: PASS with no `number`-typed monetary fields.
 
@@ -239,7 +239,7 @@ it('resolves exactly one OCO winner', () => {
 
 - [ ] **Step 2: Run the state tests and verify failure**
 
-Run: `pnpm --filter @skipjack/trading-core test -- order.test.ts oco.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- order.test.ts oco.test.ts`
 
 Expected: FAIL because the state machines are not implemented.
 
@@ -270,7 +270,7 @@ Represent partial IOC completion as terminal `CANCELLED` with positive `filledQu
 
 - [ ] **Step 4: Run focused tests and property-check terminal states**
 
-Run: `pnpm --filter @skipjack/trading-core test -- order.test.ts oco.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- order.test.ts oco.test.ts`
 
 Expected: PASS, including a fast-check property that no generated event can leave a terminal state.
 
@@ -319,7 +319,7 @@ it('rejects two orders that spend the same available cash', () => {
 
 - [ ] **Step 2: Verify the reservation tests fail**
 
-Run: `pnpm --filter @skipjack/trading-core test -- reservation.test.ts invariants.property.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- reservation.test.ts invariants.property.test.ts`
 
 Expected: FAIL because reservation functions are missing.
 
@@ -346,7 +346,7 @@ Implement the symmetric position operation and releases. The reservation planner
 
 Configure fast-check PR runs with seed `220826`, include the failing seed and path in assertion output, and make every generated operation sequence serializable into a regression fixture. A later nightly job may rotate the seed; PR replay remains fixed.
 
-Run: `pnpm --filter @skipjack/trading-core test -- reservation.test.ts invariants.property.test.ts --reporter=verbose`
+Run: `pnpm --filter @moi/trading-core test -- reservation.test.ts invariants.property.test.ts --reporter=verbose`
 
 Expected: PASS for generated create/reserve/release sequences and KRW/USD separation.
 
@@ -396,7 +396,7 @@ it('walks ask depth and cancels an IOC remainder', () => {
 
 - [ ] **Step 2: Run execution tests and verify failure**
 
-Run: `pnpm --filter @skipjack/trading-core test -- execution.test.ts fee-model.test.ts portfolio-math.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- execution.test.ts fee-model.test.ts portfolio-math.test.ts`
 
 Expected: FAIL because execution and fee interfaces do not exist.
 
@@ -418,7 +418,7 @@ Walk asks low-to-high for buys and bids high-to-low for sells; enforce a limit p
 
 - [ ] **Step 4: Run example and metamorphic properties**
 
-Run: `pnpm --filter @skipjack/trading-core test -- execution.test.ts execution.property.test.ts fee-model.test.ts portfolio-math.test.ts`
+Run: `pnpm --filter @moi/trading-core test -- execution.test.ts execution.property.test.ts fee-model.test.ts portfolio-math.test.ts`
 
 Expected: PASS for fill quantity conservation, limit-price protection, deterministic level ordering, configured fee rounding, weighted-average cost, and realized/unrealized PnL.
 
@@ -442,7 +442,7 @@ git commit -m "feat(core): calculate protected book fills"
 - Modify: `packages/strategy-sdk/package.json`
 
 **Interfaces:**
-- Consumes: exported snapshots and command types from `@skipjack/trading-core`.
+- Consumes: exported snapshots and command types from `@moi/trading-core`.
 - Produces: `Broker`, `PaperBroker`, `PaperBrokerTransport`, `PlaceOrderCommand`, `CancelOrderCommand`, `ExchangeCommand`, `PortfolioSnapshot`, and a reusable `runBrokerContract(factory)` test suite.
 
 - [ ] **Step 1: Write a compile-time and runtime fake Broker contract test**
@@ -460,7 +460,7 @@ The contract test must assert same-key replay, terminal cancel behavior, and tha
 
 - [ ] **Step 2: Run the contract test and verify missing types**
 
-Run: `pnpm --filter @skipjack/strategy-sdk test -- broker.contract.test.ts`
+Run: `pnpm --filter @moi/strategy-sdk test -- broker.contract.test.ts`
 
 Expected: FAIL until command and snapshot types are exported.
 
@@ -486,9 +486,9 @@ Implement `PaperBroker` as a thin adapter over an injected authenticated `PaperB
 
 - [ ] **Step 4: Run package contract and dependency-boundary checks**
 
-Run: `pnpm --filter @skipjack/strategy-sdk test -- broker.contract.test.ts paper-broker.test.ts && pnpm --filter @skipjack/strategy-sdk typecheck && pnpm build`
+Run: `pnpm --filter @moi/strategy-sdk test -- broker.contract.test.ts paper-broker.test.ts && pnpm --filter @moi/strategy-sdk typecheck && pnpm build`
 
-Expected: PASS and `pnpm --filter @skipjack/strategy-sdk why fastify` returns no runtime dependency.
+Expected: PASS and `pnpm --filter @moi/strategy-sdk why fastify` returns no runtime dependency.
 
 - [ ] **Step 5: Commit the Broker contract**
 
@@ -531,7 +531,7 @@ it('creates ledger constraints on an empty PostgreSQL database', async () => {
 
 - [ ] **Step 2: Run the migration test and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- migration.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- migration.integration.test.ts`
 
 Expected: FAIL because no database or migrations exist.
 
@@ -555,7 +555,7 @@ create table wallets (
 
 - [ ] **Step 4: Run migrations twice and verify idempotence**
 
-Run: `pnpm --filter @skipjack/paper-api test -- migration.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- migration.integration.test.ts`
 
 Expected: PASS when migrating a new database and when `migrateToLatest()` is called again.
 
@@ -603,7 +603,7 @@ it('rolls back ledger, audit, outbox, and idempotency together', async () => {
 
 - [ ] **Step 2: Run the unit-of-work test and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- unit-of-work.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- unit-of-work.integration.test.ts`
 
 Expected: FAIL because repositories are missing.
 
@@ -623,7 +623,7 @@ Repository mutation methods must accept the transaction object, use `FOR UPDATE`
 
 - [ ] **Step 4: Run rollback, optimistic-version, and concurrent-reservation tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- unit-of-work.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- unit-of-work.integration.test.ts`
 
 Expected: PASS, including two concurrent reservations where exactly one succeeds, forced serialization/deadlock retries preserve one result, and the retry ceiling returns a stable transient error.
 
@@ -667,13 +667,13 @@ Expected: PASS. If a package leaks Fastify, Kysely, or Toss types into `trading-
 
 - [ ] **Step 3: Test the production migration from an empty database**
 
-Run: `pnpm --filter @skipjack/paper-api test -- migration.integration.test.ts ledger.contract.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- migration.integration.test.ts ledger.contract.integration.test.ts`
 
 Expected: PASS with PostgreSQL 17 Testcontainers and no residual containers.
 
 - [ ] **Step 4: Inspect the public export surface**
 
-Run: `pnpm --filter @skipjack/trading-core build && pnpm --filter @skipjack/strategy-sdk build`
+Run: `pnpm --filter @moi/trading-core build && pnpm --filter @moi/strategy-sdk build`
 
 Expected: generated declarations contain domain and Broker contracts only, with no database or real-broker secret type.
 

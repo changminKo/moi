@@ -1,8 +1,8 @@
-# Skipjack Production Market Runtime and Provider Handoff Design
+# Moi Production Market Runtime and Provider Handoff Design
 
 - 문서 상태: 승인된 아키텍처를 구체화한 설계 문서 (Task 10 A/B/C, design-only)
 - 기준 커밋: `97921b7` (`docs: record public mvp acceptance evidence`)
-- 선행 문서: [`2026-08-21-skipjack-paper-trading-architecture-design.md`](2026-08-21-skipjack-paper-trading-architecture-design.md), [`docs/operations/deployment.md`](../../operations/deployment.md), [`docs/operations/release-checklist.md`](../../operations/release-checklist.md)
+- 선행 문서: [`2026-08-21-moi-paper-trading-architecture-design.md`](2026-08-21-moi-paper-trading-architecture-design.md), [`docs/operations/deployment.md`](../../operations/deployment.md), [`docs/operations/release-checklist.md`](../../operations/release-checklist.md)
 - 구현 책임: Claude (implementation owner). 각 단계는 Codex가 독립 검증한다.
 - 이 문서는 코드가 아니라 계약이다. 이 문서와 코드가 다르면 코드가 틀린 것이며, 문서를 바꾸려면 이 문서를 먼저 고친다.
 
@@ -40,7 +40,7 @@
 4. **`RecoveryCoordinator.recover()`가 `acquireLease(market)`을 다시 호출**한다. `StartupCoordinator.open()`도 같은 시장의 lease를 먼저 획득하므로, 두 곳이 원시 `LeaderLease.acquire`를 쓰면 epoch가 두 번 증가하고 PostgreSQL 연결이 두 개 열린다. **A가 `LeaseRegistry`(§5.4)로 획득을 멱등화한다.**
 5. **프로덕션 `main.ts`에 사용자 스트림(`/api/v1/stream`)과 WebSocket upgrade가 없다.** e2e `start-system.ts`만 수제 upgrade를 갖는다. **A가 `ws` noServer 기반 upgrade 브리지(§7.5)를 프로덕션에 등록한다.** upgrade 이벤트는 Fastify 라우트·훅을 거치지 않으므로 브리지가 인증·검사를 직접 수행한다.
 6. **한 연결에 KR 40 + US 40 종목 × 2 채널 = 160 topic**은 계약의 연결당 100 topic 한도를 넘는다. 따라서 시장당 1 연결(80 topic)이 유일한 합법 배치이고, 계정당 동시 연결 한도 2개가 정확히 소진된다. 이것이 “세 번째 연결 금지”가 단순한 규범이 아니라 provider 한도에서 나오는 하드 제약인 이유다.
-7. **문서 드리프트**: `infra/compose.yaml` 라벨 `skipjack.leader-markets: KRX,US`는 코드의 `Market` 값 `KR`과 다르다. `docs/runbooks/redis-or-leader-loss.md`는 `skipjack:leader:*` Redis 키와 `leader_epochs.released_at` 컬럼을 언급하지만 lease는 PostgreSQL advisory lock이고 컬럼은 없다. 이 문서는 Redis를 lease에 쓰지 않음을 확정하고(§3.2), `released_at` 컬럼을 A의 additive migration으로 추가한다(§13). 라벨과 런북 수정은 A의 문서 범위에 포함한다.
+7. **문서 드리프트**: `infra/compose.yaml` 라벨 `moi.leader-markets: KRX,US`는 코드의 `Market` 값 `KR`과 다르다. `docs/runbooks/redis-or-leader-loss.md`는 `moi:leader:*` Redis 키와 `leader_epochs.released_at` 컬럼을 언급하지만 lease는 PostgreSQL advisory lock이고 컬럼은 없다. 이 문서는 Redis를 lease에 쓰지 않음을 확정하고(§3.2), `released_at` 컬럼을 A의 additive migration으로 추가한다(§13). 라벨과 런북 수정은 A의 문서 범위에 포함한다.
 8. **웹 클라이언트와 서버의 `afterSequence` 전달 방식이 다르다.** `apps/web/src/features/portfolio/use-portfolio-stream.ts`는 소켓 `onopen` 직후 텍스트 프레임 `{"afterSequence":"<n>"}`을 보낸다. 그러나 `registerStreamRoutes`는 `afterSequence`를 **쿼리 문자열**에서만 읽고, 이 문서의 upgrade 브리지는 클라이언트→서버 프레임을 모두 1003으로 닫는다(§7.5). 지금 상태로는 브라우저가 접속 직후 끊긴다. **A가 쿼리 문자열을 유일한 프로토콜로 확정하고 웹 훅의 `streamUrl(afterSequence)`를 그에 맞춘다**(§2.2의 유일한 프론트 변경 허용, §7.5).
 9. **heartbeat를 보내는 서버가 없다.** `StreamSession.open`은 `ready` 프레임에 `heartbeatIntervalMs: 30000`을 광고하고, 웹 훅은 heartbeat를 두 번 놓치면(60 s) `close(4000, 'heartbeat timeout')`한다. 그런데 `StreamSession`, e2e `start-system.ts` 어디에도 `{type:'heartbeat'}`를 보내는 코드가 없다. 지금 프로토콜대로면 모든 사용자 스트림이 60 s마다 끊기고 재접속한다. **A가 프로세스 단위 `StreamHeartbeatLoop`(§7.6)를 추가한다.**
 
@@ -175,7 +175,7 @@
 
 기본값은 pinned 계약의 `servers`에서 그대로 가져온 값이다(OpenAPI `servers[0].url`, AsyncAPI `servers.production`). 기본값을 코드 상수 `TOSS_CONTRACT_SERVERS`로 두고 계약 파일과 일치하는지 테스트가 단언한다.
 
-`MARKET_DATA_ADAPTER`는 production에서 **암묵적 기본값이 없다**. 프로덕션 시세 소스는 설정 파일에 글자로 적혀 있어야 하며, `infra/compose.yaml`의 `paper-api` 서비스는 `MARKET_DATA_ADAPTER: toss`를 리터럴로 선언하고 `scripts/check-deployment-contract.mjs`가 그 리터럴을 단언한다(§5.6). development/test에서만 누락 시 `fake`로 해석한다. `MARKET_DATA_ADAPTER=fake`는 기존과 같이 e2e와 개발 전용이며, `FakeMarketData`와 `FakeSnapshotSource`(현재 e2e `start-system.ts`에 있는 결정적 스냅샷 소스를 `@skipjack/market-data/testing`으로 승격)를 묶는다. `fake`일 때도 lease·recovery·outbox·shutdown 경로는 `toss`와 완전히 같다. 다른 것은 provider 포트 구현만이다.
+`MARKET_DATA_ADAPTER`는 production에서 **암묵적 기본값이 없다**. 프로덕션 시세 소스는 설정 파일에 글자로 적혀 있어야 하며, `infra/compose.yaml`의 `paper-api` 서비스는 `MARKET_DATA_ADAPTER: toss`를 리터럴로 선언하고 `scripts/check-deployment-contract.mjs`가 그 리터럴을 단언한다(§5.6). development/test에서만 누락 시 `fake`로 해석한다. `MARKET_DATA_ADAPTER=fake`는 기존과 같이 e2e와 개발 전용이며, `FakeMarketData`와 `FakeSnapshotSource`(현재 e2e `start-system.ts`에 있는 결정적 스냅샷 소스를 `@moi/market-data/testing`으로 승격)를 묶는다. `fake`일 때도 lease·recovery·outbox·shutdown 경로는 `toss`와 완전히 같다. 다른 것은 provider 포트 구현만이다.
 
 ### 5.2 연결 모델
 
@@ -243,7 +243,7 @@
 
 ### 5.7 의존성 추가
 
-- `ws` `8.18.1`을 `@skipjack/market-data`(Toss 클라이언트 socket factory, 가짜 WS 서버)와 `@skipjack/paper-api`(사용자 스트림 upgrade 브리지, §7.5) 런타임 의존성으로 추가한다. `@types/ws` `8.18.1`은 devDependency. 두 버전은 Plan 2(`2026-08-22-skipjack-market-data-and-paper-engine.md`)에서 이미 승인된 값을 그대로 쓴다. 채택 이유는 §3.10. `@fastify/websocket`은 추가하지 않는다 — upgrade 브리지는 `ws`의 `noServer` 모드로 충분하다.
+- `ws` `8.18.1`을 `@moi/market-data`(Toss 클라이언트 socket factory, 가짜 WS 서버)와 `@moi/paper-api`(사용자 스트림 upgrade 브리지, §7.5) 런타임 의존성으로 추가한다. `@types/ws` `8.18.1`은 devDependency. 두 버전은 Plan 2(`2026-08-22-moi-market-data-and-paper-engine.md`)에서 이미 승인된 값을 그대로 쓴다. 채택 이유는 §3.10. `@fastify/websocket`은 추가하지 않는다 — upgrade 브리지는 `ws`의 `noServer` 모드로 충분하다.
 - 다른 새 런타임 의존성은 없다. 가짜 REST 서버는 `node:http`로 작성한다.
 
 ## 6. 라이프사이클 상태 기계
@@ -714,7 +714,7 @@ createStreamUpgradeHandler({
 | 10 | **부분 lease 손실 + 동시 대기자** (§6.5 시나리오) | P3 `NORMAL` 상태에서 P4 시작 → P4 `ACQUIRING_LEASES`(KR 폴링, REST 0건) → 관찰 연결에서 P3의 **KR** lease backend만 `pg_terminate_backend` → 단언: (a) P3 stdout에 `runtime.state {to:'RE_ELECTING'}` 300 ms 내, 가짜 WS에서 P3 연결 2개 모두 종료(US 포함), `LEADER_RELEASED{US, leaderId:P3}` 1건, KR은 `LEADER_RELEASED` 없음(연결 사망); (b) P4가 15 s 내 KR·US 순으로 획득 → `RECOVERING` → `NORMAL`, `leader_epochs` 두 행 `leader_id=P4`, KR·US epoch 모두 P3 값보다 큼(**정확한 간격은 단언하지 않음**); (c) P4 토큰 요청 1건이 P4 `LEADER_ACQUIRED` 2건 뒤; (d) 전 구간 `peakConcurrentConnections===2`, `evictions===0`, `connections===0`인 순간이 P4 연결 전에 존재; (e) P3는 `RE_ELECTING`에서 `/health/ready` 200, 취소 200, 신규 주문 409, WS upgrade 503을 유지하고 `lease.waiting {market:'KR'}`을 로그 — 두 프로세스가 각 한 시장만 쥔 상태(`leader_epochs`의 `released_at is null`인 두 행의 `leader_id`가 서로 다름)가 100 ms 폴링에서 **연속 500 ms 이상 지속**되는 구간 0회(§3.11의 교착 부재가 불변식이다; 죽은 backend의 KR lock은 즉시 풀리므로 후속자 획득과 패자의 US 해제 사이 수 ms 창은 존재할 수 있고 단발 샘플로 잡힐 수 있다) |
 | 11 | **대기 중 종료** | 10단계 뒤 P3(`RE_ELECTING`, 폴링 중)에 `SIGTERM` → 종료 코드 0, `SIGTERM`부터 exit까지 ≤ 3 s; P3 REST 기록은 10단계 이전 값에서 증가 0(토큰 포함), 가짜 WS에 P3 신규 연결 0; `audit_events`에 P3의 `RUNTIME_DRAINING` → `RUNTIME_STOPPED{forced:false}`, 그 사이 `LEADER_ACQUIRED` 없음; `pg_locks`에 P3 backend 없음 |
 
-전체 드릴 시간 상한 180 s. 드릴은 `pnpm --filter @skipjack/paper-api test -- leader-handoff.drill` 로 실행되며 Docker가 필요하다. Docker 없는 환경에서는 skip이 아니라 **실패**한다(릴리스 증거이므로).
+전체 드릴 시간 상한 180 s. 드릴은 `pnpm --filter @moi/paper-api test -- leader-handoff.drill` 로 실행되며 Docker가 필요하다. Docker 없는 환경에서는 skip이 아니라 **실패**한다(릴리스 증거이므로).
 
 ### 10.3 산출 증거
 
@@ -904,7 +904,7 @@ Codex 검증 항목: 드릴을 독립 실행해 동일 결과; 단계 3에서 P2
 | 16.5 | §6.5-7 재선출 재획득 “첫 시도 즉시” | lease를 잃은 프로세스는 재획득 전에 `REELECTION_YIELD_MS = 1000`을 양보한다. 그렇지 않으면 11 ms 해제가 250 ms 폴링 중인 후속자보다 먼저 KR을 다시 잡아 §10.2-10이 성립하지 않는다. | `leader-handoff.drill` 10단계, A16 |
 | 16.6 | 재선출 중 trading `reasons: ['CANCEL_ONLY','RE_ELECTING']` | 두 시장을 내린 뒤 폴링 구간은 §6.1 도표대로 `ACQUIRING_LEASES`이며 reasons도 그 상태를 보인다. `RE_ELECTING`은 해제 구간에만 보인다. | 드릴 10단계는 둘 중 하나를 허용 |
 | 16.7 | `StartupCoordinator.acquireLease(market)` | `acquireLeases(signal)`(번들)로 교체. `AbortError`는 수동 incident를 만들지 않는다. | `startup-coordinator.integration.test.ts` |
-| 16.8 | 가짜 서버 위치 `packages/market-data/testing/` | `packages/market-data/src/testing/fake-toss/`. 패키지의 `--dir src` 테스트·typecheck 게이트에 포함하기 위함. 공개 경로는 `@skipjack/market-data/testing`. | B1~B4 |
+| 16.8 | 가짜 서버 위치 `packages/market-data/testing/` | `packages/market-data/src/testing/fake-toss/`. 패키지의 `--dir src` 테스트·typecheck 게이트에 포함하기 위함. 공개 경로는 `@moi/market-data/testing`. | B1~B4 |
 | 16.9 | conformance “timestamp 없는 trade → null 유지” | Toss 계약은 trade `timestamp`를 필수로 한다. `runMarketDataConformance(factory, { nullableTradeTimestamp: false })`이면 하네스가 timestamp를 공급하고, 케이스는 “어댑터가 null을 만들어내지 않음”을 단언한다(스킵 아님). | `toss-websocket.conformance.test.ts` |
 | 16.10 | `TokenProvider` 포트 | `invalidate?(): void` 추가(REST·WS의 401 → 1회 재발급 경로). `MarketDataError`에 `statusCode`/`retryAfterMs`, 코드 `AUTH_FAILED`/`AUTH_THROTTLED`/`RATE_LIMITED` 추가. | B5, B6 |
 | 16.11 | 추가 seam | `StreamHub.sendControl(sessionId, frame)`(e2e resync 주입), `AppDependencies.registerIngress`(gate `onRequest`를 첫 훅으로), toss 번들 기본 심볼 `TOSS_SYMBOLS`(US=화이트리스트 17, KR=['005930'], `symbols`로 재정의 가능). | A7/A12, B4 |

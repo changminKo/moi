@@ -4,11 +4,8 @@ import { once } from 'node:events';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
-import { TOSS_SYMBOL_WHITELIST } from '@skipjack/market-data';
-import {
-  FakeTossRestServer,
-  FakeTossWsServer,
-} from '@skipjack/market-data/testing';
+import { TOSS_SYMBOL_WHITELIST } from '@moi/market-data';
+import { FakeTossRestServer, FakeTossWsServer } from '@moi/market-data/testing';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
@@ -23,7 +20,7 @@ import WebSocket from 'ws';
 
 export const WORKSPACE_ROOT = resolve(import.meta.dirname, '../../../../..');
 export const ENTRYPOINT = 'apps/paper-api/dist/main.js';
-export const PUBLIC_ORIGIN = 'https://app.skipjack.test';
+export const PUBLIC_ORIGIN = 'https://app.moi.test';
 const OBSERVE_INTERVAL_MS = 100;
 
 export interface LogLine {
@@ -513,7 +510,7 @@ export class TwoProcessHarness {
     const rows = (
       await this.observer.query(
         'select pid from pg_stat_activity where application_name = $1',
-        [`skipjack-lease-${market}-${leaderId}`],
+        [`moi-lease-${market}-${leaderId}`],
       )
     ).rows;
     const pid = Number(rows[0]?.pid);

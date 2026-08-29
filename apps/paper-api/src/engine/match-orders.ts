@@ -6,7 +6,7 @@ import {
   type OrderBookSnapshot,
   type OrderStatus,
   type Quantity,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type { PricingContext } from './pricing-context.js';
 
 export interface MatchableOrder extends ExecutionOrder {

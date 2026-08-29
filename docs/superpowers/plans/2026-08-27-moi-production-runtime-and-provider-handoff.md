@@ -1,4 +1,4 @@
-# Skipjack Production Runtime and Provider Handoff Implementation Plan (Task 10 A → B → C)
+# Moi Production Runtime and Provider Handoff Implementation Plan (Task 10 A → B → C)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 24.19.0, pnpm 11.22.0, TypeScript 7.0.2, Fastify 5.12.1, Kysely 0.29.5 + pg 8.23.0, zod 4.4.3, vitest 4.1.11, Testcontainers 12.1.0, `ws` 8.18.1 + `@types/ws` 8.18.1 (new, both packages), Biome 2.5.9.
 
-**Spec:** `docs/superpowers/specs/2026-08-27-skipjack-production-runtime-and-provider-handoff-design.md` — **the spec is the contract.** Every test ID below (A1…A18, B1…B10, C1…C3, G1…G7, U1…U13, H1…H3, W1…W3, lease tests 1…13, drill steps 1…11) refers to that document; assertions are enumerated there and are not repeated in full here. When this plan and the spec disagree, the spec wins and this plan is fixed first.
+**Spec:** `docs/superpowers/specs/2026-08-27-moi-production-runtime-and-provider-handoff-design.md` — **the spec is the contract.** Every test ID below (A1…A18, B1…B10, C1…C3, G1…G7, U1…U13, H1…H3, W1…W3, lease tests 1…13, drill steps 1…11) refers to that document; assertions are enumerated there and are not repeated in full here. When this plan and the spec disagree, the spec wins and this plan is fixed first.
 
 ## Global Constraints
 
@@ -31,7 +31,7 @@
 2. `RecoveryCoordinator` still calls `acquireLease(market)` first; unchanged (it now returns the held lease). Spec §7.2 confirms.
 3. `apps/paper-api/Dockerfile` already runs `node apps/paper-api/dist/main.js`; the spec's `main.ts` entrypoint matches. No Dockerfile change in A.
 4. `release-drill.integration.test.ts` "unavailable" case (currently `MARKET_DATA_ADAPTER=''`) is redefined per §11.1: `MARKET_DATA_ADAPTER=toss` without `TOSS_CLIENT_*` → `ConfigError`, EXIT 1 (A: `toss adapter is not available in this build`; B: credentials missing).
-5. `infra/compose.yaml` label `skipjack.leader-markets: KRX,US` → `KR,US` and `docs/runbooks/redis-or-leader-loss.md` Redis-lease wording are fixed in Task A12 (§1.1-7).
+5. `infra/compose.yaml` label `moi.leader-markets: KRX,US` → `KR,US` and `docs/runbooks/redis-or-leader-loss.md` Redis-lease wording are fixed in Task A12 (§1.1-7).
 
 ---
 
@@ -93,12 +93,12 @@ export class TradingCapabilities {
 - [ ] **Step 1: Add dependencies**
 
 ```bash
-pnpm --filter @skipjack/paper-api add ws@8.18.1 && pnpm --filter @skipjack/paper-api add -D @types/ws@8.18.1
-pnpm --filter @skipjack/market-data add ws@8.18.1 && pnpm --filter @skipjack/market-data add -D @types/ws@8.18.1
+pnpm --filter @moi/paper-api add ws@8.18.1 && pnpm --filter @moi/paper-api add -D @types/ws@8.18.1
+pnpm --filter @moi/market-data add ws@8.18.1 && pnpm --filter @moi/market-data add -D @types/ws@8.18.1
 ```
 
 - [ ] **Step 2: Write failing tests** — `runtime-state.test.ts`: (a) `enterServing` calls `openLatches` then `publisher.start` with no microtask between (use a `queueMicrotask` observer that must not run between the two spy calls); `gate().isOpen()` is `true` only when `current === 'SERVING'`; (b) `leaveServing('DRAINING')` sets `leftFrom='SERVING'`, closes latches, stores `pendingPoll` from `pauseScheduling`, gate closed synchronously; (c) `leaveServing` from `RECOVERING` yields `pendingPoll === null`; (d) `RuntimeStateMachine.prototype.enterServing.constructor.name === 'Function'` and source has no `await`. `admission-latch.test.ts`: open/close/isClosed. `trading-capabilities.test.ts`: latch closed → `{CANCEL}`; MARKET incident on KR denies PLACE/AMEND/MATCH/TRIGGER for KR only; `tradingHealth` reasons `MARKET_DEGRADED:KR`, `placement:true` when US allows PLACE.
-- [ ] **Step 3: Run** `pnpm --filter @skipjack/paper-api exec vitest run src/runtime` → FAIL (modules missing).
+- [ ] **Step 3: Run** `pnpm --filter @moi/paper-api exec vitest run src/runtime` → FAIL (modules missing).
 - [ ] **Step 4: Implement** the three modules exactly as the interfaces above; extend `metrics.ts` `allowed` with §12.2 names/labels (`runtime_state:['state']`, `leader_epoch:['market']`, `leader_lease_held:['market']`, `leader_lease_wait_seconds:['market']`, `provider_connections_open:[]`, `provider_token_refresh_total:['result']`, `market_event_rejected_total:['market','reason']`, `outbox_published_total:[]`, `outbox_drain_remaining:[]`, `stream_sessions_open:[]`, `shutdown_drain_seconds:['phase']`, `shutdown_forced_total:[]`, `leader_reelection_total:['market']`, `leader_lease_poll_total:['market']`, `http_admission_rejected_total:[]`, `http_admission_inflight:[]`, `http_admission_drain_remaining:[]`, `stream_upgrade_rejected_total:['reason']`, `stream_replay_queue_depth:[]`, `stream_replay_overflow_total:[]`, `outbox_claims_total:['mode']`, `outbox_shutdown_drain_rounds:[]`, `lease_lost_total:['market','phase']`).
 - [ ] **Step 5: Run** tests → PASS; `pnpm check`.
 - [ ] **Step 6: Commit** `feat(runtime): add runtime state machine, latch, and capabilities`
@@ -212,7 +212,7 @@ export const leaseAuditPort: LeaseAuditPort; // single insert into audit_events,
 ```
 
 - [ ] **Step 1: Write failing integration tests** 1–8, 11, 12 (Testcontainers PG; `LeaseConnection` recorder wrapper records query texts and can intercept the resolve of a specific query for test 8; real 250 ms polling).
-- [ ] **Step 2: Run** `pnpm --filter @skipjack/paper-api exec vitest run src/market-data/leader-lease` → FAIL.
+- [ ] **Step 2: Run** `pnpm --filter @moi/paper-api exec vitest run src/market-data/leader-lease` → FAIL.
 - [ ] **Step 3: Implement** per §5.4: poll loop → abort recheck (unlock + end + `AbortError`, log `lease.acquire_aborted{lockedThenUnlocked:true}`) → `begin` → upsert with `released_at = null` → `audit.recordAcquired` → `commit`; on failure `rollback` → unlock → end. `release()`: `state='RELEASING'` first → `begin` → `update … released_at = now()` → `audit.recordReleased` → `commit` (on failure `rollback` + log `lease.release_mark_failed`) → `finally` unlock + end. `#reportLost()` single handler for `error`/`end`; fires `onLost` once only from `HELD`. Metrics `leader_lease_poll_total{market}`, `leader_lease_wait_seconds{market}`; log `lease.waiting` at first poll and every 10 s.
 - [ ] **Step 4: Run** → PASS; static assertions in test: source has no `pg_advisory_lock(` and `release` sets `RELEASING` before first query.
 - [ ] **Step 5: Commit** `feat(lease): cancellable polling acquire with audited release`
@@ -254,7 +254,7 @@ export class LeaseRegistry {
 **Files:** Modify `apps/web/src/features/portfolio/use-portfolio-stream.ts` (only: `streamUrl(afterSequence?: string)` sets query when `/^(0|[1-9][0-9]{0,18})$/` matches; `connect()` passes `stateRef.current?.snapshot.accountSequence`; `onopen` keeps `attempt.current = 0` only); Create `apps/web/src/features/portfolio/use-portfolio-stream.test.tsx` (W1, W1b, W2, W3).
 
 - [ ] **Step 1: Write failing tests W1–W3** (`webSocketFactory` fake socket recording URL and `send` calls; `vi.useFakeTimers`; seed `queryClient.setQueryData(PORTFOLIO_QUERY_KEY, …)`).
-- [ ] **Step 2: Run** `pnpm --filter @skipjack/web exec vitest run use-portfolio-stream` → FAIL (send called / no query). **Step 3: Edit** the three lines. **Step 4: Run** → PASS; `git diff apps/web` touches only `streamUrl`, the `connect()` URL argument, and `onopen` (A13 review item). **Step 5: Commit** `fix(web): send afterSequence as a stream query parameter`
+- [ ] **Step 2: Run** `pnpm --filter @moi/web exec vitest run use-portfolio-stream` → FAIL (send called / no query). **Step 3: Edit** the three lines. **Step 4: Run** → PASS; `git diff apps/web` touches only `streamUrl`, the `connect()` URL argument, and `onopen` (A13 review item). **Step 5: Commit** `fix(web): send afterSequence as a stream query parameter`
 
 ### Task A9: `MarketRuntime`, `SupervisedRecovery`, `KeepaliveLoop`, `ReconnectSupervisor`, `MarketEventLoop`
 
@@ -312,7 +312,7 @@ export class ProductionRuntime {
 }
 ```
 
-- [ ] **Step 1: Write failing integration tests** listed above (Testcontainers PG + Redis; observer lock connection; `pg_terminate_backend` on lease backend found by `application_name = 'skipjack-lease-<market>-<leaderId>'` — set `application_name` in `LeaderLease` connection options in A5 if not already; order-recording spies for A5 sequence; `queueMicrotask` observers for A17).
+- [ ] **Step 1: Write failing integration tests** listed above (Testcontainers PG + Redis; observer lock connection; `pg_terminate_backend` on lease backend found by `application_name = 'moi-lease-<market>-<leaderId>'` — set `application_name` in `LeaderLease` connection options in A5 if not already; order-recording spies for A5 sequence; `queueMicrotask` observers for A17).
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement** `ProductionRuntime` per §4/§6/§6.5/§6.6 (ShutdownCoordinator callbacks table; `RUNTIME_STATE_CHANGED`, `RUNTIME_DRAINING`, `RUNTIME_STOPPED`, `RECOVERY_COMPLETED`, `STARTUP_INVARIANT_OR_AUDIT_FAILURE` audits; `/health/*` extension; `registerStreamRoutes` 426 fallback + bridge attach after `app.ready()` before `listen`; heartbeat loop start). **Step 4: Run** → PASS. **Step 5: Commit** `feat(runtime): assemble the production runtime and shutdown sequence`
 
 ### Task A11: `config.ts` rules, `main.ts` reduction, release-drill redefinition, logger redaction
@@ -323,9 +323,9 @@ export class ProductionRuntime {
 
 ### Task A12: Deployment contract, docs drift, e2e switch, Stage A gate
 
-**Files:** Modify `infra/compose.yaml` (`MARKET_DATA_ADAPTER: toss` literal; `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET` `${…:?}`; label `KR,US`), `scripts/check-deployment-contract.mjs` (assert literal `toss`; add two secrets to required interpolation; `tossinvest.com` string scan over test sources excluding contracts/spec/`TOSS_CONTRACT_SERVERS`; leader-markets ⊆ {KR,US}), `scripts/check-deployment-contract.test.mjs` (new: temp-copy mutations fail — A8 second half), `infra/monitoring/prometheus-alerts.yaml` (§12.3 alerts incl. `OutboxClaimsOutsideServing`, `OutboxShutdownDrainOutsideDraining`), `docs/runbooks/redis-or-leader-loss.md` (remove Redis-lease wording; add “이전 프로세스가 종료되지 않음”, “한 시장 lease 손실은 전역 재선출” sections), `docs/runbooks/market-data-degraded.md` (`PROVIDER_IP_NOT_ALLOWED`), `docs/operations/deployment.md` (P2-ready precondition sentence, egress IP note), `apps/e2e/start-system.ts` (replace hand-rolled upgrade with `createStreamUpgradeHandler` + `StreamHeartbeatLoop` + `FakeSnapshotSource` from `@skipjack/market-data/testing`).
+**Files:** Modify `infra/compose.yaml` (`MARKET_DATA_ADAPTER: toss` literal; `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET` `${…:?}`; label `KR,US`), `scripts/check-deployment-contract.mjs` (assert literal `toss`; add two secrets to required interpolation; `tossinvest.com` string scan over test sources excluding contracts/spec/`TOSS_CONTRACT_SERVERS`; leader-markets ⊆ {KR,US}), `scripts/check-deployment-contract.test.mjs` (new: temp-copy mutations fail — A8 second half), `infra/monitoring/prometheus-alerts.yaml` (§12.3 alerts incl. `OutboxClaimsOutsideServing`, `OutboxShutdownDrainOutsideDraining`), `docs/runbooks/redis-or-leader-loss.md` (remove Redis-lease wording; add “이전 프로세스가 종료되지 않음”, “한 시장 lease 손실은 전역 재선출” sections), `docs/runbooks/market-data-degraded.md` (`PROVIDER_IP_NOT_ALLOWED`), `docs/operations/deployment.md` (P2-ready precondition sentence, egress IP note), `apps/e2e/start-system.ts` (replace hand-rolled upgrade with `createStreamUpgradeHandler` + `StreamHeartbeatLoop` + `FakeSnapshotSource` from `@moi/market-data/testing`).
 
-- [ ] **Step 1: Write failing checker test + update checker; run** `pnpm check:deployment` → FAIL until compose updated. **Step 2: Apply compose/docs/alerts.** **Step 3: Switch e2e start-system; run** `pnpm --filter @skipjack/e2e test:e2e` → 18/18. **Step 4: Full gate** `pnpm check && pnpm typecheck && pnpm test && pnpm check:deployment && pnpm build`. **Step 5: Commit** `chore(ops): declare the toss adapter contract and fix leader runbook drift` — then **STOP for Stage A approval / Codex verification** (§11.1 Codex items).
+- [ ] **Step 1: Write failing checker test + update checker; run** `pnpm check:deployment` → FAIL until compose updated. **Step 2: Apply compose/docs/alerts.** **Step 3: Switch e2e start-system; run** `pnpm --filter @moi/e2e test:e2e` → 18/18. **Step 4: Full gate** `pnpm check && pnpm typecheck && pnpm test && pnpm check:deployment && pnpm build`. **Step 5: Commit** `chore(ops): declare the toss adapter contract and fix leader runbook drift` — then **STOP for Stage A approval / Codex verification** (§11.1 Codex items).
 
 ---
 
@@ -365,14 +365,14 @@ export class ProductionRuntime {
 
 **Files:** Create `apps/paper-api/src/runtime/testing/two-process-harness.ts` (Testcontainers PG 17 + Redis 7, fake REST/WS servers, credential issue, `spawn('node', ['dist/main.js'])` with §10.1 env, 100 ms observers for `/health/*`, `/api/v1/health/trading`, `/health/market-data`, `/metrics` (recorded, not asserted), `outbox_events` + `pg_stat_activity` + `leader_epochs` observer connection, stdout JSON line capture per process, harness `ws` client with `eventId` dedupe across P1/P2 sockets, evidence writer `apps/paper-api/test-results/leader-handoff/<utc>.json`); Test `two-process-harness.test.ts` (harness boots one process to `NORMAL` and tears down; Docker absent → **fails**).
 
-- [ ] Prereq: `pnpm --filter @skipjack/paper-api build` (drill uses `dist/main.js`; add `pretest` hook or assert dist freshness by mtime > src mtime).
+- [ ] Prereq: `pnpm --filter @moi/paper-api build` (drill uses `dist/main.js`; add `pretest` hook or assert dist freshness by mtime > src mtime).
 - [ ] RED → GREEN → Commit `test(runtime): add two-process leader handoff harness`
 
 ### Task C2: Drill `leader-handoff.drill.integration.test.ts`
 
 **Files:** Create `apps/paper-api/src/runtime/leader-handoff.drill.integration.test.ts` implementing §10.2 steps 1–11 (with 3b precondition; step 4/5/6/8 C-path (i)/(ii) tolerance; step 10 partial-loss + waiter; step 11 SIGTERM while polling ≤ 3 s); overall timeout 180 s.
 
-- [ ] Run `pnpm --filter @skipjack/paper-api test -- leader-handoff.drill` **3 consecutive times** (C1: each `peakConcurrentConnections===2`, `evictions===0`, split-lease observations 0). Record the three JSON files.
+- [ ] Run `pnpm --filter @moi/paper-api test -- leader-handoff.drill` **3 consecutive times** (C1: each `peakConcurrentConnections===2`, `evictions===0`, split-lease observations 0). Record the three JSON files.
 - [ ] Commit `test(runtime): prove graceful leader handoff with two processes`
 
 ### Task C3: Evidence and checklist

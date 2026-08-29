@@ -1,4 +1,4 @@
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import type { SubscriptionDeclaration } from '../types.js';
 
 /** The bounded universe this adapter is permitted to subscribe to. */

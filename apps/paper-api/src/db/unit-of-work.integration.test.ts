@@ -3,7 +3,7 @@ import {
   assertAccountInvariants,
   DomainError,
   type Market,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,

@@ -11,7 +11,7 @@ import {
 
 const INDEX_HTML =
   '<!doctype html><html><body><div id="root"></div></body></html>';
-const API_ORIGIN = 'https://api.skipjack.example';
+const API_ORIGIN = 'https://api.moi.example';
 
 let server;
 let baseUrl;
@@ -29,7 +29,7 @@ async function request(path, init = {}) {
 }
 
 beforeAll(async () => {
-  const distDir = await mkdtemp(join(tmpdir(), 'skipjack-web-dist-'));
+  const distDir = await mkdtemp(join(tmpdir(), 'moi-web-dist-'));
   await mkdir(join(distDir, 'assets'), { recursive: true });
   await writeFile(join(distDir, 'index.html'), INDEX_HTML);
   await writeFile(
@@ -134,7 +134,7 @@ describe('security headers', () => {
     const csp = response.headers.get('content-security-policy');
     expect(csp).toContain("default-src 'self'");
     expect(csp).toMatch(
-      /connect-src 'self' https:\/\/api\.skipjack\.example wss:\/\/api\.skipjack\.example/,
+      /connect-src 'self' https:\/\/api\.moi\.example wss:\/\/api\.moi\.example/,
     );
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
@@ -157,7 +157,7 @@ describe('runtime config', () => {
     );
     expect(response.body).toContain(`"apiOrigin":"${API_ORIGIN}"`);
     expect(response.body).toMatch(
-      /^window\.__SKIPJACK_RUNTIME_CONFIG__ = Object\.freeze\(/,
+      /^window\.__MOI_RUNTIME_CONFIG__ = Object\.freeze\(/,
     );
   });
 
@@ -167,7 +167,7 @@ describe('runtime config', () => {
     expect(renderRuntimeConfig.toString()).toBeTypeOf('string');
     const evaluated = new Function(
       'window',
-      `${rendered}; return window.__SKIPJACK_RUNTIME_CONFIG__;`,
+      `${rendered}; return window.__MOI_RUNTIME_CONFIG__;`,
     )({});
     expect(evaluated).toEqual({ apiOrigin: 'https://api.example.com' });
   });

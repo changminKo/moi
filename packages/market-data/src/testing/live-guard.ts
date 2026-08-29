@@ -53,7 +53,7 @@ function assertLoopback(input: unknown): void {
  * a loopback host. Idempotent.
  */
 export function installLiveProviderGuard(): void {
-  const marker = Symbol.for('skipjack.liveProviderGuard');
+  const marker = Symbol.for('moi.liveProviderGuard');
   const g = globalThis as Record<symbol, boolean>;
   if (g[marker]) return;
   g[marker] = true;

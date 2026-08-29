@@ -11,7 +11,7 @@ import './styles/tokens.css';
 const root = document.getElementById('root');
 
 if (!root) {
-  throw new Error('Skipjack root element is missing');
+  throw new Error('Moi root element is missing');
 }
 
 createRoot(root).render(

@@ -1,4 +1,4 @@
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import WebSocket from 'ws';
 import type { MarketDataStream, TokenProvider } from '../ports.js';
 import {

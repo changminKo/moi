@@ -9,8 +9,8 @@ import {
   type TokenProvider,
   TossRestClient,
   TossWebSocketMarketData,
-} from '@skipjack/market-data';
-import type { Market } from '@skipjack/trading-core';
+} from '@moi/market-data';
+import type { Market } from '@moi/trading-core';
 import { type AppConfig, ConfigError } from '../config.js';
 
 export interface ProviderBundle {

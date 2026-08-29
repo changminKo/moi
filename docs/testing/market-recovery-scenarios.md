@@ -19,5 +19,5 @@ the canonical outcome must remain identical.
 Run it without network access with:
 
 ```sh
-pnpm --filter @skipjack/paper-api test -- paper-engine.fault.integration.test.ts --reporter=verbose
+pnpm --filter @moi/paper-api test -- paper-engine.fault.integration.test.ts --reporter=verbose
 ```

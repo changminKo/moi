@@ -1,4 +1,4 @@
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import { STREAM_MAX_QUOTE_SUBSCRIPTIONS } from './stream-session.js';
 
 const AFTER_SEQUENCE = /^(0|[1-9][0-9]{0,18})$/;

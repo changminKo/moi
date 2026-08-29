@@ -6,7 +6,7 @@
  * no-initial-snapshot handshake. Nothing is timing-driven and nothing is
  * random, so a test that reproduces a fault reproduces it every run.
  */
-import type { Market, OrderBookSnapshot } from '@skipjack/trading-core';
+import type { Market, OrderBookSnapshot } from '@moi/trading-core';
 import type { MarketDataStream } from './ports.js';
 import {
   declaredTopicKeys,

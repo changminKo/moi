@@ -1,9 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {
-  DomainError,
-  type FeeModel,
-  type Market,
-} from '@skipjack/trading-core';
+import { DomainError, type FeeModel, type Market } from '@moi/trading-core';
 import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 import type { ConditionalPaperOrder } from '../engine/paper-engine.js';

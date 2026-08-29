@@ -1,4 +1,4 @@
-# Skipjack Web and Operations Implementation Plan
+# Moi Web and Operations Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** The Plan 1–3 stack plus React 19.2.8, React DOM 19.2.8, Vite 8.2.2, @vitejs/plugin-react 6.1.0, React Router DOM 7.18.2, TanStack Query 5.101.4, clsx 2.1.1, Testing Library React 16.3.2, jest-dom 7.0.1, jsdom 30.0.1, and Playwright 1.62.1.
 
-**Spec:** `docs/superpowers/specs/2026-08-21-skipjack-paper-trading-architecture-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-21-moi-paper-trading-architecture-design.md`
 
 ## Global Constraints
 
@@ -27,9 +27,9 @@
 
 This is plan 4 of 4. Start only after these plans pass their acceptance tasks:
 
-1. `2026-08-22-skipjack-foundation-and-trading-core.md`
-2. `2026-08-22-skipjack-market-data-and-paper-engine.md`
-3. `2026-08-22-skipjack-paper-api.md`
+1. `2026-08-22-moi-foundation-and-trading-core.md`
+2. `2026-08-22-moi-market-data-and-paper-engine.md`
+3. `2026-08-22-moi-paper-api.md`
 
 ---
 
@@ -55,7 +55,7 @@ Create `apps/web/package.json` with the exact versions from this plan and these 
 
 ```json
 {
-  "name": "@skipjack/web",
+  "name": "@moi/web",
   "private": true,
   "type": "module",
   "scripts": {
@@ -113,7 +113,7 @@ describe("App", () => {
 
 - [ ] **Step 3: Run the test and verify that it fails**
 
-Run: `pnpm --filter @skipjack/web test -- src/app.test.tsx`
+Run: `pnpm --filter @moi/web test -- src/app.test.tsx`
 
 Expected: FAIL because `App` does not exist.
 
@@ -126,7 +126,7 @@ export function App() {
   return (
     <div className="app-shell">
       <header>
-        <a className="brand" href="/trade">Skipjack</a>
+        <a className="brand" href="/trade">Moi</a>
         <nav aria-label="주요 메뉴">
           <NavLink to="/trade">거래</NavLink>
           <NavLink to="/portfolio">포트폴리오</NavLink>
@@ -149,8 +149,8 @@ export function App() {
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test -- src/app.test.tsx
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test -- src/app.test.tsx
+pnpm --filter @moi/web build
 pnpm check
 ```
 
@@ -202,7 +202,7 @@ it("sends credentials, CSRF, and idempotency on order placement", async () => {
 
 - [ ] **Step 2: Run the tests and verify that they fail**
 
-Run: `pnpm --filter @skipjack/web test -- src/lib/api-client.test.ts`
+Run: `pnpm --filter @moi/web test -- src/lib/api-client.test.ts`
 
 Expected: FAIL because the REST client does not exist.
 
@@ -248,8 +248,8 @@ Use a single `QueryClient` whose queries retry transient reads at most twice and
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test -- src/lib/api-client.test.ts src/features/session/session-provider.test.tsx
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test -- src/lib/api-client.test.ts src/features/session/session-provider.test.tsx
+pnpm --filter @moi/web build
 ```
 
 Expected: tests pass; production output contains no `localStorage` session write and no Toss credential string.
@@ -291,7 +291,7 @@ it("coalesces an account-sequence gap into one snapshot request", () => {
 
 - [ ] **Step 2: Run the tests and verify that they fail**
 
-Run: `pnpm --filter @skipjack/web test -- src/features/portfolio/portfolio-store.test.tsx`
+Run: `pnpm --filter @moi/web test -- src/features/portfolio/portfolio-store.test.tsx`
 
 Expected: FAIL because the store and reducer do not exist.
 
@@ -323,8 +323,8 @@ With a fake WebSocket, verify exponential reconnect with jitter capped at 15 sec
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test -- src/lib/user-stream.test.ts src/features/portfolio/portfolio-store.test.tsx
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test -- src/lib/user-stream.test.ts src/features/portfolio/portfolio-store.test.tsx
+pnpm --filter @moi/web build
 ```
 
 Expected: all tests pass, including duplicate delivery and sequence-gap cases.
@@ -360,7 +360,7 @@ Mock only the typed API/stream adapters. Verify that:
 
 - [ ] **Step 2: Run the page tests and verify that they fail**
 
-Run: `pnpm --filter @skipjack/web test -- src/pages/trade-page.test.tsx`
+Run: `pnpm --filter @moi/web test -- src/pages/trade-page.test.tsx`
 
 Expected: FAIL because the trade page components do not exist.
 
@@ -390,8 +390,8 @@ The form requests a quote first and sends `quoteId` plus a fresh idempotency key
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test -- src/pages/trade-page.test.tsx src/features/wallet/fx-ticket.test.tsx
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test -- src/pages/trade-page.test.tsx src/features/wallet/fx-ticket.test.tsx
+pnpm --filter @moi/web build
 ```
 
 Expected: all tests pass and all displayed wallet arithmetic uses Decimal.js or server-computed strings.
@@ -440,7 +440,7 @@ Reject zero, negative, exponent notation, fractional shares, missing conditional
 
 - [ ] **Step 2: Run the form tests and verify that they fail**
 
-Run: `pnpm --filter @skipjack/web test -- src/features/orders/order-form.test.ts`
+Run: `pnpm --filter @moi/web test -- src/features/orders/order-form.test.ts`
 
 Expected: FAIL because order-form mapping does not exist.
 
@@ -471,8 +471,8 @@ Use the reconciled portfolio store from Task 3. On successful placement, amendme
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test -- src/features/orders src/pages/portfolio-page.test.tsx
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test -- src/features/orders src/pages/portfolio-page.test.tsx
+pnpm --filter @moi/web build
 ```
 
 Expected: all order types, amendment, partial fills, OCO, cancellation, and recovery-fill views pass.
@@ -514,7 +514,7 @@ Also prove that a front-end capability bug cannot turn a server rejection into s
 
 - [ ] **Step 2: Run the tests and verify that they fail**
 
-Run: `pnpm --filter @skipjack/web test -- src/features/system`
+Run: `pnpm --filter @moi/web test -- src/features/system`
 
 Expected: FAIL because status provider and guards do not exist.
 
@@ -541,8 +541,8 @@ Add keyboard tests for navigation, search, order-type selection, submit, cancel,
 Run:
 
 ```bash
-pnpm --filter @skipjack/web test
-pnpm --filter @skipjack/web build
+pnpm --filter @moi/web test
+pnpm --filter @moi/web build
 ```
 
 Expected: all web tests pass, capability states are exhaustively covered, and the production bundle succeeds.
@@ -567,7 +567,7 @@ Commit: `feat(web): surface trading safety capabilities`
 
 - [ ] **Step 1: Add the E2E package and failing smoke test**
 
-Create `@skipjack/e2e` with `"test:e2e": "playwright test"`, `@playwright/test` 1.62.1, `@types/node` 24.13.3, `testcontainers` 12.1.0, `tsx` 4.23.12, and TypeScript 7.0.2. Configure Chromium, trace-on-first-retry, screenshots on failure, and a 360 × 800 mobile project. Configure one Playwright `webServer` command, `tsx start-system.ts`; the orchestrator starts disposable dependencies, the API with the deterministic fake market-data adapter from Plan 2, and the built web server, then becomes ready only after `/health/ready` succeeds. Do not define a `test` script in this package: the root unit/integration gate and the explicit E2E gate must remain separate.
+Create `@moi/e2e` with `"test:e2e": "playwright test"`, `@playwright/test` 1.62.1, `@types/node` 24.13.3, `testcontainers` 12.1.0, `tsx` 4.23.12, and TypeScript 7.0.2. Configure Chromium, trace-on-first-retry, screenshots on failure, and a 360 × 800 mobile project. Configure one Playwright `webServer` command, `tsx start-system.ts`; the orchestrator starts disposable dependencies, the API with the deterministic fake market-data adapter from Plan 2, and the built web server, then becomes ready only after `/health/ready` succeeds. Do not define a `test` script in this package: the root unit/integration gate and the explicit E2E gate must remain separate.
 
 ```ts
 test("creates one anonymous wallet and reloads it", async ({ page }) => {
@@ -580,7 +580,7 @@ test("creates one anonymous wallet and reloads it", async ({ page }) => {
 
 - [ ] **Step 2: Run the smoke test and verify that it fails**
 
-Run: `pnpm --filter @skipjack/e2e test:e2e -- specs/anonymous-session.spec.ts`
+Run: `pnpm --filter @moi/e2e test:e2e -- specs/anonymous-session.spec.ts`
 
 Expected: FAIL until the E2E fixture starts PostgreSQL, Redis, API, and web dependencies with isolated test state.
 
@@ -609,7 +609,7 @@ At desktop and 360 px widths, complete instrument selection and order validation
 Run:
 
 ```bash
-pnpm --filter @skipjack/e2e test:e2e
+pnpm --filter @moi/e2e test:e2e
 pnpm test
 pnpm build
 ```
@@ -706,8 +706,8 @@ pnpm typecheck
 pnpm test
 pnpm check:deployment
 pnpm build
-pnpm --filter @skipjack/e2e exec playwright install --with-deps chromium
-pnpm --filter @skipjack/e2e test:e2e
+pnpm --filter @moi/e2e exec playwright install --with-deps chromium
+pnpm --filter @moi/e2e test:e2e
 ```
 
 Upload Playwright reports only on failure. Grant `contents: read` and no write permissions.
@@ -771,7 +771,7 @@ pnpm typecheck
 pnpm test
 pnpm check:deployment
 pnpm build
-pnpm --filter @skipjack/e2e test:e2e
+pnpm --filter @moi/e2e test:e2e
 git diff --exit-code
 ```
 
@@ -788,11 +788,11 @@ Run the exact security and failure gates:
 ```bash
 docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source=/repo --no-banner
 pnpm audit --prod --audit-level high
-docker build -f apps/paper-api/Dockerfile -t skipjack/paper-api:release .
-docker build -f apps/web/Dockerfile -t skipjack/web:release .
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image --exit-code 1 --severity HIGH,CRITICAL skipjack/paper-api:release
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image --exit-code 1 --severity HIGH,CRITICAL skipjack/web:release
-pnpm --filter @skipjack/paper-api test -- release-drill.integration.test.ts
+docker build -f apps/paper-api/Dockerfile -t moi/paper-api:release .
+docker build -f apps/web/Dockerfile -t moi/web:release .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image --exit-code 1 --severity HIGH,CRITICAL moi/paper-api:release
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image --exit-code 1 --severity HIGH,CRITICAL moi/web:release
+pnpm --filter @moi/paper-api test -- release-drill.integration.test.ts
 LOAD_BASE_URL=http://127.0.0.1:3000 LOAD_DURATION_SECONDS=60 LOAD_ADMIN_TOKEN=release-drill-only node scripts/load-smoke.mjs
 ```
 

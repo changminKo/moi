@@ -10,7 +10,7 @@ import {
   type Quantity,
   type ReservationOrder,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   assertPlaceOrderCommand,

@@ -9,10 +9,7 @@ const workspaceKey = createHash('sha256')
   .digest('hex')
   .slice(0, 12);
 
-export const stateFilePath = join(
-  tmpdir(),
-  `skipjack-e2e-${workspaceKey}.json`,
-);
+export const stateFilePath = join(tmpdir(), `moi-e2e-${workspaceKey}.json`);
 
 export type E2eStateFile = Readonly<{
   controlOrigin: string;

@@ -1,4 +1,4 @@
-# Skipjack Market Data and Paper Engine Implementation Plan
+# Moi Market Data and Paper Engine Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,11 +8,11 @@
 
 **Tech Stack:** The Plan 1 stack plus Zod 4.4.3, ws 8.18.1, @types/ws 8.18.1, undici 8.10.0, Pino 10.3.1, and Vitest fake timers.
 
-**Spec:** `docs/superpowers/specs/2026-08-21-skipjack-paper-trading-architecture-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-21-moi-paper-trading-architecture-design.md`
 
 ## Global Constraints
 
-- Complete `2026-08-22-skipjack-foundation-and-trading-core.md` first; do not duplicate its domain logic.
+- Complete `2026-08-22-moi-foundation-and-trading-core.md` first; do not duplicate its domain logic.
 - Toss trade and order-book streams are LOSSY, have no provider sequence, and send no initial snapshot.
 - Never infer a missing price path, synthesize historical liquidity, or retroactively fill a gap.
 - Normal conditional triggers use observed trade events; recovery conditions use current REST price and execute against current REST order book.
@@ -39,7 +39,7 @@
 - Create: `packages/market-data/src/index.ts`
 
 **Interfaces:**
-- Consumes: `Market`, `DecimalString`, and `OrderBookSnapshot` from `@skipjack/trading-core`.
+- Consumes: `Market`, `DecimalString`, and `OrderBookSnapshot` from `@moi/trading-core`.
 - Produces: `MarketTrade`, `MarketOrderBook`, `MarketEvent`, `SubscriptionDeclaration`, `MarketDataStream`, `MarketSnapshotSource`, `InstrumentCatalog`, `MarketCalendarSource`, `FxRateSource`, `TokenProvider`, `FakeMarketData`, and `runMarketDataConformance(factory)`.
 
 - [ ] **Step 1: Write the adapter conformance test against a fake**
@@ -57,7 +57,7 @@ it('does not invent provider sequence or initial snapshot', async () => {
 
 - [ ] **Step 2: Run and verify the missing adapter failure**
 
-Run: `pnpm --filter @skipjack/market-data test -- fake-market-data.test.ts`
+Run: `pnpm --filter @moi/market-data test -- fake-market-data.test.ts`
 
 Expected: FAIL because the package and fake do not exist.
 
@@ -82,7 +82,7 @@ Make `FakeMarketData` support explicit emit, drop, reorder, close, ACK reject, P
 
 - [ ] **Step 4: Run package tests and type checks**
 
-Run: `pnpm --filter @skipjack/market-data test && pnpm --filter @skipjack/market-data typecheck`
+Run: `pnpm --filter @moi/market-data test && pnpm --filter @moi/market-data typecheck`
 
 Expected: PASS with no provider-specific field in public normalized types.
 
@@ -128,7 +128,7 @@ it('rejects malformed decimal fields without coercing number', () => {
 
 - [ ] **Step 2: Verify tests fail before schemas exist**
 
-Run: `pnpm --filter @skipjack/market-data test -- parse-frame.contract.test.ts`
+Run: `pnpm --filter @moi/market-data test -- parse-frame.contract.test.ts`
 
 Expected: FAIL with missing parser/schema modules.
 
@@ -146,7 +146,7 @@ Store URL, retrieved-at UTC timestamp, advertised API versions, and SHA-256 valu
 
 - [ ] **Step 4: Run schema and conformance tests**
 
-Run: `pnpm --filter @skipjack/market-data test`
+Run: `pnpm --filter @moi/market-data test`
 
 Expected: PASS for recorded frames, missing sequence, null timestamp, unknown fields, and malformed payload rejection.
 
@@ -191,7 +191,7 @@ Also assert Authorization is sent only in the handshake, PING is sent every 60 s
 
 - [ ] **Step 2: Run adapter tests and verify failure**
 
-Run: `pnpm --filter @skipjack/market-data test -- toss-websocket.test.ts toss-rest.test.ts subscription-plan.test.ts`
+Run: `pnpm --filter @moi/market-data test -- toss-websocket.test.ts toss-rest.test.ts subscription-plan.test.ts`
 
 Expected: FAIL because clients do not exist.
 
@@ -215,7 +215,7 @@ Implement the four REST ports with independent response schemas, timeouts, abort
 
 - [ ] **Step 4: Run tests without external network**
 
-Run: `pnpm --filter @skipjack/market-data test`
+Run: `pnpm --filter @moi/market-data test`
 
 Expected: PASS using local WebSocket and fetch fakes; test output contains no access token.
 
@@ -255,7 +255,7 @@ it('rejects a stale leader after the advisory-lock connection closes', async () 
 
 - [ ] **Step 2: Run the integration test and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- leader-lease.integration.test.ts market-state-store.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- leader-lease.integration.test.ts market-state-store.test.ts`
 
 Expected: FAIL because no lease/store exists.
 
@@ -274,7 +274,7 @@ export interface MarketEnvelope<T> {
 
 - [ ] **Step 4: Run lease, epoch, and out-of-order rejection tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- leader-lease.integration.test.ts market-state-store.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- leader-lease.integration.test.ts market-state-store.test.ts`
 
 Expected: PASS for lease handoff, stale token, stale epoch, and per-symbol version monotonicity.
 
@@ -324,7 +324,7 @@ Also write startup/shutdown tests that prove local latches start closed, termina
 
 - [ ] **Step 2: Run tests and verify missing recovery coordinator**
 
-Run: `pnpm --filter @skipjack/paper-api test -- health-machine.test.ts recovery-coordinator.test.ts startup-coordinator.integration.test.ts shutdown-coordinator.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- health-machine.test.ts recovery-coordinator.test.ts startup-coordinator.integration.test.ts shutdown-coordinator.integration.test.ts`
 
 Expected: FAIL.
 
@@ -347,7 +347,7 @@ export interface RecoveryOutcome {
 
 - [ ] **Step 4: Run virtual-clock recovery and flapping tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- health-machine.test.ts recovery-coordinator.test.ts startup-coordinator.integration.test.ts shutdown-coordinator.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- health-machine.test.ts recovery-coordinator.test.ts startup-coordinator.integration.test.ts shutdown-coordinator.integration.test.ts`
 
 Expected: PASS without real sleep; snapshot calls remain within configured token-bucket capacity.
 
@@ -386,7 +386,7 @@ it('commits fills, balances, reservations, audit, and outbox once', async () => 
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- paper-engine.test.ts match-orders.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- paper-engine.test.ts match-orders.integration.test.ts`
 
 Expected: FAIL because the engine is missing.
 
@@ -412,7 +412,7 @@ Each `FILL_CREATED`/`TRIGGERED` audit payload stores the reference price/timesta
 
 - [ ] **Step 4: Run IOC, resting-limit, version-race, and independent-oracle tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- paper-engine.test.ts match-orders.integration.test.ts ledger.contract.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- paper-engine.test.ts match-orders.integration.test.ts ledger.contract.integration.test.ts`
 
 Expected: PASS with a deterministic two-connection fill-versus-cancel barrier, no fill after a gate becomes exclusive, independent book depth per account, and no matching outside the regular market session.
 
@@ -455,7 +455,7 @@ it('allows exactly one OCO leg under concurrent triggers', async () => {
 
 - [ ] **Step 2: Run condition/OCO tests and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- conditional-trigger.test.ts oco-executor.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- conditional-trigger.test.ts oco-executor.integration.test.ts`
 
 Expected: FAIL.
 
@@ -465,7 +465,7 @@ Normal triggers consume only observed trade events from the current epoch during
 
 - [ ] **Step 4: Run deterministic two-connection race tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- conditional-trigger.test.ts oco-executor.integration.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- conditional-trigger.test.ts oco-executor.integration.test.ts`
 
 Expected: PASS with a transaction barrier forcing both workers to observe the pre-trigger state before one wins.
 
@@ -511,7 +511,7 @@ The integration test must pause an order after shared gate acquisition, start ex
 
 - [ ] **Step 2: Run safety tests and verify failure**
 
-Run: `pnpm --filter @skipjack/paper-api test -- capabilities.test.ts gate-locks.integration.test.ts emergency-latch.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- capabilities.test.ts gate-locks.integration.test.ts emergency-latch.test.ts`
 
 Expected: FAIL.
 
@@ -535,7 +535,7 @@ Use deterministic advisory-lock keys and fixed acquisition order. Resolution mus
 
 - [ ] **Step 4: Run safety and engine interlock tests**
 
-Run: `pnpm --filter @skipjack/paper-api test -- capabilities.test.ts gate-locks.integration.test.ts emergency-latch.test.ts paper-engine.test.ts conditional-trigger.test.ts`
+Run: `pnpm --filter @moi/paper-api test -- capabilities.test.ts gate-locks.integration.test.ts emergency-latch.test.ts paper-engine.test.ts conditional-trigger.test.ts`
 
 Expected: PASS: `CANCEL_ONLY` allows cancel but blocks matching/trigger; `READ_ONLY` blocks user mutations; DB unavailable returns `SERVICE_UNAVAILABLE` and never promises cancellation.
 
@@ -580,7 +580,7 @@ The JSON scenario must contain ordered actions for healthy trade, resting stop, 
 
 - [ ] **Step 2: Run the fault suite and verify all assertions**
 
-Run: `pnpm --filter @skipjack/paper-api test -- paper-engine.fault.integration.test.ts --reporter=verbose`
+Run: `pnpm --filter @moi/paper-api test -- paper-engine.fault.integration.test.ts --reporter=verbose`
 
 Expected: PASS with virtual time and no external network.
 

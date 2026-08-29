@@ -1,6 +1,6 @@
 /**
  * The executable `MarketDataStream` contract, published as
- * `@skipjack/market-data/testing`.
+ * `@moi/market-data/testing`.
  *
  * It is a source module rather than a test file so a recorded provider replay
  * outside this package can import and run it. Every fault it needs is a
@@ -9,7 +9,7 @@
  * `events()`, not an inspection hook — so anything it proves is a property of
  * the published surface.
  */
-import type { Market, OrderBookSnapshot } from '@skipjack/trading-core';
+import type { Market, OrderBookSnapshot } from '@moi/trading-core';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import type { MarketDataStream } from './ports.js';
 import {

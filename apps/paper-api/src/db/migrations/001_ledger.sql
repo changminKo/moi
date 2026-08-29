@@ -1,4 +1,4 @@
--- Skipjack paper-trading ledger.
+-- Moi paper-trading ledger.
 --
 -- Every decimal amount is `numeric` so money and quantities never touch binary
 -- floating point, and every optimistically-locked row carries `version bigint`.

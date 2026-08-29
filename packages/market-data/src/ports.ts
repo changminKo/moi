@@ -8,7 +8,7 @@ import type {
   DecimalString,
   Market,
   OrderBookSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type {
   MarketEvent,
   SubscriptionAck,

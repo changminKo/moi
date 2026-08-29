@@ -7,7 +7,7 @@ import {
   type OrderType,
   type Quantity,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { sql } from 'kysely';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
 import { ocoWinnerClaimKey } from '../lock-order.js';

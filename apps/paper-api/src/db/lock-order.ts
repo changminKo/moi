@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 
 /**
  * The single global lock order of the ledger.

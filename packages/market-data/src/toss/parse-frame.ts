@@ -24,7 +24,7 @@ import type {
   Market,
   OrderBookLevel,
   OrderBookSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type { z } from 'zod';
 import {
   MarketDataError,

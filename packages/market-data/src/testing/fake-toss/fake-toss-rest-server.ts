@@ -5,7 +5,7 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 
 export interface FakeBookLevel {
   readonly price: string;

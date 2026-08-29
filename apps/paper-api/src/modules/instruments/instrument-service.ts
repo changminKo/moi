@@ -1,4 +1,4 @@
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import type { WhitelistService } from './whitelist-service.js';
 export interface Instrument {
   readonly market: Market;

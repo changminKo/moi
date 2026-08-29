@@ -7,7 +7,7 @@ import {
   decimal,
   type Market,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { sql } from 'kysely';
 
 /** Anything `sql\`...\`.execute()` accepts: a Kysely instance or a transaction. */

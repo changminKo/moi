@@ -3,7 +3,7 @@ import {
   DomainError,
   decimal,
   type Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 
 export interface ConditionalOrder {
   readonly type: 'STOP' | 'TAKE_PROFIT';

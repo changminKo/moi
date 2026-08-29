@@ -1,4 +1,4 @@
-import { decimal } from '@skipjack/trading-core';
+import { decimal } from '@moi/trading-core';
 import { sql } from 'kysely';
 import type {
   HistoricalOrdersPage,

@@ -98,7 +98,7 @@ describe('production entrypoint (A12)', () => {
             NODE_ENV: 'production',
             HOST: '127.0.0.1',
             PORT: '0',
-            PUBLIC_ORIGIN: 'https://app.skipjack.test',
+            PUBLIC_ORIGIN: 'https://app.moi.test',
             DATABASE_URL: postgres.getConnectionUri(),
             REDIS_URL: 'redis://127.0.0.1:6379',
             SESSION_HASH_KEYS: 'main-session-hash-key-32-bytes-long',

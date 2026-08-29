@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
-export const SESSION_COOKIE = 'skipjack_session';
+export const SESSION_COOKIE = 'moi_session';
 export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 export interface SessionTokenCodec {

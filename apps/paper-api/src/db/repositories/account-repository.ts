@@ -9,7 +9,7 @@ import {
   reserveCash,
   reservePosition,
   type WalletSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import { sql } from 'kysely';
 import { assertVersionedUpdate, snapshotInput } from '../database.js';
 import { compositeLockKey } from '../lock-order.js';

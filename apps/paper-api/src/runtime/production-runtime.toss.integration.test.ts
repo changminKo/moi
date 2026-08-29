@@ -1,7 +1,4 @@
-import {
-  FakeTossRestServer,
-  FakeTossWsServer,
-} from '@skipjack/market-data/testing';
+import { FakeTossRestServer, FakeTossWsServer } from '@moi/market-data/testing';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
@@ -44,7 +41,7 @@ function config(credentials: {
     nodeEnv: 'production',
     host: '127.0.0.1',
     port: 0,
-    publicOrigin: 'https://app.skipjack.test',
+    publicOrigin: 'https://app.moi.test',
     databaseUrl: postgres.getConnectionUri(),
     redisUrl: `redis://${redis.getHost()}:${redis.getMappedPort(6379)}`,
     sessionHashKeys: ['runtime-session-hash-key-32-bytes!'],

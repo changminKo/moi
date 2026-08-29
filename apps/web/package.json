@@ -1,5 +1,5 @@
 {
-  "name": "@skipjack/web",
+  "name": "@moi/web",
   "private": true,
   "type": "module",
   "scripts": {

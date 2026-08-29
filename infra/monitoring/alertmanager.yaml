@@ -1,11 +1,11 @@
-# Alertmanager routing for Skipjack.
+# Alertmanager routing for Moi.
 #
 # Notifications are deduplicated and cooled down on alert name, market,
 # incident id, and recovery epoch. `incident` and `recovery_epoch` arrive as
 # series labels from the safety and recovery subsystems; alerts that lack them
 # group on alertname + market only.
 route:
-  receiver: skipjack-ops
+  receiver: moi-ops
   group_by: [alertname, market, incident, recovery_epoch]
   group_wait: 30s
   group_interval: 5m
@@ -13,15 +13,15 @@ route:
   routes:
     - matchers:
         - severity = critical
-      receiver: skipjack-ops
+      receiver: moi-ops
       group_wait: 0s
       repeat_interval: 1h
 
 receivers:
-  - name: skipjack-ops
+  - name: moi-ops
     webhook_configs:
       # Replace with the on-call webhook of the hosting provider at deploy time.
-      - url: http://alert-webhook.internal/skipjack
+      - url: http://alert-webhook.internal/moi
         send_resolved: true
 
 inhibit_rules:

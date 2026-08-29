@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 export class EmergencyLatch {
   #admission = false;
   #matching = false;

@@ -8,7 +8,7 @@
  *      `ledgerEquationResiduals`) that reads raw ledger rows and re-derives what
  *      the account's balances must be, using arithmetic implemented here from
  *      scratch. It imports no production fee, execution, reservation, or
- *      accounting helper — not even `@skipjack/trading-core`'s `decimal`. If the
+ *      accounting helper — not even `@moi/trading-core`'s `decimal`. If the
  *      oracle shared an arithmetic implementation with the code under test, a
  *      defect in that implementation would cancel out of both sides and the
  *      suite would confirm nothing.
@@ -40,7 +40,7 @@ import {
   planReservation,
   type Quantity,
   releaseReservation,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,

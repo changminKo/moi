@@ -8,7 +8,7 @@ import {
   type PositionSnapshot,
   type Quantity,
   type WalletSnapshot,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import {
   type Broker,
   type CancelOrderCommand,

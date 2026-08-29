@@ -1,5 +1,5 @@
 {
-  "name": "@skipjack/market-data",
+  "name": "@moi/market-data",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"
   },
   "dependencies": {
-    "@skipjack/trading-core": "workspace:*",
+    "@moi/trading-core": "workspace:*",
     "ws": "8.18.1",
     "zod": "4.4.3"
   },

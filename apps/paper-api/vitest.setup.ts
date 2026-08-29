@@ -1,3 +1,3 @@
-import { installLiveProviderGuard } from '@skipjack/market-data/testing';
+import { installLiveProviderGuard } from '@moi/market-data/testing';
 
 installLiveProviderGuard();

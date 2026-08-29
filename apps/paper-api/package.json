@@ -1,5 +1,5 @@
 {
-  "name": "@skipjack/paper-api",
+  "name": "@moi/paper-api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,8 +12,8 @@
   "dependencies": {
     "@fastify/cors": "11.3.0",
     "@fastify/helmet": "13.1.1",
-    "@skipjack/market-data": "workspace:*",
-    "@skipjack/trading-core": "workspace:*",
+    "@moi/market-data": "workspace:*",
+    "@moi/trading-core": "workspace:*",
     "fastify": "5.12.1",
     "kysely": "0.29.5",
     "pg": "8.23.0",

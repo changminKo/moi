@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import { sql } from 'kysely';
 import {
   assertVersionedUpdate,

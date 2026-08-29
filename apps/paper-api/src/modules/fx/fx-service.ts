@@ -1,9 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {
-  type Currency,
-  type DecimalString,
-  decimal,
-} from '@skipjack/trading-core';
+import { type Currency, type DecimalString, decimal } from '@moi/trading-core';
 import type { FxQuoteInput } from './fx-schemas.js';
 
 export interface FxQuote {

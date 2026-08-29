@@ -1,5 +1,5 @@
 {
-  "name": "@skipjack/e2e",
+  "name": "@moi/e2e",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,8 +8,8 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
-    "@skipjack/market-data": "workspace:*",
-    "@skipjack/trading-core": "workspace:*",
+    "@moi/market-data": "workspace:*",
+    "@moi/trading-core": "workspace:*",
     "@types/node": "24.13.3",
     "@types/pg": "8.23.1",
     "fastify": "5.12.1",

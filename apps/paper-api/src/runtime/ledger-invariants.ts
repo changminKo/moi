@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 

@@ -1,8 +1,4 @@
-import type {
-  Currency,
-  Market,
-  OrderBookSnapshot,
-} from '@skipjack/trading-core';
+import type { Currency, Market, OrderBookSnapshot } from '@moi/trading-core';
 import type {
   MarketOrderBookSnapshot,
   MarketPrice,

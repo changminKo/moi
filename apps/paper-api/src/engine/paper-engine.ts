@@ -8,7 +8,7 @@ import type {
   OrderType,
   Quantity,
   Side,
-} from '@skipjack/trading-core';
+} from '@moi/trading-core';
 import type { MarketEnvelope } from '../market-data/market-state-store.js';
 import type { EmergencyLatch } from '../safety/emergency-latch.js';
 import {

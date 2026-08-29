@@ -1,4 +1,4 @@
-import type { Market, OrderBookSnapshot } from '@skipjack/trading-core';
+import type { Market, OrderBookSnapshot } from '@moi/trading-core';
 import {
   CONFORMANCE_MARKET,
   type MarketDataConformanceHarness,

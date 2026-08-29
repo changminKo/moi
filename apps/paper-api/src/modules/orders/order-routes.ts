@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { httpStatusFor } from '../../plugins/error-handler.js';
 import { canonicalRequestHash } from './canonical-request.js';

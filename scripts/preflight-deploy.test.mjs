@@ -13,9 +13,9 @@ import {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SECRET = 'S3cr3t-value-that-must-never-be-printed-0123456789';
 const goodEnv = () => ({
-  PUBLIC_ORIGIN: 'https://app.skipjack.example',
-  PUBLIC_API_ORIGIN: 'https://api.skipjack.example',
-  DATABASE_URL: `postgres://skipjack:${SECRET}@db.internal:5432/skipjack`,
+  PUBLIC_ORIGIN: 'https://app.moi.example',
+  PUBLIC_API_ORIGIN: 'https://api.moi.example',
+  DATABASE_URL: `postgres://moi:${SECRET}@db.internal:5432/moi`,
   POSTGRES_PASSWORD: SECRET,
   SESSION_HASH_KEYS: `${SECRET}a,${SECRET}b`,
   CSRF_SECRET: SECRET,
@@ -50,9 +50,9 @@ describe('validateEnvironment', () => {
       ...goodEnv(),
       CSRF_SECRET: 'replace-with-at-least-32-random-bytes',
       ADMIN_API_KEY: 'short',
-      PUBLIC_ORIGIN: 'http://app.skipjack.example',
-      PUBLIC_API_ORIGIN: 'https://api.skipjack.example/v1',
-      DATABASE_URL: 'postgres://skipjack:pw@localhost:5432/skipjack',
+      PUBLIC_ORIGIN: 'http://app.moi.example',
+      PUBLIC_API_ORIGIN: 'https://api.moi.example/v1',
+      DATABASE_URL: 'postgres://moi:pw@localhost:5432/moi',
       TOSS_CLIENT_ID: 'abc',
     };
     const problems = Object.fromEntries(

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Market } from '@skipjack/trading-core';
+import type { Market } from '@moi/trading-core';
 import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 

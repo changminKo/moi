@@ -1,4 +1,4 @@
-import { DomainError } from '@skipjack/trading-core';
+import { DomainError } from '@moi/trading-core';
 import { Kysely, PostgresDialect, type Transaction } from 'kysely';
 import { Pool } from 'pg';
 

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { Market, OrderBookSnapshot } from '@skipjack/trading-core';
+import type { Market, OrderBookSnapshot } from '@moi/trading-core';
 import { type WebSocket, WebSocketServer } from 'ws';
 
 export const FAKE_WS_MAX_CONNECTIONS = 2;
