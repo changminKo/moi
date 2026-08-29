@@ -11,6 +11,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -272,15 +273,60 @@ describe('status-check.sh', () => {
     }
   });
 
-  it('stays silent and leaves the state alone while a deploy holds the lock', () => {
+  it('stays silent and leaves the state alone while a deploy holds a fresh lock', () => {
     const sb = makeSandbox(API);
     try {
       writeFileSync(join(sb.dir, 'deploy.lock'), '');
-      const r = runStatus(sb);
+      const r = runStatus(sb, {
+        MOI_STATUS_NOW: String(Math.floor(Date.now() / 1000)),
+      });
       assert.equal(r.status, 0, r.stderr);
       assert.equal(r.stdout, '');
       assert.equal(posted(sb).length, 0);
       assert.ok(!existsSync(sb.state));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a stale deploy lock left by a deploy that died without its trap', () => {
+    const sb = makeSandbox(API);
+    try {
+      const lock = join(sb.dir, 'deploy.lock');
+      writeFileSync(lock, '');
+      const threeHoursAgo = new Date(Date.now() - 3 * 3600 * 1000);
+      utimesSync(lock, threeHoursAgo, threeHoursAgo);
+      const r = runStatus(sb, {
+        MOI_STATUS_NOW: String(Math.floor(Date.now() / 1000)),
+      });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /ignoring stale deploy lock/);
+      assert.match(r.stdout, /^ok /);
+      assert.equal(posted(sb).length, 1, 'status still posted');
+      assert.ok(existsSync(sb.state));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('heartbeats with the current level, not a hardcoded ok', () => {
+    const sb = makeSandbox({
+      ...API,
+      marketData: API.marketData.replace(
+        '"KR":{"state":"NORMAL"',
+        '"KR":{"state":"DEGRADED"',
+      ),
+    });
+    try {
+      runStatus(sb); // FAIL delivered at epoch 1000000000
+      const due = runStatus(sb, {
+        MOI_STATUS_NOW: String(1000000000 + 25 * 3600),
+      });
+      assert.equal(due.status, 0, due.stderr);
+      const all = posted(sb);
+      assert.equal(all.length, 2);
+      assert.match(embed(all[1]).title, /heartbeat \(fail\)/);
+      assert.equal(embed(all[1]).color, 0xe5484d);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }

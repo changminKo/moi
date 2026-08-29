@@ -21,7 +21,8 @@ no-op; a failed post never fails a deploy (`notify.sh` is fail-open unless
 | `Moi status FAIL` | Readiness ≠ 200 (or the edge unreachable → `ready=000`, fail-closed), runtime ≠ SERVING, a market ≠ NORMAL, or placement disabled. The line shows which. | Market DEGRADED/RECOVERING → `docs/runbooks/market-data-degraded.md`. Readiness down → `sudo docker compose ... ps`, `journalctl -u moi`. Placement false with markets NORMAL → an incident is open: `GET /admin/incidents`. |
 | `Moi status WARN` | Host pressure: memory available < 15 %, swap used > 50 %, or root disk > 85 %. | Memory/swap on the 1 GB Micro: `free -h`, `docker stats`; a restart of the stack reclaims leaked memory, the durable fix is the A1 host. Disk: `docker system prune -f` (images the running release no longer uses), `journalctl --vacuum-size=200M`. |
 | `Moi status recovered` | The line returned to `ok` after FAIL/WARN. | Note the duration in the incident log if one was opened. |
-| `Moi status heartbeat` | Nothing changed for 24 hours; the pipeline (timer → check → webhook) is alive. | Nothing. |
+| `Moi status heartbeat (<level>)` | Nothing changed for 24 hours; the pipeline (timer → check → webhook) is alive. The level and colour are the *current* status, so a `(fail)` heartbeat is a day-old outage nobody acted on. | Nothing for `(ok)`; treat `(warn)`/`(fail)` as the original alert. |
+| `status-check: ignoring stale deploy lock` (journal only) | `/run/moi-deploy.lock` is older than 30 minutes (`MOI_STATUS_LOCK_MAX_AGE`): a deploy died without its trap (OOM, `kill -9`, power loss). Monitoring continues. | Check `deploy.sh` really is not running (`pgrep -f deploy.sh`), then `sudo rm /run/moi-deploy.lock`. |
 
 ## What silence means
 

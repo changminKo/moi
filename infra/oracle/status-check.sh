@@ -22,18 +22,29 @@
 #   MOI_STATUS_STATE_FILE       default /var/lib/moi/status.last (line + epoch of last post)
 #   MOI_STATUS_HEARTBEAT_HOURS  default 24
 #   MOI_STATUS_NOW              epoch seconds override (tests)
-#   MOI_STATUS_DEPLOY_LOCK      default /run/moi-deploy.lock (present → exit 0, no probe)
+#   MOI_STATUS_DEPLOY_LOCK      default /run/moi-deploy.lock (fresh → exit 0, no probe)
+#   MOI_STATUS_LOCK_MAX_AGE     default 1800 s; an older lock is ignored (stale deploy)
 #   PATH                        `curl`, `free`, `df`, `jq` are resolved from PATH
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# deploy.sh holds this lock for the whole release (deploy-lib.sh); the restart
-# window is announced by the deploy itself, not as an outage.
-deploy_lock="${MOI_STATUS_DEPLOY_LOCK:-/run/moi-deploy.lock}"
-[ -e "$deploy_lock" ] && exit 0
 api="${MOI_STATUS_API_BASE:-https://${API_DOMAIN:-localhost}}"
 state_file="${MOI_STATUS_STATE_FILE:-/var/lib/moi/status.last}"
 heartbeat_hours="${MOI_STATUS_HEARTBEAT_HOURS:-24}"
 now="${MOI_STATUS_NOW:-$(date -u +%s)}"
+
+# deploy.sh holds this lock for the whole release (deploy-lib.sh); the restart
+# window is announced by the deploy itself, not as an outage. A lock older than
+# MOI_STATUS_LOCK_MAX_AGE seconds is a deploy that died without its trap
+# (OOM, kill -9, power loss) and must not silence monitoring.
+deploy_lock="${MOI_STATUS_DEPLOY_LOCK:-/run/moi-deploy.lock}"
+lock_max_age="${MOI_STATUS_LOCK_MAX_AGE:-1800}"
+if [ -e "$deploy_lock" ]; then
+  lock_mtime="$(stat -c %Y "$deploy_lock" 2>/dev/null || stat -f %m "$deploy_lock" 2>/dev/null || echo 0)"
+  if [ $(( now - lock_mtime )) -lt "$lock_max_age" ]; then
+    exit 0
+  fi
+  echo "status-check: ignoring stale deploy lock $deploy_lock (age $(( now - lock_mtime ))s)" >&2
+fi
 
 MEM_AVAIL_MIN=15
 SWAP_USED_MAX=50
@@ -106,7 +117,7 @@ if [ "$line" != "$previous" ]; then
     echo "status-check: post failed, will retry next tick" >&2
   fi
 elif [ "$heartbeat_due" = 1 ]; then
-  if post ok "Moi status heartbeat" "$line"; then
+  if post "$level" "Moi status heartbeat ($level)" "$line"; then
     record
   else
     echo "status-check: heartbeat post failed, will retry next tick" >&2
