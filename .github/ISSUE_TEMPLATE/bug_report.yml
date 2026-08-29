@@ -1,0 +1,55 @@
+name: 🐛 버그 리포트
+description: 재현 가능한 버그를 보고합니다.
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: 영역
+      options:
+        - apps/paper-api
+        - apps/web
+        - apps/e2e
+        - packages/trading-core
+        - packages/market-data
+        - packages/strategy-sdk
+        - infra / scripts
+        - docs
+        - 기타
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 현상
+      description: 무엇이 잘못되었나요? 기대한 동작과 실제 동작을 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 재현 절차
+      placeholder: |
+        1. 세션 생성
+        2. LIMIT 주문 제출 (...)
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그 / 스크린샷
+      render: shell
+  - type: input
+    id: env
+    attributes:
+      label: 환경
+      placeholder: "commit sha, OS, Node 24.19.x, pnpm 11.22.x, 브라우저"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 확인 사항
+      options:
+        - label: 최신 `main`에서도 재현됨
+        - label: 시뮬레이션 전용 동작임을 이해하며, 실제 거래 관련 이슈가 아님

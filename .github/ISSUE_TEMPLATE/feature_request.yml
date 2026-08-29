@@ -1,0 +1,40 @@
+name: ✨ 기능 제안
+description: 새 기능이나 개선을 제안합니다.
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 해결하려는 문제
+      description: 지금 무엇이 불편하거나 불가능한가요?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 제안하는 방식
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 검토한 대안
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 범위
+      options:
+        - 주문 / 체결 엔진
+        - 시장 데이터
+        - 웹 UI
+        - 운영 / 배포
+        - 문서
+        - 기타
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 확인 사항
+      options:
+        - label: 관련 설계 문서(`docs/superpowers/specs`)를 확인했음
+        - label: 결정론(deterministic) 원칙과 충돌하지 않음
