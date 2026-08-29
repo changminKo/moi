@@ -70,7 +70,7 @@ export function OrderTicket({
         <div className="side-toggle-options">
           <label className="is-buy">
             <input
-              className="sr-only"
+              className="side-toggle-radio"
               type="radio"
               name="side"
               checked={side === 'BUY'}
@@ -80,7 +80,7 @@ export function OrderTicket({
           </label>
           <label className="is-sell">
             <input
-              className="sr-only"
+              className="side-toggle-radio"
               type="radio"
               name="side"
               checked={side === 'SELL'}
