@@ -245,6 +245,10 @@ describe('ProductionRuntime', () => {
     'A2: a transport close degrades one market only and recovers automatically',
     async () => {
       const { origin, bundle } = await start();
+      // Hold the REST snapshot so KR cannot recover before the degraded
+      // window has been observed; the window is otherwise a few ms wide.
+      const gate = new Deferred();
+      bundle.snapshots.gate = gate.promise;
       bundle.streamFor('KR').emitTransportClosed('provider closed');
       await vi.waitFor(async () => {
         const market = await json(`${origin}/health/market-data`);
@@ -258,6 +262,8 @@ describe('ProductionRuntime', () => {
         expect(during.body.placement).toBe(true);
         expect(during.body.reasons).toContain('MARKET_DEGRADED:KR');
       });
+      bundle.snapshots.gate = undefined;
+      gate.resolve();
       await vi.waitFor(
         async () => {
           expect(

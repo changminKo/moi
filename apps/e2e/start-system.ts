@@ -176,33 +176,12 @@ function sendStream(session: string, value: unknown, repeats = 1): void {
     void streamHub.deliver(session, event);
 }
 
-async function nextSequence(session: string, kind: string): Promise<string> {
-  const result = await pool.query<{ sequence: string }>(
-    `with next as (
-       select coalesce(max(account_sequence), 0) + 1 as sequence
-       from account_sequences where session_id = $1
-     )
-     insert into account_sequences (id, session_id, account_sequence, mutation_kind)
-     select $2, $1, sequence, $3 from next
-     returning account_sequence::text as sequence`,
-    [session, randomUUID(), kind],
-  );
-  return result.rows[0]?.sequence ?? '0';
-}
-
 async function currentSequence(session: string): Promise<string> {
   const result = await pool.query<{ sequence: string }>(
     'select coalesce(max(account_sequence), 0)::text as sequence from account_sequences where session_id = $1',
     [session],
   );
   return result.rows[0]?.sequence ?? '0';
-}
-
-async function portfolio(session: string): Promise<JsonObject> {
-  if (!unitOfWork) throw new Error('unit of work is not initialized');
-  return (await unitOfWork.run((tx) =>
-    tx.portfolio.snapshot(session),
-  )) as unknown as JsonObject;
 }
 
 /**
@@ -218,12 +197,19 @@ async function drainOutbox(
   if (!database || !unitOfWork) throw new Error('database is not initialized');
   const db = database;
   const uow = unitOfWork;
+  const pending = await db
+    .transaction()
+    .execute((trx) => claimPendingOutbox(trx, 1000));
+  const lastId = pending.at(-1)?.id;
   const publisher = new OutboxPublisher({
-    claim: (limit) =>
-      db.transaction().execute((trx) => claimPendingOutbox(trx, limit)),
+    claim: () => Promise.resolve(pending),
     markPublished: (id) =>
       db.transaction().execute((trx) => markOutboxPublished(trx, id)),
     publish: async (event) => {
+      // The gap journey: every row is consumed, only the newest is delivered,
+      // so the browser observes a jump in account sequence exactly as it would
+      // after missing frames from a real publisher.
+      if (options.deliverOnlyLast && event.id !== lastId) return;
       const snapshot = (await uow.run((tx) =>
         tx.portfolio.snapshot(event.sessionId),
       )) as unknown as Record<string, unknown>;
@@ -246,27 +232,6 @@ async function drainOutbox(
     },
   });
   await publisher.pollOnce();
-}
-
-/** Legacy hand-made snapshot frame; only the sequence-gap journey still needs it. */
-async function publishSnapshot(
-  session: string,
-  kind: string,
-  options: { duplicate?: boolean; gap?: boolean; sequence?: string } = {},
-): Promise<void> {
-  let sequence = options.sequence ?? (await nextSequence(session, kind));
-  if (options.gap) sequence = await nextSequence(session, `${kind}_GAP`);
-  sendStream(
-    session,
-    {
-      type: 'event',
-      eventId: randomUUID(),
-      accountSequence: sequence,
-      eventType: kind,
-      payload: await portfolio(session),
-    },
-    options.duplicate ? 2 : 1,
-  );
 }
 
 function health(): JsonObject {
@@ -581,8 +546,27 @@ async function controlApi(
     const session = [...streamSessions][0];
     const count = Number(input.count ?? 1);
     if (session) {
-      for (let index = 0; index < count; index += 1)
-        await publishSnapshot(session, `SEQUENCE_GAP_${index}`, { gap: true });
+      if (!unitOfWork) throw new Error('unit of work is not initialized');
+      // Real ledger mutations (session lock, allocated sequences, outbox rows)
+      // whose frames are then dropped except the last: a genuine gap.
+      await unitOfWork.run(async (tx) => {
+        await tx.sessions.lock(session);
+        for (let index = 0; index < count; index += 1) {
+          const sequence = await tx.sequences.allocate({
+            sessionId: session,
+            mutationKind: `SEQUENCE_GAP_${index}`,
+          });
+          await tx.outbox.append({
+            id: randomUUID(),
+            eventId: randomUUID(),
+            sessionId: session,
+            streamSequence: sequence,
+            eventType: `SEQUENCE_GAP_${index}`,
+            payload: { index },
+          });
+        }
+      });
+      await drainOutbox({ deliverOnlyLast: true });
       if (input.resync === true)
         sendStream(session, {
           type: 'resync-required',
