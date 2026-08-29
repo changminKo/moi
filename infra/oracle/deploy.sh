@@ -21,6 +21,9 @@ git pull -q --ff-only origin "$REF" 2>/dev/null || true
 git log --oneline -1
 
 echo "== toolchain"
+# Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and
+# an uncapped heap thrashes swap instead of failing fast.
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
 [ "$(node -p 'process.versions.node.split(".")[0]')" = "24" ] || { echo "Node 24 required (run infra/oracle/bootstrap.sh)"; exit 1; }
 command -v pnpm >/dev/null || sudo corepack enable
 corepack prepare pnpm@11.22.0 --activate >/dev/null
