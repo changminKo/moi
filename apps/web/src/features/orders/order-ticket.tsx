@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { GroupedNumberInput } from '../../components/grouped-number-input';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import { type MessageKey, useAppLocale } from '../../lib/i18n';
@@ -123,11 +124,11 @@ export function OrderTicket({
         </select>
       </fieldset>
       <label htmlFor="order-quantity">{t('ticket.quantity')}</label>
-      <input
+      <GroupedNumberInput
         id="order-quantity"
         inputMode="numeric"
         value={quantity}
-        onChange={(e) => setQuantity(e.target.value)}
+        onValueChange={setQuantity}
         aria-describedby={error ? 'order-error' : undefined}
       />
       {kind !== 'MARKET' && (
@@ -137,22 +138,22 @@ export function OrderTicket({
               ? t('ticket.triggerPrice')
               : t('ticket.price')}
           </label>
-          <input
+          <GroupedNumberInput
             id="order-price"
             inputMode="decimal"
             value={price}
-            onChange={(e) => setPrice(e.target.value)}
+            onValueChange={setPrice}
           />
         </>
       )}
       {kind === 'OCO' && (
         <>
           <label htmlFor="order-stop">{t('ticket.stopPrice')}</label>
-          <input
+          <GroupedNumberInput
             id="order-stop"
             inputMode="decimal"
             value={stop}
-            onChange={(e) => setStop(e.target.value)}
+            onValueChange={setStop}
           />
         </>
       )}
