@@ -11,6 +11,11 @@ export type DomainErrorCode =
   // published it (401) since the contract was written; it was missing here, so
   // every client normalised it into ACCOUNT_READ_ONLY.
   | 'SESSION_EXPIRED'
+  // The request, not the session and not the account: a missing CSRF token or a
+  // mismatched `Origin` is answered 403 by `requireCsrf`. Collapsing it into
+  // ACCOUNT_READ_ONLY makes a client abandon a healthy account over a header it
+  // could simply have sent. Published (403) in `docs/api/error-contract.md`.
+  | 'FORBIDDEN'
   | 'SERVICE_UNAVAILABLE'
   | 'INSUFFICIENT_AVAILABLE_CASH'
   | 'INSUFFICIENT_AVAILABLE_POSITION'
@@ -32,6 +37,7 @@ const retryabilityByCode: Record<DomainErrorCode, boolean> = {
   CANCEL_ONLY: false,
   ACCOUNT_READ_ONLY: false,
   SESSION_EXPIRED: false,
+  FORBIDDEN: false,
   SERVICE_UNAVAILABLE: true,
   INSUFFICIENT_AVAILABLE_CASH: false,
   INSUFFICIENT_AVAILABLE_POSITION: false,

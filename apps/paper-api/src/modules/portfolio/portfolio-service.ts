@@ -4,8 +4,16 @@ import type {
   PortfolioSnapshot,
 } from './portfolio-schemas.js';
 
+/**
+ * The repository reads rows; it does not echo its own argument back. Naming the
+ * session is the service's job (`snapshot` below), so the read type is the
+ * response minus that field — which also keeps the required `sessionId` on
+ * `PortfolioSnapshot` from being satisfiable by accident.
+ */
+export type PortfolioReadSnapshot = Omit<PortfolioSnapshot, 'sessionId'>;
+
 export interface PortfolioReadTransaction {
-  readonly snapshot: (sessionId: string) => Promise<PortfolioSnapshot>;
+  readonly snapshot: (sessionId: string) => Promise<PortfolioReadSnapshot>;
   readonly listOrders: (
     sessionId: string,
     query: PortfolioQuery,

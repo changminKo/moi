@@ -1115,6 +1115,13 @@ export class ProductionRuntime {
         ? (payload as Record<string, unknown>)
         : {}),
       ...(snapshot as unknown as Record<string, unknown>),
+      // The same field `GET /api/v1/portfolio` returns. A patch and a snapshot
+      // of the same account must not be two different shapes — that divergence
+      // is exactly how the SDK and this API drifted apart (spec §16.32), and a
+      // stream consumer checks the session it is reading just as a REST one
+      // does. The repository does not echo its own argument, so it is named
+      // here, as `PortfolioService.snapshot` names it there.
+      sessionId,
     };
   }
 

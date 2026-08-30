@@ -8,9 +8,14 @@ export const portfolioQuerySchema = z
   .strict();
 export type PortfolioQuery = z.infer<typeof portfolioQuerySchema>;
 
+/**
+ * What `GET /api/v1/portfolio` returns. `sessionId` is required: a client holds
+ * its session in a cookie its transport owns and checks the payload back
+ * against it, and an optional field here with a required one there is exactly
+ * how the SDK and this API drifted apart before (spec §16.32).
+ */
 export interface PortfolioSnapshot {
-  /** Added by `PortfolioService.snapshot`, not by the repository read. */
-  readonly sessionId?: string;
+  readonly sessionId: string;
   readonly wallets: readonly Record<string, string>[];
   readonly positions: readonly Record<string, string>[];
   readonly reservations: readonly Record<string, string | boolean | null>[];

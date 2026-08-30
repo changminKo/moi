@@ -64,6 +64,11 @@ describe('portfolio routes', () => {
       url: '/api/v1/portfolio',
     });
     expect(snapshot.statusCode).toBe(200);
+    // Asserted on its own, not folded into the `objectContaining` below: an
+    // `objectContaining` would still pass if `sessionId` disappeared, and a
+    // client that checks the payload names its own session (the SDK does, and
+    // fails `INVARIANT_VIOLATION` when it does not) would break silently.
+    expect(snapshot.json().sessionId).toBe('session-1');
     expect(snapshot.json()).toEqual(
       expect.objectContaining({
         accountSequence: '42',

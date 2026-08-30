@@ -3,9 +3,11 @@ import { sql } from 'kysely';
 import type {
   HistoricalOrdersPage,
   PortfolioQuery,
-  PortfolioSnapshot,
 } from '../../modules/portfolio/portfolio-schemas.js';
-import type { PortfolioReadTransaction } from '../../modules/portfolio/portfolio-service.js';
+import type {
+  PortfolioReadSnapshot,
+  PortfolioReadTransaction,
+} from '../../modules/portfolio/portfolio-service.js';
 import type { LedgerConnection } from '../unit-of-work.js';
 
 type Row = Record<string, unknown>;
@@ -139,7 +141,7 @@ export const createPortfolioRepository = (
       })),
       accountSequence: text(sequence.rows[0]?.account_sequence ?? '0'),
       market: { health, recoveryFill },
-    } satisfies PortfolioSnapshot;
+    } satisfies PortfolioReadSnapshot;
   },
   async listOrders(
     sessionId,
