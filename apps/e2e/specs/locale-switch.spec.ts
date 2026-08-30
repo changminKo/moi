@@ -34,6 +34,21 @@ test('defaults to Korean, switches to English, and the choice survives a reload'
       page.getByRole('link', { name: 'Trade', exact: true }),
     ).toBeVisible();
 
+    // A quote's timestamp follows the same choice: the reader sees their own
+    // wall clock and language, while the element keeps the wire instant for
+    // machines. Selecting an instrument is what puts a quote on the page.
+    await page.getByRole('textbox', { name: 'Search' }).fill('AAPL');
+    await page.getByRole('button', { name: /AAPL/ }).first().click();
+    const timestamp = page.getByTestId('quote-asof');
+    await expect(timestamp).toBeVisible();
+    const wire = await timestamp.getAttribute('datetime');
+    expect(wire, 'the wire instant stays machine-readable').toMatch(/Z$/);
+    const inEnglish = (await timestamp.textContent())?.trim() ?? '';
+    expect(inEnglish, 'the reader never sees ISO punctuation').not.toContain(
+      'T',
+    );
+    expect(inEnglish).toMatch(/AM|PM/);
+
     // The explicit choice is persisted, so a reload keeps English.
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
