@@ -38,6 +38,11 @@ beforeAll(async () => {
   );
   await writeFile(join(distDir, 'assets', 'index-C0hp302H.css'), 'body{}');
   await writeFile(join(distDir, 'secret.txt'), 'not served');
+  await writeFile(
+    join(distDir, 'favicon.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" />',
+  );
+  await writeFile(join(distDir, 'apple-touch-icon.png'), 'PNG');
   await mkdir(join(distDir, 'fonts'), { recursive: true });
   await writeFile(join(distDir, 'fonts', 'bm-hanna-pro.woff2'), 'wOF2');
   await writeFile(join(distDir, '..', 'outside.txt'), 'outside dist').catch(
@@ -96,6 +101,17 @@ describe('static assets', () => {
     expect(unknown.status).toBe(404);
     const other = await request('/fonts/evil.js');
     expect(other.status).toBe(404);
+  });
+
+  it('serves the brand icons from the public allowlist', async () => {
+    const svg = await request('/favicon.svg');
+    expect(svg.status).toBe(200);
+    expect(svg.headers.get('content-type')).toBe('image/svg+xml');
+    const png = await request('/apple-touch-icon.png');
+    expect(png.status).toBe(200);
+    expect(png.headers.get('content-type')).toBe('image/png');
+    const unlisted = await request('/logo.svg');
+    expect(unlisted.status).toBe(404);
   });
 
   it('serves index.html with no-store', async () => {

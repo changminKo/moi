@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Moi">
+  <title>Moi</title>
+  <rect width="32" height="32" rx="7" fill="#17202a" />
+  <!-- Two bars, short in the down colour and tall in the up colour, so the
+       mark carries the app's own semantics. No glyph and generous stroke
+       weight, so it still reads at 16px on a browser tab. -->
+  <rect x="6" y="14" width="8" height="12" rx="2.5" fill="#4a8df8" />
+  <rect x="18" y="6" width="8" height="20" rx="2.5" fill="#ff5d6c" />
+</svg>
