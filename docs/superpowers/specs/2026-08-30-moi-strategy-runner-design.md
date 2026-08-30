@@ -12,7 +12,7 @@
 |---|---|
 | 실행 위치 | 별도 컨테이너 `apps/strategy-runner` (compose 서비스 `bot`) |
 | 전략 범위 | 프레임워크부터 제대로 (레지스트리·파라미터 스키마·백테스트·다중 전략) |
-| 조종·관제 | 설정 파일 + Discord. 웹훅 URL은 별도 시크릿 |
+| 조종·관제 | 설정 파일 + Discord. 봇 전용 웹훅 `DISCORD_WEBHOOK_TRADE_URL`(운영 알림용 `DISCORD_WEBHOOK_URL`과 **다른 채널**)을 시크릿으로 주입하며, 값은 문서·저장소·로그·백테스트 산출물에 남기지 않는다 |
 
 ## 1. v1에서 무엇이 틀렸는가
 
@@ -186,7 +186,7 @@ HTTP 상태와 도메인 코드를 **둘 다** 본다. `401`→세션 재수립 
 
 ### 7.4 비밀
 
-마스킹 규칙에 `moi_session=…`, `x-csrf-token: …`, `Set-Cookie: …`, `Idempotency-Key`를 추가한다(러너와 `infra/oracle/notify.sh` 양쪽). 상태 저장소의 쿠키·토큰 파일은 0600, 로그·Discord·백테스트 산출물에 절대 포함하지 않는다.
+마스킹 규칙에 `moi_session=…`, `x-csrf-token: …`, `Set-Cookie: …`, `Idempotency-Key`를 추가한다(러너와 `infra/oracle/notify.sh` 양쪽). 봇은 `DISCORD_WEBHOOK_TRADE_URL`만 읽고 운영용 `DISCORD_WEBHOOK_URL`은 읽지 않는다 — 채널이 분리되어야 거래 소음이 장애 알림을 덮지 않는다. 상태 저장소의 쿠키·토큰 파일은 0600, 로그·Discord·백테스트 산출물에 절대 포함하지 않는다.
 
 ## 8. 상태·백테스트·배포
 

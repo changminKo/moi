@@ -18,5 +18,9 @@ GHCR_TOKEN=op://Moi/ghcr/READ_TOKEN
 # Optional: Discord channel webhook for host status, deploy and stack-failure
 # alerts (infra/oracle/notify.sh). Alerting is skipped when it is absent.
 DISCORD_WEBHOOK_URL=op://Moi/discord/WEBHOOK_URL
+# Strategy-runner alerts (fills, P&L, kill switch) — a different channel from the
+# operational webhook above, so trading noise cannot bury an incident alert.
+# Optional: the runner is the only consumer and it is not deployed yet.
+DISCORD_WEBHOOK_TRADE_URL=op://Moi/discord/WEBHOOK_TRADE_URL
 TOSS_CLIENT_ID=op://Moi/toss/CLIENT_ID
 TOSS_CLIENT_SECRET=op://Moi/toss/CLIENT_SECRET
