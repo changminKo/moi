@@ -665,6 +665,38 @@ describe('ProductionRuntime', () => {
   );
 
   it(
+    'aborts a stalled instrument-name lookup without entering recovery',
+    async () => {
+      const bundle = createFakeProviderBundle();
+      const lookupStarted = new Deferred();
+      vi.spyOn(bundle.instruments, 'searchInstruments').mockImplementation(
+        async (_query, signal) => {
+          lookupStarted.resolve();
+          return await new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        },
+      );
+      const { runtime, logs } = await start({
+        bundle,
+        awaitServing: false,
+      });
+      await lookupStarted.promise;
+
+      const result = await runtime.stop();
+
+      expect(result.forced).toBe(false);
+      expect(bundle.connectCalls()).toBe(0);
+      expect(logs.filter((log) => log.event === 'recovery.complete')).toEqual(
+        [],
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'A4b: losing a lease while RECOVERING re-elects once, aborts the in-flight recovery, then reaches SERVING',
     async () => {
       const { runtime, bundle, logs, phases, deferSnapshots } = await start({
@@ -925,14 +957,29 @@ describe('ProductionRuntime', () => {
         'idempotency-key': randomUUID(),
         ...extra,
       });
-      const search = await json(`${waiting.origin}/api/v1/instruments?q=AAPL`);
+      const search = await json(
+        `${waiting.origin}/api/v1/instruments?q=${encodeURIComponent('ㅅㅅㅈㅈ')}`,
+      );
       expect(search.status).toBe(200);
       expect(search.body).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
+            market: 'KR',
+            symbol: '005930',
+            name: '삼성전자',
+            tradable: true,
+          }),
+        ]),
+      );
+      const englishSearch = await json(
+        `${waiting.origin}/api/v1/instruments?q=apple`,
+      );
+      expect(englishSearch.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
             market: 'US',
             symbol: 'AAPL',
-            tradable: true,
+            name: '애플',
           }),
         ]),
       );
@@ -947,6 +994,18 @@ describe('ProductionRuntime', () => {
       await vi.waitFor(
         () => expect(waiting.runtime.state.current).toBe('SERVING'),
         { timeout: 15_000 },
+      );
+      const refreshedEnglishSearch = await json(
+        `${waiting.origin}/api/v1/instruments?q=apple`,
+      );
+      expect(refreshedEnglishSearch.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            market: 'US',
+            symbol: 'AAPL',
+            name: '애플',
+          }),
+        ]),
       );
 
       waiting.bundle.streamFor('US').emitOrderBook({

@@ -17,6 +17,7 @@ const api = {
       return [
         { market: 'US', symbol: 'AAPL', name: 'Apple', tradable: true },
         { market: 'US', symbol: 'XYZ', name: 'Private', tradable: false },
+        { market: 'KR', symbol: '005930', name: '005930', tradable: true },
       ];
     if (path.includes('/quote'))
       return {
@@ -60,6 +61,19 @@ function WithHistoryControls({ children }: { children: React.ReactNode }) {
 }
 
 describe('TradePage', () => {
+  it('omits the duplicate parenthesized symbol for a fallback name', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade']}>{children}</MemoryRouter>
+      ),
+    });
+
+    expect(
+      await screen.findByRole('button', { name: /^005930$/ }),
+    ).toBeVisible();
+    expect(screen.queryByText('(005930)')).not.toBeInTheDocument();
+  });
+
   it('renders search results, quote depth, and separate wallet amounts', async () => {
     render(<TradePage apiClient={api as never} />, {
       wrapper: ({ children }) => (

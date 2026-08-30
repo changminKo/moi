@@ -118,6 +118,8 @@ async function startToss(): Promise<{
     asks: [{ price: '190.30', volume: '10' }],
     bids: [{ price: '190.20', volume: '10' }],
   });
+  rest.seedInstrument('KR', '005930', '삼성전자');
+  rest.seedInstrument('US', 'AAPL', '애플');
   const tokenRefreshes: string[] = [];
   const bundle = createTossProviderBundle(config(credentials), {
     symbols: SYMBOLS,
@@ -165,10 +167,29 @@ describe('ProductionRuntime with the toss bundle (B7/B8)', () => {
       expect(ws.evictions).toBe(0);
       expect(rest.tokenRequests()).toBe(1);
       expect(tokenRefreshes).toEqual(['ok']);
+      expect(
+        await json(
+          `${origin}/api/v1/instruments?q=${encodeURIComponent('ㅅㅅㅈㅈ')}`,
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          market: 'KR',
+          symbol: '005930',
+          name: '삼성전자',
+        }),
+      ]);
       const acquired = await auditRows('LEADER_ACQUIRED');
       expect(acquired).toHaveLength(2);
       const tokenLog = rest.requests().find((r) => r.path === '/oauth2/token');
       expect(tokenLog).toBeDefined();
+      const instrumentLog = rest
+        .requests()
+        .find((r) => r.path === '/api/v1/stocks/all');
+      expect(instrumentLog).toBeDefined();
+      const leasesAcquiredAt = Math.max(
+        ...acquired.map((row) => row.occurred_at.getTime()),
+      );
+      expect(instrumentLog?.at).toBeGreaterThanOrEqual(leasesAcquiredAt);
       const snapshotCalls = rest
         .requests()
         .filter(
