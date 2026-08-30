@@ -2,20 +2,20 @@ import {
   type DecimalString,
   DomainError,
   type Market,
-  type OrderSnapshot,
-  type PositionSnapshot,
   type Quantity,
   type Side,
-  type WalletSnapshot,
 } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import type {
+  BrokerOrder,
+  BrokerPortfolio,
+  BrokerPosition,
+  BrokerWallet,
   CancelOrderCommand,
   ExchangeCommand,
   ExchangeReceipt,
   PlaceLimitOrderCommand,
   PlaceOrderCommand,
-  PortfolioSnapshot,
 } from './broker.js';
 import {
   CONTRACT_OPEN_ORDER_ID,
@@ -51,10 +51,9 @@ const HTTP_STATUS_BY_CODE: Readonly<Record<string, number>> = {
   SERVICE_UNAVAILABLE: 503,
 };
 
-const wireOrder = (order: OrderSnapshot): unknown => ({
+const wireOrder = (order: BrokerOrder): unknown => ({
   id: order.id,
   status: order.status,
-  version: order.version.toString(),
   ...(order.filledQuantity === undefined
     ? {}
     : { filledQuantity: order.filledQuantity }),
@@ -63,23 +62,23 @@ const wireOrder = (order: OrderSnapshot): unknown => ({
     : { terminalReason: order.terminalReason }),
 });
 
-const wireWallet = (wallet: WalletSnapshot): unknown => ({
+const wireWallet = (wallet: BrokerWallet): unknown => ({
   currency: wallet.currency,
   total: wallet.total,
   available: wallet.available,
   reserved: wallet.reserved,
-  version: wallet.version.toString(),
 });
 
-const wirePosition = (position: PositionSnapshot): unknown => ({
+const wirePosition = (position: BrokerPosition): unknown => ({
+  market: position.market,
   symbol: position.symbol,
   total: position.total,
   available: position.available,
   reserved: position.reserved,
-  version: position.version.toString(),
+  averageCost: position.averageCost,
 });
 
-const wirePortfolio = (snapshot: PortfolioSnapshot): unknown => ({
+const wirePortfolio = (snapshot: BrokerPortfolio): unknown => ({
   sessionId: snapshot.sessionId,
   wallets: snapshot.wallets.map(wireWallet),
   positions: snapshot.positions.map(wirePosition),
@@ -105,8 +104,22 @@ const route = (
 ): unknown => {
   if (request.method === 'POST' && request.path === ORDERS_PATH) {
     const body = request.body as Record<string, unknown>;
+    // An OCO arrives as the API models it — two explicit legs — so the prices
+    // are read back out of them, the way `#placeOco` reads them server-side.
+    // The account model behind this fake still speaks the flat command, and
+    // folding the legs here is what keeps the fake honest about the wire.
+    const legs = body.legs as readonly Record<string, unknown>[] | undefined;
+    const prices =
+      legs === undefined
+        ? {}
+        : {
+            limitPrice: legs.find((leg) => leg.type === 'LIMIT')?.limitPrice,
+            stopPrice: legs.find((leg) => leg.type === 'STOP')?.stopPrice,
+          };
+    const { legs: _legs, ...rest } = body;
     const command = {
-      ...body,
+      ...rest,
+      ...prices,
       sessionId: CONTRACT_SESSION_ID,
       idempotencyKey: requireKey(request),
     } as PlaceOrderCommand;
@@ -375,7 +388,7 @@ describe('PaperBroker', () => {
       createPaperAccountFake(),
     );
     const inherited = Object.assign(
-      Object.create({ limitPrice: '190.25', triggerPrice: '5.00' }),
+      Object.create({ limitPrice: '190.25', stopPrice: '5.00' }),
       marketBuy,
     ) as PlaceOrderCommand;
 
@@ -644,7 +657,7 @@ describe('PaperBroker', () => {
       type: 'OCO',
       quantity: '3',
       limitPrice: '190.25',
-      triggerPrice: '180.00',
+      stopPrice: '180.00',
     };
     let descriptorReads = 0;
     const command = new Proxy(target, {
@@ -658,14 +671,32 @@ describe('PaperBroker', () => {
 
     await new PaperBroker(transport).placeOrder(command);
 
+    // The wire shape the API defines: an OCO is two explicit legs, and the
+    // flat command's two prices land one per leg.
     expect(requests[0]?.body).toStrictEqual({
       market: 'US',
       symbol: 'AAPL',
       side: 'BUY',
       type: 'OCO',
       quantity: '3',
-      limitPrice: '190.25',
-      triggerPrice: '180.00',
+      legs: [
+        {
+          market: 'US',
+          symbol: 'AAPL',
+          side: 'BUY',
+          quantity: '3',
+          type: 'LIMIT',
+          limitPrice: '190.25',
+        },
+        {
+          market: 'US',
+          symbol: 'AAPL',
+          side: 'BUY',
+          quantity: '3',
+          type: 'STOP',
+          stopPrice: '180.00',
+        },
+      ],
     });
     expect(descriptorReads).toBe(0);
   });
@@ -793,16 +824,33 @@ describe('PaperBroker', () => {
     );
   });
 
-  it('rejects a non-numeric order version', async () => {
+  it('rejects an order status the domain does not define', async () => {
     const broker = new PaperBroker(
       stubTransport({
         status: 200,
-        body: { id: 'order-1', status: 'OPEN', version: '1.5' },
+        body: { id: 'order-1', status: 'ALMOST_FILLED' },
       }),
     );
 
     await expect(broker.placeOrder(marketBuy)).rejects.toThrow(
       expect.objectContaining({ code: 'INVARIANT_VIOLATION' }),
     );
+  });
+
+  // The ledger's `version` is not part of the payload — the API publishes no
+  // optimistic-concurrency token and accepts none on a write. A server that
+  // starts sending one must not silently become part of what a strategy sees.
+  it('ignores a ledger version the payload has no business carrying', async () => {
+    const broker = new PaperBroker(
+      stubTransport({
+        status: 200,
+        body: { id: 'order-1', status: 'OPEN', version: '7' },
+      }),
+    );
+
+    await expect(broker.placeOrder(marketBuy)).resolves.toStrictEqual({
+      id: 'order-1',
+      status: 'OPEN',
+    });
   });
 });

@@ -194,7 +194,7 @@ describe('PlaceOrderCommand price rules pinned to trading-core', () => {
       expect(
         attempt(() =>
           assertPlaceOrderCommand(
-            command(type, { triggerPrice: '188.00', limitPrice: '190.25' }),
+            command(type, { stopPrice: '188.00', limitPrice: '190.25' }),
           ),
         ),
       ).toBe('INVALID_ORDER');
@@ -204,11 +204,11 @@ describe('PlaceOrderCommand price rules pinned to trading-core', () => {
   it('keeps OCO required/required, matching the two-leg group it desugars into', () => {
     expect(PLACE_ORDER_PRICE_RULES.OCO).toStrictEqual({
       limitPrice: 'required',
-      triggerPrice: 'required',
+      stopPrice: 'required',
     });
 
     // The documented reading: one OCO command becomes a LIMIT leg carrying
-    // limitPrice plus a triggered leg carrying triggerPrice as its reference.
+    // limitPrice plus a triggered leg carrying stopPrice as its reference.
     expect(
       attempt(() =>
         planOcoReservation([
@@ -257,23 +257,23 @@ describe('assertPlaceOrderCommand price shapes', () => {
   ])[] = [
     ['MARKET', {}, undefined],
     ['MARKET', { limitPrice: '1' }, 'INVALID_ORDER'],
-    ['MARKET', { triggerPrice: '1' }, 'INVALID_ORDER'],
+    ['MARKET', { stopPrice: '1' }, 'INVALID_ORDER'],
     ['LIMIT', { limitPrice: '190.25' }, undefined],
     ['LIMIT', {}, 'INVALID_ORDER'],
-    ['LIMIT', { limitPrice: '1', triggerPrice: '1' }, 'INVALID_ORDER'],
-    ['STOP', { triggerPrice: '188.00' }, undefined],
+    ['LIMIT', { limitPrice: '1', stopPrice: '1' }, 'INVALID_ORDER'],
+    ['STOP', { stopPrice: '188.00' }, undefined],
     ['STOP', {}, 'INVALID_ORDER'],
-    ['STOP', { triggerPrice: '188.00', limitPrice: '190.25' }, 'INVALID_ORDER'],
-    ['TAKE_PROFIT', { triggerPrice: '188.00' }, undefined],
+    ['STOP', { stopPrice: '188.00', limitPrice: '190.25' }, 'INVALID_ORDER'],
+    ['TAKE_PROFIT', { stopPrice: '188.00' }, undefined],
     ['TAKE_PROFIT', {}, 'INVALID_ORDER'],
     [
       'TAKE_PROFIT',
-      { triggerPrice: '188.00', limitPrice: '190.25' },
+      { stopPrice: '188.00', limitPrice: '190.25' },
       'INVALID_ORDER',
     ],
-    ['OCO', { limitPrice: '210.00', triggerPrice: '180.00' }, undefined],
+    ['OCO', { limitPrice: '210.00', stopPrice: '180.00' }, undefined],
     ['OCO', { limitPrice: '210.00' }, 'INVALID_ORDER'],
-    ['OCO', { triggerPrice: '180.00' }, 'INVALID_ORDER'],
+    ['OCO', { stopPrice: '180.00' }, 'INVALID_ORDER'],
     ['OCO', {}, 'INVALID_ORDER'],
   ];
 
@@ -290,8 +290,8 @@ describe('assertPlaceOrderCommand explicit undefined', () => {
   // shape forbids.
   it.each([
     ['MARKET', 'limitPrice'],
-    ['MARKET', 'triggerPrice'],
-    ['LIMIT', 'triggerPrice'],
+    ['MARKET', 'stopPrice'],
+    ['LIMIT', 'stopPrice'],
     ['STOP', 'limitPrice'],
     ['TAKE_PROFIT', 'limitPrice'],
   ] as const)('rejects %s carrying an explicit undefined %s', (type, field) => {
@@ -300,7 +300,7 @@ describe('assertPlaceOrderCommand explicit undefined', () => {
         ? { limitPrice: '190.25' }
         : type === 'MARKET'
           ? {}
-          : { triggerPrice: '188.00' };
+          : { stopPrice: '188.00' };
 
     expect(
       attempt(() =>
@@ -359,8 +359,8 @@ describe('assertPlaceOrderCommand prototype-supplied prices', () => {
 
   it.each([
     ['MARKET', 'limitPrice'],
-    ['MARKET', 'triggerPrice'],
-    ['LIMIT', 'triggerPrice'],
+    ['MARKET', 'stopPrice'],
+    ['LIMIT', 'stopPrice'],
     ['STOP', 'limitPrice'],
     ['TAKE_PROFIT', 'limitPrice'],
   ] as const)('rejects %s carrying an inherited %s', (type, field) => {
@@ -369,7 +369,7 @@ describe('assertPlaceOrderCommand prototype-supplied prices', () => {
       type,
       ...(type === 'LIMIT' ? { limitPrice: '190.25' } : {}),
       ...(type === 'STOP' || type === 'TAKE_PROFIT'
-        ? { triggerPrice: '188.00' }
+        ? { stopPrice: '188.00' }
         : {}),
     };
 
@@ -382,8 +382,8 @@ describe('assertPlaceOrderCommand prototype-supplied prices', () => {
 
   it.each([
     ['LIMIT', 'limitPrice'],
-    ['STOP', 'triggerPrice'],
-    ['TAKE_PROFIT', 'triggerPrice'],
+    ['STOP', 'stopPrice'],
+    ['TAKE_PROFIT', 'stopPrice'],
   ] as const)('accepts %s whose required %s is inherited', (type, field) => {
     const own: Record<string, unknown> = { ...base, type };
 
@@ -847,13 +847,13 @@ const limitBase = { ...typeBase, type: 'LIMIT' } as const;
 const stopBase = { ...typeBase, type: 'STOP' } as const;
 const takeProfitBase = { ...typeBase, type: 'TAKE_PROFIT' } as const;
 const ocoBase = { ...typeBase, type: 'OCO' } as const;
-const prices = { limitPrice: '210.00', triggerPrice: '180.00' } as const;
+const prices = { limitPrice: '210.00', stopPrice: '180.00' } as const;
 
 // @ts-expect-error a MARKET order cannot carry a limit price.
 accepts({ ...marketBase, limitPrice: '190.25' });
 
 // @ts-expect-error a MARKET order cannot carry a trigger price.
-accepts({ ...marketBase, triggerPrice: '190.25' });
+accepts({ ...marketBase, stopPrice: '190.25' });
 
 // @ts-expect-error a LIMIT order must carry a limit price.
 accepts({ ...limitBase });
@@ -879,8 +879,8 @@ accepts({ ...ocoBase });
 // Positive controls: the legal shapes must stay legal.
 accepts(marketBase);
 accepts({ ...limitBase, limitPrice: '190.25' });
-accepts({ ...stopBase, triggerPrice: '180.00' });
-accepts({ ...takeProfitBase, triggerPrice: '180.00' });
+accepts({ ...stopBase, stopPrice: '180.00' });
+accepts({ ...takeProfitBase, stopPrice: '180.00' });
 accepts({ ...ocoBase, ...prices });
 
 // A class satisfying the interface is a legal command at the type level, which
