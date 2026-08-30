@@ -43,6 +43,8 @@ const MIME_TYPES = Object.freeze({
 const PUBLIC_FILES = new Set([
   '/robots.txt',
   '/favicon.ico',
+  '/favicon.svg',
+  '/apple-touch-icon.png',
   '/manifest.webmanifest',
 ]);
 

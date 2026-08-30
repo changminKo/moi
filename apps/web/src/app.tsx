@@ -44,7 +44,7 @@ export function App() {
         <header className="site-header">
           <a className="brand" href="/trade" aria-label={t('app.brandAria')}>
             <span className="brand-mark" aria-hidden="true">
-              S
+              M
             </span>
             <span>Moi</span>
           </a>
