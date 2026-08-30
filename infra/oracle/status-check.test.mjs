@@ -129,6 +129,36 @@ describe('status-check.sh', () => {
     }
   });
 
+  it('ignores drifting percentages and posts only when a threshold flips', () => {
+    const sb = makeSandbox(API);
+    const setFree = (text) =>
+      writeFileSync(
+        join(sb.bin, 'free'),
+        `#!/usr/bin/env bash\nprintf '%s\\n' '${text.replace(/\n/g, "' '")}'\n`,
+      );
+    try {
+      assert.equal(runStatus(sb).status, 0);
+      assert.equal(posted(sb).length, 1);
+      // Same level, memory drifts 600 -> 580 -> 610 MB available: still ok.
+      setFree('Mem: 954 420 90 10 444 580\nSwap: 4095 100 3995');
+      assert.equal(runStatus(sb).status, 0);
+      setFree('Mem: 954 390 110 10 454 610\nSwap: 4095 100 3995');
+      assert.equal(runStatus(sb).status, 0);
+      assert.equal(posted(sb).length, 1, 'drifting numbers must not post');
+      assert.match(stateLines(sb)[0], /^ok .* mem=ok swap=ok disk=ok$/);
+      // Crossing the threshold is a real change.
+      setFree('Mem: 954 900 10 10 44 50\nSwap: 4095 100 3995');
+      const warn = runStatus(sb);
+      assert.equal(warn.status, 0, warn.stderr);
+      assert.match(warn.stdout, /^warn /);
+      assert.equal(posted(sb).length, 2, 'threshold breach posts once');
+      assert.equal(runStatus(sb).status, 0);
+      assert.equal(posted(sb).length, 2, 'sustained breach stays quiet');
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('posts fail once when a market leaves NORMAL and recovery when it returns', () => {
     const sb = makeSandbox(API);
     try {
