@@ -82,4 +82,27 @@ describe('instrument service', () => {
       expect.objectContaining({ symbol: '005930', name: '삼성전자' }),
     ]);
   });
+
+  it('searches an English alias without changing the Korean display name', async () => {
+    const service = new InstrumentService({
+      catalog: [
+        {
+          market: 'US',
+          symbol: 'AAPL',
+          name: '애플',
+          aliases: ['Apple'],
+          tradable: true,
+        },
+      ],
+    });
+
+    expect((await service.search('apple')).items).toEqual([
+      {
+        market: 'US',
+        symbol: 'AAPL',
+        name: '애플',
+        tradable: true,
+      },
+    ]);
+  });
 });

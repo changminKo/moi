@@ -5,6 +5,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   INSTRUMENT_NAMES_TIMEOUT_MS,
+  instrumentSearchAliases,
   loadInstrumentNames,
 } from './instrument-names.js';
 
@@ -143,6 +144,31 @@ describe('loadInstrumentNames', () => {
     );
   });
 
+  it('propagates caller cancellation instead of treating shutdown as fallback', async () => {
+    const controller = new AbortController();
+    const log = vi.fn();
+    const names = loadInstrumentNames({
+      source: source(
+        async (_query, lookupSignal) =>
+          await new Promise((_, reject) => {
+            lookupSignal.addEventListener(
+              'abort',
+              () => reject(lookupSignal.reason),
+              { once: true },
+            );
+          }),
+      ),
+      symbols,
+      snapshot: [],
+      signal: controller.signal,
+      log,
+    });
+    controller.abort(new DOMException('shutdown', 'AbortError'));
+
+    await expect(names).rejects.toMatchObject({ name: 'AbortError' });
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('keeps a non-symbol snapshot name for every production symbol', async () => {
     const names = await loadInstrumentNames({
       source: source(async () => []),
@@ -154,6 +180,14 @@ describe('loadInstrumentNames', () => {
     expect(names.size).toBe(TOSS_SYMBOL_WHITELIST.length + 1);
     for (const [instrumentKey, name] of names) {
       expect(name).not.toBe(instrumentKey.split(':')[1]);
+    }
+    const aliases = instrumentSearchAliases({
+      KR: ['005930'],
+      US: TOSS_SYMBOL_WHITELIST,
+    });
+    expect(aliases.size).toBe(TOSS_SYMBOL_WHITELIST.length + 1);
+    for (const searchNames of aliases.values()) {
+      expect(searchNames.every((name) => name.trim().length > 0)).toBe(true);
     }
   });
 });

@@ -20,6 +20,7 @@ import { FxService } from '../modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../modules/health/health-routes.js';
 import {
   INSTRUMENT_NAME_SNAPSHOT,
+  instrumentSearchAliases,
   loadInstrumentNames,
 } from '../modules/instruments/instrument-names.js';
 import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
@@ -1097,15 +1098,21 @@ export class ProductionRuntime {
 
   #instrumentService(names: ReadonlyMap<string, string>): InstrumentService {
     const symbols = this.#o.symbols ?? this.#o.bundle.symbols;
+    const aliases = instrumentSearchAliases(symbols);
     return new InstrumentService({
       catalog: MARKETS.flatMap((market) =>
-        symbols[market].map((symbol) => ({
-          market,
-          symbol,
-          name: names.get(`${market}:${symbol}`) ?? symbol,
-          tradable: true,
-          currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
-        })),
+        symbols[market].map((symbol) => {
+          const instrumentKey = `${market}:${symbol}` as const;
+          const searchAliases = aliases.get(instrumentKey);
+          return {
+            market,
+            symbol,
+            name: names.get(instrumentKey) ?? symbol,
+            tradable: true,
+            currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
+            ...(searchAliases === undefined ? {} : { aliases: searchAliases }),
+          };
+        }),
       ),
     });
   }

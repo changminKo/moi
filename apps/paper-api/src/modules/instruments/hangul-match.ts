@@ -6,21 +6,29 @@ const CHOSEONG_ONLY = /^[ㄱ-ㅎ]+$/u;
 
 export function matchesInstrument(
   query: string,
-  instrument: Pick<Instrument, 'symbol' | 'name'>,
+  instrument: Pick<Instrument, 'symbol' | 'name'> & {
+    readonly aliases?: readonly string[];
+  },
 ): boolean {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return true;
 
-  const symbol = instrument.symbol.toLowerCase();
-  const name = instrument.name.toLowerCase();
-  if (symbol.includes(normalizedQuery) || name.includes(normalizedQuery)) {
+  const candidates = [
+    instrument.symbol,
+    instrument.name,
+    ...(instrument.aliases ?? []),
+  ].map((candidate) => candidate.toLowerCase());
+  if (candidates.some((candidate) => candidate.includes(normalizedQuery))) {
     return true;
   }
+  const names = candidates.slice(1);
   if (CHOSEONG_ONLY.test(normalizedQuery)) {
-    return getChoseong(name).includes(normalizedQuery);
+    return names.some((name) => getChoseong(name).includes(normalizedQuery));
   }
   return (
     HANGUL.test(normalizedQuery) &&
-    disassemble(name).includes(disassemble(normalizedQuery))
+    names.some((name) =>
+      disassemble(name).includes(disassemble(normalizedQuery)),
+    )
   );
 }

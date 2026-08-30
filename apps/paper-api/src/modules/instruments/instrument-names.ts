@@ -3,6 +3,9 @@ import type { Market } from '@moi/trading-core';
 import snapshotRows from './instrument-names.snapshot.json' with {
   type: 'json',
 };
+import aliasRows from './instrument-search-aliases.snapshot.json' with {
+  type: 'json',
+};
 
 export const INSTRUMENT_NAMES_TIMEOUT_MS = 5_000;
 
@@ -12,8 +15,16 @@ export interface InstrumentNameSnapshot {
   readonly name: string;
 }
 
+export interface InstrumentSearchAliasSnapshot {
+  readonly market: Market;
+  readonly symbol: string;
+  readonly name: string;
+}
+
 export const INSTRUMENT_NAME_SNAPSHOT =
   snapshotRows as readonly InstrumentNameSnapshot[];
+export const INSTRUMENT_SEARCH_ALIAS_SNAPSHOT =
+  aliasRows as readonly InstrumentSearchAliasSnapshot[];
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
 
@@ -37,13 +48,35 @@ function indexSnapshot(
   );
 }
 
+export function instrumentSearchAliases(
+  symbols: Readonly<Record<Market, readonly string[]>>,
+  snapshot: readonly InstrumentSearchAliasSnapshot[] = INSTRUMENT_SEARCH_ALIAS_SNAPSHOT,
+): ReadonlyMap<`${Market}:${string}`, readonly string[]> {
+  const configured = new Set(
+    (['KR', 'US'] as const).flatMap((market) =>
+      symbols[market].map((symbol) => key(market, symbol)),
+    ),
+  );
+  return new Map(
+    snapshot.flatMap((row) => {
+      const instrumentKey = key(row.market, row.symbol);
+      const alias = row.name.trim();
+      return configured.has(instrumentKey) && alias
+        ? [[instrumentKey, [alias]] as const]
+        : [];
+    }),
+  );
+}
+
 export async function loadInstrumentNames({
   source,
   symbols,
   snapshot = INSTRUMENT_NAME_SNAPSHOT,
   signal,
   log,
-}: LoadInstrumentNamesOptions): Promise<ReadonlyMap<`${Market}:${string}`, string>> {
+}: LoadInstrumentNamesOptions): Promise<
+  ReadonlyMap<`${Market}:${string}`, string>
+> {
   const timeout = new AbortController();
   const timer = setTimeout(
     () =>
@@ -64,6 +97,7 @@ export async function loadInstrumentNames({
         .map((row) => [key(row.market, row.symbol), row.name.trim()]),
     );
   } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
     log('instrument_names.provider_fallback', {
       reason: error instanceof Error ? error.name : 'UnknownError',
     });
