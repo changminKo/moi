@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   BrokerOrder,
   BrokerPortfolio,
+  BrokerPortfolioOrder,
   BrokerPosition,
   BrokerWallet,
   CancelOrderCommand,
@@ -78,11 +79,29 @@ const wirePosition = (position: BrokerPosition): unknown => ({
   averageCost: position.averageCost,
 });
 
+// A portfolio row is richer than a write's answer — it names the market,
+// symbol, side, prices and fills — so it is serialized on its own terms.
+const wirePortfolioOrder = (order: BrokerPortfolioOrder): unknown => ({
+  id: order.id,
+  market: order.market,
+  symbol: order.symbol,
+  type: order.type,
+  side: order.side,
+  quantity: order.quantity,
+  filledQuantity: order.filledQuantity,
+  status: order.status,
+  limitPrice: order.limitPrice ?? null,
+  stopPrice: order.stopPrice ?? null,
+  terminalReason: order.terminalReason ?? null,
+  fills: order.fills,
+  siblingOrderIds: order.siblingOrderIds,
+});
+
 const wirePortfolio = (snapshot: BrokerPortfolio): unknown => ({
   sessionId: snapshot.sessionId,
   wallets: snapshot.wallets.map(wireWallet),
   positions: snapshot.positions.map(wirePosition),
-  activeOrders: snapshot.activeOrders.map(wireOrder),
+  activeOrders: snapshot.activeOrders.map(wirePortfolioOrder),
   accountSequence: snapshot.accountSequence,
 });
 

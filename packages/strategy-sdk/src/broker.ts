@@ -145,11 +145,53 @@ export interface ExchangeReceipt {
  * strategy needs to size and value a position. These types are therefore owned
  * by this package and mirror the payload, field for field.
  */
+/**
+ * A write's answer. `POST /api/v1/orders` replies with the order it created
+ * (`{ id, status, filledQuantity, quantity }`) and `DELETE` replies with just
+ * `{ id, status }` — the runtime narrows its cancellation result to those two
+ * fields (`production-runtime.ts`), so an OCO cancel does not name the sibling
+ * leg it also closed. Publishing that list would be a change to the API, not to
+ * this decoder, and is out of scope here.
+ *
+ * The read shape is `BrokerPortfolioOrder`: it is a different payload, so it is
+ * a different type rather than one type half-covering both.
+ */
 export interface BrokerOrder {
   readonly id: string;
   readonly status: OrderStatus;
+  readonly quantity?: Quantity;
   readonly filledQuantity?: Quantity;
   readonly terminalReason?: 'IOC_REMAINDER';
+}
+
+export interface BrokerFill {
+  readonly id: string;
+  readonly symbol: string;
+  readonly quantity: Quantity;
+  readonly price: DecimalString;
+  readonly fee: DecimalString;
+  readonly recoveryFill: boolean;
+}
+
+/**
+ * An order as the portfolio reports it. This carries what a strategy needs to
+ * recognise its own orders — which market, which symbol, which side, at what
+ * price — none of which a write response repeats.
+ */
+export interface BrokerPortfolioOrder {
+  readonly id: string;
+  readonly market: Market;
+  readonly symbol: string;
+  readonly type: OrderType;
+  readonly side: Side;
+  readonly quantity: Quantity;
+  readonly filledQuantity: Quantity;
+  readonly status: OrderStatus;
+  readonly limitPrice?: DecimalString;
+  readonly stopPrice?: DecimalString;
+  readonly terminalReason?: 'IOC_REMAINDER';
+  readonly fills: readonly BrokerFill[];
+  readonly siblingOrderIds: readonly string[];
 }
 
 export interface BrokerWallet {
@@ -176,7 +218,14 @@ export interface BrokerPortfolio {
   readonly sessionId: string;
   readonly wallets: readonly BrokerWallet[];
   readonly positions: readonly BrokerPosition[];
-  readonly activeOrders: readonly BrokerOrder[];
+  /**
+   * Named `activeOrders` by the API, but the query behind it has no status
+   * filter, so terminal orders appear here too (#33). Do not assume these are
+   * open — filter on `status`. The field cannot simply be narrowed server-side:
+   * these rows are currently the only path by which a client can reach fill
+   * data, so #33 is sequenced after #37.
+   */
+  readonly activeOrders: readonly BrokerPortfolioOrder[];
   readonly accountSequence: DecimalString;
 }
 

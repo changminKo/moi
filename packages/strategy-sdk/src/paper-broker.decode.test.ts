@@ -196,19 +196,27 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     expect(decoded.targetAmount).toBe('750');
   });
 
-  // The API spells an absent optional as `null` (its order rows are nullable
-  // ledger columns), and a placement response omits the key. Both are absence.
-  it('reads a null optional as absent rather than as malformed', async () => {
+  // `terminal_reason` is the one nullable column behind an order row, so it is
+  // the only field whose absence the API spells `null`; a write response omits
+  // the key instead. Both are absence — for that field alone.
+  it('reads a null terminal reason as absent rather than as malformed', async () => {
     const snapshot = await new PaperBroker(
-      ok({
-        id: 'order-1',
-        status: 'OPEN',
-        filledQuantity: null,
-        terminalReason: null,
-      }),
+      ok({ id: 'order-1', status: 'OPEN', terminalReason: null }),
     ).placeOrder(marketBuy);
 
     expect(snapshot).toStrictEqual({ id: 'order-1', status: 'OPEN' });
+  });
+
+  // `filled_quantity` is `not null default 0` and the repository coerces it, so
+  // a null there is a broken contract, not an absence. Fail closed (rule 6).
+  it('rejects a null filled quantity instead of treating it as absent', async () => {
+    const broker = new PaperBroker(
+      ok({ id: 'order-1', status: 'OPEN', filledQuantity: null }),
+    );
+
+    await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
+      'INVARIANT_VIOLATION',
+    );
   });
 
   it('still rejects a terminal reason the domain does not define', async () => {
@@ -486,7 +494,7 @@ describe('PaperBroker classifies transport statuses', () => {
     // 401 and 403 must not collapse: one is re-authenticate, the other is the
     // account refusing, and the recoveries are opposites.
     [401, 'SESSION_EXPIRED', false],
-    [403, 'ACCOUNT_READ_ONLY', false],
+    [403, 'FORBIDDEN', false],
     [404, 'INVALID_ORDER', false],
     [408, 'SERVICE_UNAVAILABLE', true],
     [409, 'ORDER_STATE_CONFLICT', false],

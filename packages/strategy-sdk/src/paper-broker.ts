@@ -5,12 +5,15 @@ import {
   type DomainErrorCode,
   type Market,
   type OrderStatus,
+  type OrderType,
   type Quantity,
 } from '@moi/trading-core';
 import {
   type Broker,
+  type BrokerFill,
   type BrokerOrder,
   type BrokerPortfolio,
+  type BrokerPortfolioOrder,
   type BrokerPosition,
   type BrokerWallet,
   type CancelOrderCommand,
@@ -79,6 +82,7 @@ const DOMAIN_ERROR_CODES: Readonly<Record<DomainErrorCode, true>> = {
   ACCOUNT_READ_ONLY: true,
   CANCEL_ONLY: true,
   CAPACITY_REACHED: true,
+  FORBIDDEN: true,
   IDEMPOTENCY_CONFLICT: true,
   INSUFFICIENT_AVAILABLE_CASH: true,
   INSUFFICIENT_AVAILABLE_POSITION: true,
@@ -124,6 +128,17 @@ const isCurrency = (currency: string): currency is Currency =>
 
 const isMarket = (market: string): market is Market =>
   Object.hasOwn(MARKETS, market);
+
+const ORDER_TYPES: Readonly<Record<OrderType, true>> = {
+  MARKET: true,
+  LIMIT: true,
+  STOP: true,
+  TAKE_PROFIT: true,
+  OCO: true,
+};
+
+const isOrderType = (type: string): type is OrderType =>
+  Object.hasOwn(ORDER_TYPES, type);
 
 /**
  * A response the paper API should never produce is a broken contract, not a
@@ -221,15 +236,88 @@ function decodeOrder(payload: unknown): BrokerOrder {
   // paper API never reported, on an order it also reports as `OPEN`.
   const suppliedFilledQuantity = body.filledQuantity;
   const suppliedTerminalReason = body.terminalReason;
-  // The paper API spells an absent optional field `null` — its order rows come
-  // straight from nullable ledger columns — while a placement response omits
-  // the key entirely. Both mean the same thing, and treating only `undefined`
-  // as absence made every portfolio read fail on the first order that had no
-  // terminal reason. A *wrong* value is still malformed.
   const filledQuantity =
-    suppliedFilledQuantity === undefined || suppliedFilledQuantity === null
+    suppliedFilledQuantity === undefined
       ? undefined
       : readQuantity(suppliedFilledQuantity, 'filled quantity');
+  // `terminal_reason` is the one nullable column behind an order row, so it is
+  // the one field whose absence the API spells `null`; a write response omits
+  // the key instead. Both mean absent, and reading only `undefined` that way
+  // failed every portfolio containing an order that ended normally. Every other
+  // field stays fail-closed: `null` there is malformed, not absent.
+  const terminalReason =
+    suppliedTerminalReason === null ? undefined : suppliedTerminalReason;
+
+  if (terminalReason !== undefined && terminalReason !== 'IOC_REMAINDER') {
+    malformed('order terminal reason');
+  }
+
+  const suppliedQuantity = body.quantity;
+  const quantity =
+    suppliedQuantity === undefined
+      ? undefined
+      : readQuantity(suppliedQuantity, 'order quantity');
+  return {
+    ...base,
+    ...(quantity === undefined ? {} : { quantity }),
+    ...(filledQuantity === undefined ? {} : { filledQuantity }),
+    ...(terminalReason === undefined
+      ? {}
+      : { terminalReason: 'IOC_REMAINDER' as const }),
+  };
+}
+
+function decodeFill(payload: unknown): BrokerFill {
+  const body = readObject(payload, 'fill');
+
+  return {
+    id: readString(body.id, 'fill id'),
+    symbol: readString(body.symbol, 'fill symbol'),
+    quantity: readQuantity(body.quantity, 'fill quantity'),
+    price: readMoneyAmount(body.price, 'fill price'),
+    fee: readMoneyAmount(body.fee, 'fill fee'),
+    recoveryFill: body.recoveryFill === true,
+  };
+}
+
+/**
+ * The portfolio's own order shape. It carries what a write response does not —
+ * market, symbol, type, side, prices, fills, OCO siblings — and a strategy
+ * cannot recognise its own orders without them.
+ */
+function decodePortfolioOrder(payload: unknown): BrokerPortfolioOrder {
+  const body = readObject(payload, 'portfolio order');
+  const status = readString(body.status, 'order status');
+
+  if (!isOrderStatus(status)) {
+    malformed('order status');
+  }
+
+  const type = readString(body.type, 'order type');
+
+  if (!isOrderType(type)) {
+    malformed('order type');
+  }
+
+  const side = readString(body.side, 'order side');
+
+  if (side !== 'BUY' && side !== 'SELL') {
+    malformed('order side');
+  }
+
+  // Same absence policy as the write response: the API sends `null` for a
+  // nullable column, and only a wrong value is malformed.
+  const suppliedLimitPrice = body.limitPrice;
+  const suppliedStopPrice = body.stopPrice;
+  const suppliedTerminalReason = body.terminalReason;
+  const limitPrice =
+    suppliedLimitPrice === undefined || suppliedLimitPrice === null
+      ? undefined
+      : readMoneyAmount(suppliedLimitPrice, 'order limit price');
+  const stopPrice =
+    suppliedStopPrice === undefined || suppliedStopPrice === null
+      ? undefined
+      : readMoneyAmount(suppliedStopPrice, 'order stop price');
   const terminalReason =
     suppliedTerminalReason === null ? undefined : suppliedTerminalReason;
 
@@ -238,11 +326,24 @@ function decodeOrder(payload: unknown): BrokerOrder {
   }
 
   return {
-    ...base,
-    ...(filledQuantity === undefined ? {} : { filledQuantity }),
+    id: readString(body.id, 'order id'),
+    market: decodeMarket(body.market, 'order market'),
+    symbol: readString(body.symbol, 'order symbol'),
+    type,
+    side,
+    quantity: readQuantity(body.quantity, 'order quantity'),
+    filledQuantity: readQuantity(body.filledQuantity, 'order filled quantity'),
+    status,
+    ...(limitPrice === undefined ? {} : { limitPrice }),
+    ...(stopPrice === undefined ? {} : { stopPrice }),
     ...(terminalReason === undefined
       ? {}
       : { terminalReason: 'IOC_REMAINDER' as const }),
+    fills: readArray(body.fills ?? [], 'order fills').map(decodeFill),
+    siblingOrderIds: readArray(
+      body.siblingOrderIds ?? [],
+      'order sibling ids',
+    ).map((id) => readString(id, 'order sibling id')),
   };
 }
 
@@ -362,7 +463,12 @@ function decodePortfolio(
   const positions = readArray(body.positions, 'portfolio positions').map(
     decodePosition,
   );
-  const symbols = new Set(positions.map((position) => position.symbol));
+  // The ledger keys a position by `(session_id, market_code, symbol)`, so the
+  // same ticker can legitimately exist in both markets; deduping on the symbol
+  // alone would reject a portfolio the ledger considers perfectly valid.
+  const symbols = new Set(
+    positions.map((position) => `${position.market}:${position.symbol}`),
+  );
 
   // The same guard for positions: trading-core's own account invariant allows
   // at most one position per symbol, so a duplicate double-counts an exposure.
@@ -375,7 +481,7 @@ function decodePortfolio(
     wallets,
     positions,
     activeOrders: readArray(body.activeOrders, 'portfolio orders').map(
-      decodeOrder,
+      decodePortfolioOrder,
     ),
     // A sequence counts durable effects, so it is a whole number, not a rate.
     accountSequence: readWholeNumber(
@@ -409,7 +515,7 @@ function fallbackCode(status: number): DomainErrorCode {
   }
 
   if (status === 403) {
-    return 'ACCOUNT_READ_ONLY';
+    return 'FORBIDDEN';
   }
 
   // 408 and 425 are transient by definition, and every write carries an
@@ -521,16 +627,21 @@ export class PaperBroker implements Broker {
         ? {
             ...common,
             type: 'OCO' as const,
+            // `PLACE_ORDER_PRICE_RULES` marks both prices `required` for an
+            // OCO and `readPlaceOrderCommand` has already enforced it, so the
+            // legs project the validated fields rather than re-asserting their
+            // type — a cast here would re-open exactly what the validator
+            // closed.
             legs: [
               {
                 ...common,
                 type: 'LIMIT' as const,
-                limitPrice: validated.limitPrice as DecimalString,
+                ...projectOptionalField(validated, 'limitPrice'),
               },
               {
                 ...common,
                 type: 'STOP' as const,
-                stopPrice: validated.stopPrice as DecimalString,
+                ...projectOptionalField(validated, 'stopPrice'),
               },
             ],
           }
