@@ -1,304 +1,249 @@
-# Moi Strategy Runner (자동매매 봇) Design
+# Moi Strategy Runner (자동매매 봇) Design — v2
 
-- 문서 상태: 설계 문서 (design-only, 구현 전 교차검증 대상)
-- 기준 커밋: `dd7ca0d` (`Merge pull request #29 from changminKo/fix/status-signature`)
-- 선행 문서: [`2026-08-21-moi-paper-trading-architecture-design.md`](2026-08-21-moi-paper-trading-architecture-design.md), [`2026-08-27-moi-production-runtime-and-provider-handoff-design.md`](2026-08-27-moi-production-runtime-and-provider-handoff-design.md), [`docs/operations/deployment.md`](../../operations/deployment.md), [`AGENTS.md`](../../../AGENTS.md)
+- 문서 상태: 설계 문서 (design-only). v1은 Codex·agy 교차검증에서 **BLOCKED** 판정을 받았고, 이 문서가 그 지적을 흡수한 2차본이다.
+- 기준 커밋: `c6ae33b` (`Merge pull request #31 …market session phase`)
+- 선행 문서: [`2026-08-21-…-architecture-design.md`](2026-08-21-moi-paper-trading-architecture-design.md), [`2026-08-27-…-provider-handoff-design.md`](2026-08-27-moi-production-runtime-and-provider-handoff-design.md), [`AGENTS.md`](../../../AGENTS.md)
+- 선행 이슈(구현 착수 전 해결): [#32](https://github.com/changminKo/moi/issues/32) SDK↔API 계약 불일치, [#33](https://github.com/changminKo/moi/issues/33) `activeOrders` 필터, [#34](https://github.com/changminKo/moi/issues/34) 미연결 레이트 리밋.
 - 이 문서는 코드가 아니라 계약이다. 이 문서와 코드가 다르면 코드가 틀린 것이며, 문서를 바꾸려면 이 문서를 먼저 고친다.
 
 ## 0. 승인된 결정 (사용자)
 
-| 축 | 결정 | 함의 |
-|---|---|---|
-| 실행 위치 | **별도 컨테이너** (`apps/strategy-runner`, compose 서비스 `bot`) | 공개 HTTP API만 사용. 원장·엔진 코드를 링크하지 않는다. 봇이 죽어도 거래 API는 산다. |
-| 전략 범위 | **프레임워크부터 제대로** | 전략 레지스트리, 파라미터 스키마, 백테스트 하네스, 다중 전략 동시 실행. |
-| 조종·관제 | **설정 파일 + Discord 알림** | 웹 UI 변경 0. 웹훅 URL은 별도 시크릿(`BOT_DISCORD_WEBHOOK_URL`)으로 주입되며 이 문서·저장소·로그에 값이 남지 않는다. |
+| 축 | 결정 |
+|---|---|
+| 실행 위치 | 별도 컨테이너 `apps/strategy-runner` (compose 서비스 `bot`) |
+| 전략 범위 | 프레임워크부터 제대로 (레지스트리·파라미터 스키마·백테스트·다중 전략) |
+| 조종·관제 | 설정 파일 + Discord. 웹훅 URL은 별도 시크릿 |
 
-## 1. 배경
+## 1. v1에서 무엇이 틀렸는가
 
-`packages/strategy-sdk`에는 이미 다음이 있다.
+교차검증이 찾아낸 것 중 **설계가 바뀐** 항목만 적는다. 기존 코드 결함은 §2로 분리했다.
 
-| 부품 | 위치 | 상태 |
-|---|---|---|
-| `Broker` 인터페이스 (`placeOrder`/`cancelOrder`/`exchange`/`getPortfolio`) | `src/broker.ts` | 완성, 계약 테스트 있음 |
-| `PaperBroker` (경로 화이트리스트 HTTP 어댑터) | `src/paper-broker.ts` | 완성. `/api/v1/orders`, `/api/v1/fx/conversions`, `/api/v1/portfolio`만 도달 가능 — **설정으로 실거래소를 가리킬 수 없다** |
-| 커맨드 디코더·검증 (`readPlaceOrderCommand` 등) | `src/broker.ts`, `src/validation.ts` | 완성 |
-| 브로커 계약 테스트 스위트 | `src/broker-contract.ts` | 완성 |
+| # | v1의 가정 | 사실 | v2의 처리 |
+|---|---|---|---|
+| 1 | 공개 API를 그냥 부르면 된다 | 모든 변경 요청은 `Origin === PUBLIC_ORIGIN` + CSRF 토큰 필요(`plugins/csrf.ts:19`), WS 업그레이드도 동일(`stream-upgrade.ts:338`) | §4.2 세션·헤더 계약을 명시. 봇은 `Origin`을 `PUBLIC_ORIGIN`으로 보내고 CSRF 토큰을 세션과 함께 보관 |
+| 2 | 시세 20종목 구독 | `STREAM_MAX_QUOTE_SUBSCRIPTIONS = 5`, 그리고 `current >= 5`에서 거부(`rate-limits.ts:53`) → 실질 4 | §5.3 구독 상한 4, 설정 검증에서 초과를 **거부**(런타임 폴백 금지) |
+| 3 | WS 프레임에 `price`/`asOf`/`health`가 있다 | 프레임은 `{type:'quote', market, symbol, recoveryEpoch, marketDataVersion, payload}`이고 `payload`는 **호가창**(`market-runtime.ts:333`). 체결(`trade`) 이벤트는 **구독자에게 발행되지 않는다**(`market-runtime.ts:315-325`) | §5.2 `Tick`을 호가창에서 유도(중간가)하거나 REST 시세로 보강. 체결 발행은 §9 선행 작업으로 분리 |
+| 4 | 세션은 매번 새로 만들면 된다 | 쿠키 없이 부트스트랩하면 **새 원장 세션**(`session-service.ts:123`), 멱등성은 `(session_id, key)` 스코프(`idempotency-repository.ts:75`) | §4.3 세션 쿠키·CSRF를 상태 저장소에 영속화, 재시작 시 재사용. 새 세션은 명시적 초기화 명령으로만 |
+| 5 | 게이트웨이가 결정 저장 후 멱등키를 만든다 | `PlaceOrderCommand`가 이미 `sessionId`·`idempotencyKey`를 요구(`broker.ts:31`) | §6.2 전략은 `OrderIntent`(세션·키 없음)를 반환하고, 게이트웨이가 그것을 `PlaceOrderCommand`로 승격한다 |
+| 6 | 킬 스위치는 "취소 → 차단" 순서 | in-flight 주문이 취소 스윕 뒤에 커밋될 수 있다 | §7.2 제출 배리어: 차단 플래그 → in-flight 완료 대기 → 취소 스윕 → 재조회 확인 |
+| 7 | 손실 한도는 메모리 카운터 | 재시작하면 초기화되어 한도를 넘겨 거래 가능 | §6.4 실현손익·연속손실을 상태 DB에 기록하고 재시작 시 원장 체결로 재구성 |
+| 8 | `bot`을 compose에 추가하면 된다 | `check-deployment-contract.mjs:27`이 서비스 집합을 정확히 검사 | §8.1 체커를 함께 확장하는 것을 완료 조건에 포함 |
+| 9 | 호스트 마스킹 규칙을 재사용하면 비밀이 안 샌다 | 규칙에 쿠키·CSRF 패턴이 없다(`notify.sh:33`) | §7.4 `moi_session=`, `x-csrf-token`, `Set-Cookie` 패턴을 마스커에 추가(호스트 스크립트와 러너 양쪽) |
+| 10 | 신규 세션으로 미국 주식 전략 가능 | 신규 세션은 ₩10,000,000 / **$0**(`session-repository.ts:103`) | §6.5 USD 전략은 시작 시 가상 환전(`/api/v1/fx/conversions`)을 요구하고, 잔고 부족이면 기동 거부 |
+| 11 | `tradingHoursOnly`를 판단할 방법이 있다 | v1 시점엔 없었음 | #31로 `GET /api/v1/markets/:market/session`이 생겼다(phase·opensAt·closesAt). §6.3이 이를 사용 |
+| 12 | `activeOrders`는 미체결 주문 | 상태 필터가 없다(`portfolio-repository.ts:70`) | §2 이슈 #33. 해결 전까지 러너가 상태로 직접 거른다 |
+| 13 | 백테스트가 원장 수수료 모델을 재사용 | `FeeModel`은 요율·통화·반올림 자릿수·모드를 요구하는데 공개 엔드포인트가 없다(`fee-model.ts:15`) | §8.3 수수료 파라미터를 설정에 명시하고, 실제 체결 수수료와의 괴리를 보고서에 표시 |
 
-없는 것은 전략을 **실행**하는 모든 것이다: 시세 입력, 전략 수명주기, 스케줄러, 상태 보존, 리스크 한도, 백테스트, 관측.
+## 2. 선행 조건 (봇 코드보다 먼저)
 
-이 문서는 그 공백을 채우되, 기존 SDK의 두 가지 안전 속성을 깨지 않는다.
+봇은 **#32가 닫히기 전에는 구현을 시작하지 않는다.** SDK가 API의 정상 응답을 거부하는 상태에서 그 위에 프레임워크를 얹으면, 첫 통합 테스트가 SDK 결함을 봇 결함으로 오인하게 만든다.
 
-1. `PaperBrokerPath` 화이트리스트 — 전략은 페이퍼 API 밖으로 주문을 보낼 수 없다.
-2. 모든 금액은 `DecimalString`. 전략 코드에서도 JS `number` 산술을 쓰지 않는다.
-
-## 2. 범위
-
-### 2.1 이번 설계가 포함하는 것
-
-- `packages/strategy-sdk`에 전략 계약(`Strategy`, `StrategyContext`, `StrategyDecision`) 추가.
-- `apps/strategy-runner` 신규 앱: 설정 로드 → 세션 확보 → 시세 구독 → 전략 실행 → 주문 제출 → 상태 저장 → Discord 보고.
-- 리스크 게이트(주문당·일일·포지션·연속손실), 킬 스위치.
-- 백테스트 러너: 동일한 `Strategy` 구현을 기록된 틱으로 재생.
-- 전략 2종: `sma-crossover`(추세), `grid`(횡보). 둘 다 파라미터 스키마를 가진다.
-- compose 서비스 `bot`, systemd 통합, Discord 알림.
-
-### 2.2 명시적 비범위
-
-- 웹 UI 변경, 봇 제어용 신규 공개 API (§0 결정).
-- 실거래·실계좌 연동. `PaperBroker` 화이트리스트를 넓히지 않는다.
-- 과거 캔들 기반 지표. 캔들 엔드포인트는 아직 없다(§8.2 의존성).
-- 다중 세션·다중 계정. 봇은 자기 익명 세션 하나만 쓴다.
+| 이슈 | 봇에 대한 의미 |
+|---|---|
+| #32 | `placeOrder`/`getPortfolio` 디코드, STOP·OCO 와이어 형태, 401 코드 매핑. 전부 봇의 주 경로 |
+| #33 | 미체결 주문 계산·킬 스위치 취소 대상 |
+| #34 | 429 재시도 경로를 통합 테스트로 증명할 수 있는지 |
 
 ## 3. 아키텍처
 
 ```
-                    ┌──────────────────────────────────────────┐
-  infra/compose     │ bot (apps/strategy-runner)               │
-                    │                                          │
-                    │  ConfigLoader ─→ RunnerSupervisor         │
-                    │                    │                      │
-                    │        ┌───────────┼───────────┐          │
-                    │        ▼           ▼           ▼          │
-                    │  StrategyHost  StrategyHost  ...          │
-                    │   (전략 1)      (전략 2)                   │
-                    │        │           │                      │
-                    │        └─────┬─────┘                      │
-                    │              ▼                            │
-                    │        RiskGate → OrderGateway            │
-                    │              │         │                  │
-                    │        StateStore   PaperBroker(SDK)      │
-                    │              │         │                  │
-                    │         (SQLite)       │  Reporter ──→ Discord
-                    └────────────────────────┼──────────────────┘
-                                             ▼  HTTPS (공개 API만)
-                    ┌────────────────────────────────────────────┐
-                    │ paper-api  (변경 없음)                      │
-                    │  POST /api/v1/sessions/anonymous            │
-                    │  GET  /api/v1/instruments                   │
-                    │  GET  /api/v1/markets/{m}/symbols/{s}/quote │
-                    │  GET  /api/v1/stream            (WebSocket) │
-                    │  POST /api/v1/orders  DELETE /api/v1/orders/{id} │
-                    │  GET  /api/v1/portfolio                     │
-                    │  GET  /api/v1/health/trading                │
-                    └────────────────────────────────────────────┘
+  bot 컨테이너 (apps/strategy-runner)
+    ConfigLoader → RunnerSupervisor
+                      ├── SessionClient   (쿠키·CSRF 영속)
+                      ├── MarketFeed      (WS 구독 + REST 보강)
+                      ├── StrategyHost ×N (전략별 윈도우·상태)
+                      ├── RiskGate        (한도·세션 위상·킬 스위치)
+                      ├── OrderGateway    (Intent → Command, 멱등, 재시도)
+                      ├── StateStore      (append-only NDJSON + 인덱스)
+                      └── Reporter        (Discord, 마스킹)
+            │
+            ▼ HTTPS/WSS, Origin: $PUBLIC_ORIGIN
+  paper-api (봇 때문에 바뀌는 것은 §9의 선행 작업뿐)
 ```
 
-**경계 규칙**: `apps/strategy-runner`는 `@moi/strategy-sdk`와 `@moi/trading-core`에만 의존한다. `@moi/paper-api`, `@moi/market-data`를 import 하지 않는다(패키지 의존성으로 강제하고 `package-surface` 테스트로 고정). 봇은 paper-api의 데이터베이스에 접속하지 않는다.
+경계: `@moi/strategy-sdk`, `@moi/trading-core`만 의존한다. `@moi/paper-api`·`@moi/market-data`를 import 하지 않으며 데이터베이스에 직접 접속하지 않는다. `package-surface` 테스트로 고정한다.
 
-## 4. 전략 계약 (`@moi/strategy-sdk` 확장)
+## 4. 세션·전송 계약
+
+### 4.1 오리진
+
+`BOT_API_ORIGIN`은 **허용 목록과 대조**한다. 기본값은 `PUBLIC_ORIGIN`이며, 목록에 없는 값이면 기동을 거부한다(fail closed). 이것이 v1의 "경로 화이트리스트가 실거래소 접속을 막는다"는 잘못된 주장(경로만 제한하고 호스트는 자유였다)에 대한 실제 방어다. 추가로 `PaperBrokerTransport` 구현이 URL을 만들 때 호스트를 상수로 고정한다.
+
+### 4.2 헤더
+
+| 요청 | 필수 헤더 |
+|---|---|
+| 모든 변경(POST/DELETE) | `Origin: $PUBLIC_ORIGIN`, `X-CSRF-Token: <세션의 토큰>`, `Cookie: moi_session=…`, `Idempotency-Key` |
+| WS 업그레이드 | `Origin: $PUBLIC_ORIGIN`, `Cookie: moi_session=…` |
+| 읽기 | `Cookie` (세션 스코프 데이터인 경우) |
+
+### 4.3 세션 수명주기
+
+1. 상태 저장소에 쿠키·CSRF 토큰·`sessionId`가 있으면 재사용하고 `GET /api/v1/portfolio`로 유효성을 확인한다.
+2. 없거나 401이면 `POST /api/v1/sessions/anonymous`로 새로 만들고 **즉시 영속화**한다.
+3. 세션이 바뀌면 이전 세션의 미체결 주문은 봇이 더 이상 취소할 수 없다. 따라서 세션 교체는 Discord `warn`으로 보고하고, 이전 `sessionId`를 상태에 남긴다.
+4. `SESSION_EXPIRED`와 `ACCOUNT_READ_ONLY`를 구분해야 하므로, #32가 401 매핑을 고치기 전까지 러너는 HTTP 상태 코드를 직접 보는 얇은 전송 계층을 쓴다.
+
+## 5. 시세 입력
+
+### 5.1 소스
+
+| 채널 | 내용 | 용도 |
+|---|---|---|
+| `GET /api/v1/stream?quoteSymbols=KR:005930,…` (WS) | `{type:'quote', market, symbol, recoveryEpoch, marketDataVersion, payload: OrderBookSnapshot}` | 호가·중간가, 구독 상한 4 |
+| `GET /api/v1/markets/:m/symbols/:s/quote` (REST) | 최근 스냅샷(가격 포함) | 시작 시 1회, WS 공백 복구, 상한 초과 심볼 |
+| `GET /api/v1/markets/:m/session` (REST, #31) | `phase`, `opensAt`, `closesAt` | 리스크 게이트의 장중 판정. 60초 캐시 |
+
+### 5.2 `Tick` 유도
 
 ```ts
 export interface Tick {
   readonly market: Market;
   readonly symbol: string;
-  readonly price: DecimalString;      // null 가격은 전달하지 않는다
-  readonly asOf: string;              // ISO instant
-  readonly health: 'HEALTHY' | 'DEGRADED' | 'RECOVERING';
-}
-
-export interface StrategyContext {
-  /** 이 전략이 구독한 심볼의 최신 틱. 없으면 undefined. */
-  latest(market: Market, symbol: string): Tick | undefined;
-  /** 러너가 유지하는 롤링 윈도우. 길이는 전략 파라미터가 선언한 최대치. */
-  window(market: Market, symbol: string): readonly Tick[];
-  /** 러너가 최근에 읽은 포트폴리오 스냅샷(캐시). 주문 직전에 갱신된다. */
-  portfolio(): PortfolioSnapshot;
-  /** 이 전략이 낸 미체결 주문. */
-  openOrders(): readonly OrderSnapshot[];
-  /** 결정론적 시각. 백테스트에서는 재생 시각이다. */
-  now(): string;
-  /** 구조화 로그. 비밀은 자동 마스킹된다(§7.3). */
-  log(event: string, fields?: Readonly<Record<string, string>>): void;
-}
-
-export type StrategyDecision =
-  | { readonly kind: 'noop'; readonly reason?: string }
-  | { readonly kind: 'place'; readonly command: PlaceOrderCommand; readonly reason: string }
-  | { readonly kind: 'cancel'; readonly command: CancelOrderCommand; readonly reason: string };
-
-export interface Strategy<P = unknown> {
-  readonly id: string;                       // 레지스트리 키, kebab-case
-  readonly parameterSchema: ParameterSchema<P>;
-  /** 구독할 심볼. 설정에서 온 값을 검증해 돌려준다. */
-  subscriptions(params: P): readonly InstrumentRef[];
-  /** 시작 시 1회. 상태 복원 용도. 주문을 내지 않는다. */
-  onStart?(context: StrategyContext, params: P): void;
-  /** 틱마다. 순수 함수여야 한다: 같은 입력 → 같은 결정. */
-  onTick(tick: Tick, context: StrategyContext, params: P): readonly StrategyDecision[];
-  /** 체결 통지. 상태 갱신용. 주문 결정도 반환할 수 있다. */
-  onFill?(fill: FillEvent, context: StrategyContext, params: P): readonly StrategyDecision[];
+  readonly price: DecimalString;        // 중간가 또는 REST 스냅샷 가격
+  readonly priceSource: 'book-mid' | 'rest-snapshot';
+  readonly bestBid: DecimalString | null;
+  readonly bestAsk: DecimalString | null;
+  readonly asOf: string;                // 러너 수신 시각(ISO). 제공자 시각이 아니다
+  readonly marketDataVersion: string;   // 순서 판정용 단조 증가 값
 }
 ```
 
-**핵심 제약**
+- 중간가 = `(bestBid + bestAsk) / 2`, `trading-core`의 decimal 유틸로 계산하고 **시장별 호가 단위로 반올림**한다. 반올림 자릿수·모드는 설정에 명시한다(AGENTS.md 규칙 5).
+- 한쪽 호가만 있으면 그 값을 쓰고 `priceSource`를 기록한다. 양쪽 다 없으면 틱을 만들지 않는다.
+- `asOf`는 러너 시각임을 이름과 문서에 남긴다. 제공자 시각을 아는 척하지 않는다.
+- 정렬은 `marketDataVersion`으로 한다. 역행하는 프레임은 버린다.
 
-- `onTick`은 **동기·순수**하다. I/O를 하지 않고, 시각은 `context.now()`로만 얻는다. 이것이 백테스트와 실행이 같은 코드를 쓰는 근거다.
-- 전략은 주문을 **직접 보내지 않는다**. 결정을 반환할 뿐이고, 제출은 `RiskGate` → `OrderGateway`가 한다.
-- 랜덤이 필요하면 `params`에 시드를 받는다. `Math.random()` 사용은 lint 규칙으로 금지한다.
+### 5.3 공백과 재연결
 
-### 4.1 파라미터 스키마
+- WS는 계정 이벤트만 `afterSequence`로 재생한다. **시세는 재생되지 않는다.** 재연결하면 러너는 구독 심볼마다 REST 스냅샷을 1회 읽어 윈도우를 이어붙이고, 그 지점을 `gap` 표시로 상태에 남긴다.
+- 전략은 `context.window()`에서 `gap` 이후 구간을 구분할 수 있어야 한다(`Tick.gapBefore: boolean`). SMA 같은 지표는 공백 직후 N틱 동안 진입을 보류한다.
+- 구독 상한(4)을 넘는 설정은 기동 시 거부한다. 조용한 REST 폴백은 없다.
+
+## 6. 전략과 리스크
+
+### 6.1 전략 계약
 
 ```ts
-export interface ParameterSchema<P> {
-  parse(input: unknown): P;          // 실패 시 ConfigError, 필드 경로 포함
-  readonly describe: Readonly<Record<string, string>>; // Discord 보고·문서용
+export interface Strategy<P = unknown> {
+  readonly id: string;
+  readonly parameterSchema: ParameterSchema<P>;
+  subscriptions(params: P): readonly InstrumentRef[];
+  onStart?(state: StrategyState, context: StrategyContext, params: P): void;
+  onTick(tick: Tick, context: StrategyContext, params: P): readonly StrategyDecision[];
+  onFill?(fill: FillEvent, context: StrategyContext, params: P): readonly StrategyDecision[];
+  /** 재시작 시 복원할 전략 자체 상태. JSON 직렬화 가능해야 한다. */
+  snapshot?(): StrategyState;
 }
 ```
 
-zod를 쓰지 않고 `trading-core`의 기존 검증 유틸을 쓴다(런타임 의존성 추가 회피). 수치 파라미터도 `DecimalString`으로 받는다.
+`onTick`은 동기·순수. `context.now()` 외의 시각·난수·I/O 금지(lint 규칙으로 강제).
 
-## 5. 러너 구조 (`apps/strategy-runner`)
+### 6.2 결정 → 주문
 
-| 모듈 | 파일 | 책임 |
-|---|---|---|
-| `ConfigLoader` | `src/config.ts` | `BOT_CONFIG_PATH`의 TOML/JSON 로드, 스키마 검증, 시크릿은 env에서만 |
-| `SessionClient` | `src/session-client.ts` | 익명 세션 생성·쿠키/CSRF 보관·만료 시 재수립 |
-| `QuoteFeed` | `src/quote-feed.ts` | `/api/v1/stream` WebSocket 구독, 끊기면 지수 백오프 재연결, 폴백으로 REST 폴링 |
-| `StrategyHost` | `src/strategy-host.ts` | 전략 1개의 윈도우·상태·수명주기 |
-| `RiskGate` | `src/risk-gate.ts` | 결정 → 허용/거부. §6 |
-| `OrderGateway` | `src/order-gateway.ts` | 멱등 키 생성, 제출, 재시도, 결과 기록 |
-| `StateStore` | `src/state-store.ts` | SQLite(`better-sqlite3` 대신 `node:sqlite` 내장 모듈) 영속화 |
-| `Reporter` | `src/reporter.ts` | Discord 임베드. 기존 `infra/oracle/notify.sh`와 같은 마스킹 규칙 |
-| `RunnerSupervisor` | `src/supervisor.ts` | 조립, 우아한 종료, 킬 스위치 |
-
-### 5.1 제어 흐름 (한 틱)
-
-1. `QuoteFeed`가 틱을 방출한다.
-2. `StrategyHost`가 윈도우에 넣고 `strategy.onTick(...)`을 호출한다.
-3. 결정 배열을 `RiskGate`가 순서대로 평가한다. 거부된 결정은 사유와 함께 기록되고 버려진다.
-4. 허용된 결정은 `OrderGateway`가 제출한다. `place`는 `Idempotency-Key`를 반드시 붙인다(§5.3).
-5. 결과(성공·거부·오류)를 `StateStore`에 append, 필요하면 `Reporter`가 Discord로 보낸다.
-6. `paper-api`가 `CANCEL_ONLY`/`MARKET_CLOSED`/`503`을 반환하면 전략을 일시정지하고 백오프한다(§7.2).
-
-### 5.2 상태 (SQLite, 볼륨에 저장)
-
-```
-strategy_runs(id, strategy_id, params_hash, started_at, stopped_at, status)
-decisions(id, run_id, at, tick_as_of, kind, reason, accepted, risk_reason)
-submissions(id, run_id, decision_id, idempotency_key, order_id, status, error_code, at)
-positions_cache(run_id, market, symbol, quantity, avg_cost, updated_at)
-kill_switch(reason, engaged_at)
+```ts
+type StrategyDecision =
+  | { kind: 'noop'; reason?: string }
+  | { kind: 'place'; intent: OrderIntent; reason: string }   // sessionId·idempotencyKey 없음
+  | { kind: 'cancel'; orderId: string; reason: string };
 ```
 
-재시작 시 `submissions`의 미결 항목을 `GET /api/v1/portfolio`와 대조해 복원한다. 봇의 상태는 **사실의 원본이 아니다** — 원장이 원본이고, 봇 상태는 캐시·감사 기록이다.
+`OrderGateway`가 (1) 결정을 상태에 append → (2) `decisionId`로 멱등키 유도 → (3) `OrderIntent` + 세션 + 키를 `PlaceOrderCommand`로 승격 → (4) 제출. 크래시가 어디서 나든 재기동 시 같은 키가 재계산된다.
 
-### 5.3 멱등성
+### 6.3 리스크 게이트
 
-`Idempotency-Key = sha256(run_id | strategy_id | decision_id)`의 앞 32자. 재시작 후 같은 결정을 다시 제출해도 원장은 주문을 한 번만 만든다. 키는 결정이 저장된 **뒤에** 계산되므로 크래시 시점과 무관하게 재현된다.
-
-### 5.4 시세 입력
-
-1차: `GET /api/v1/stream` WebSocket. 세션 쿠키로 인증한다.
-2차(폴백): 심볼당 `GET /api/v1/markets/{market}/symbols/{symbol}/quote`를 5초 간격 폴링. 웹 클라이언트와 같은 부하 특성이므로 심볼 수 상한을 설정에 둔다(기본 20).
-
-`health`가 `DEGRADED`/`RECOVERING`인 틱은 윈도우에 넣되 **신규 진입 결정은 거부**한다(청산·취소는 허용).
-
-## 6. 리스크 게이트
-
-설정에서 오는 한도. 모두 `DecimalString` 비교이며, 하나라도 위반하면 결정은 거부된다.
-
-| 한도 | 기본값 | 위반 시 |
-|---|---|---|
-| `maxOrderNotional` | 통화별 필수 | 거부 |
-| `maxDailyNotional` | 필수 | 거부 + 당일 일시정지 |
-| `maxPositionQuantity` (심볼당) | 필수 | 거부 |
-| `maxOpenOrders` (전략당) | 10 | 거부 |
-| `maxConsecutiveLosses` | 5 | 킬 스위치 |
-| `maxDailyLossNotional` | 필수 | 킬 스위치 |
-| `minTickHealth` | `HEALTHY` | 진입만 거부 |
-| `allowedSymbols` | 필수(화이트리스트) | 거부 |
-| `tradingHoursOnly` | true | `REGULAR` 아니면 거부 |
-
-킬 스위치가 걸리면 러너는 (1) 모든 미체결 주문 취소 시도, (2) 신규 결정 전부 거부, (3) Discord에 `fail` 임베드, (4) `kill_switch` 행 기록. 해제는 사람이 파일에서 지우고 재시작해야 한다 — 자동 해제 없음.
-
-## 7. 실패 모드
-
-### 7.1 봇이 죽어도 되는 것
-
-봇 컨테이너는 `restart: unless-stopped`. 크래시해도 paper-api·web·원장은 영향받지 않는다. 미체결 주문은 원장에 남고, 재시작 시 §5.2로 복원한다.
-
-### 7.2 API가 거절할 때
-
-| 응답 | 러너 동작 |
+| 한도 | 판정 근거 |
 |---|---|
-| `401 SESSION_EXPIRED` | 세션 재수립 후 1회 재시도 |
-| `409 CANCEL_ONLY` | 진입 중단, 취소만 허용, 60초 후 재평가 |
-| `409 MARKET_CLOSED` | 해당 시장 전략 일시정지, 다음 개장까지 |
-| `429` | 지수 백오프(최대 5분), Discord `warn` 1회 |
-| `5xx`, 네트워크 | 백오프 재시도. 3회 실패 시 `warn`, 10회 실패 시 킬 스위치 |
-| `INSUFFICIENT_*` | 거부 기록만. 전략 로직 문제이므로 재시도 없음 |
+| 주문·일일 명목, 포지션 수량, 미체결 수 | 상태 DB + `/api/v1/portfolio`(#33 해결 전까지 상태로 직접 필터) |
+| 연속 손실, 일일 손실 | §6.4 |
+| 장중 한정 | `GET /api/v1/markets/:m/session`의 `phase === 'REGULAR'` |
+| 심볼 화이트리스트 | 설정 |
+| 시세 신선도 | 마지막 틱이 N초 이상 오래되면 진입 거부 |
 
-### 7.3 비밀 취급
+**전략 격리**: 한 심볼은 **한 전략만** 거래한다. 설정 검증에서 심볼 중복을 거부한다. 여러 전략이 한 세션의 지갑·포지션을 공유하는 구조에서 논리 포지션을 분리하는 것은 이번 범위 밖이며, 그 이유를 여기 남긴다(교차검증 HIGH 지적).
 
-세션 토큰·CSRF·웹훅 URL은 로그·Discord·상태 DB에 남지 않는다. `Reporter`는 호스트 알림과 같은 마스킹 패스를 재사용한다(`scheme://user:pass@`, `*(TOKEN|SECRET|KEY|WEBHOOK)*=` → `***`, 웹훅 URL → `<webhook>`).
+### 6.4 손익 추적
 
-## 8. 백테스트
+체결은 WS 계정 이벤트로 받는다. 러너는 `accountSequence`(마지막 처리 이벤트 커서)를 상태에 저장하고, 재연결·재시작 시 그 지점부터 재생한다. 실현손익·연속손실은 체결에서 계산해 append 하며, 재시작 시 커서 이후 이벤트를 재생해 재구성한다. `onFill`이 주문을 낼 수 있으므로 이벤트 처리는 **커서 전진과 같은 트랜잭션**에서 기록한다(중복 발주·누락 방지).
 
-### 8.1 하네스
+### 6.5 통화
 
-`pnpm --filter @moi/strategy-runner backtest -- --strategy sma-crossover --params ./params.json --ticks ./ticks.ndjson`
+USD 전략은 기동 시 필요한 USD를 `/api/v1/fx/conversions`로 확보한다. 설정에 `initial_fx`가 없고 잔고가 부족하면 기동을 거부한다.
 
-- 입력: NDJSON 틱 파일(러너가 실행 중 `--record` 옵션으로 남긴 것, 또는 `FakeMarketData`로 생성).
-- 실행: 같은 `Strategy` 구현 + 같은 `RiskGate`. `OrderGateway` 자리에 `SimulatedExchange`(즉시 체결 또는 지정가 도달 시 체결, 수수료는 `trading-core`의 수수료 모델 재사용).
-- 출력: 총손익, 최대낙폭, 거래 수, 승률, 거부 사유 히스토그램 — 전부 `DecimalString`.
+## 7. 실패와 안전
 
-### 8.2 알려진 한계
+### 7.1 API 응답 처리
 
-과거 캔들 API가 없으므로 백테스트 입력은 **직접 기록한 틱**뿐이다. Toss 계약에는 `/api/v1/market-indicators/{symbol}/candles`가 있으나 아직 어댑터·엔드포인트가 없다(별도 작업). 이 한계는 문서화된 상태로 출발한다.
+HTTP 상태와 도메인 코드를 **둘 다** 본다. `401`→세션 재수립 1회, `409 CANCEL_ONLY`→진입 중단·취소만, `409 MARKET_CLOSED`→해당 시장 일시정지, `429`→지수 백오프, `5xx`/네트워크→백오프 후 재시도(3회 경고, 10회 킬 스위치), `INSUFFICIENT_*`→재시도 없이 기록.
 
-## 9. 설정 예시
+### 7.2 킬 스위치
 
-```toml
-# /etc/moi/bot.toml — 시크릿 없음. 웹훅 URL과 API 오리진은 환경변수.
-api_origin_env = "BOT_API_ORIGIN"        # 예: https://moi-app.duckdns.org
-poll_interval_ms = 5000
-max_symbols = 20
+순서를 고정한다: **차단 플래그 세팅 → in-flight 제출 완료 대기(배리어) → 미체결 주문 취소 → `/api/v1/portfolio` 재조회로 잔여 확인 → 상태·Discord 기록.** 잔여가 남으면 `fail`로 보고하고 사람이 개입할 때까지 반복 취소한다. 해제는 사람이 상태 파일을 지우고 재시작해야 한다.
 
-[[strategy]]
-id = "sma-crossover"
-enabled = true
-[strategy.params]
-market = "KR"
-symbol = "005930"
-fast_window = 5
-slow_window = 20
-order_quantity = "1"
-[strategy.risk]
-max_order_notional = "200000"
-max_daily_notional = "1000000"
-max_position_quantity = "10"
-max_daily_loss_notional = "100000"
-allowed_symbols = ["005930"]
-```
+### 7.3 봇 격리
+
+`restart: unless-stopped`. 봇이 죽어도 paper-api·web·원장은 영향 없다. 원장이 사실의 원본이고 봇 상태는 캐시·감사 기록이다.
+
+### 7.4 비밀
+
+마스킹 규칙에 `moi_session=…`, `x-csrf-token: …`, `Set-Cookie: …`, `Idempotency-Key`를 추가한다(러너와 `infra/oracle/notify.sh` 양쪽). 상태 저장소의 쿠키·토큰 파일은 0600, 로그·Discord·백테스트 산출물에 절대 포함하지 않는다.
+
+## 8. 상태·백테스트·배포
+
+### 8.1 상태 저장
+
+append-only NDJSON + 재시작 시 메모리 인덱스. `node:sqlite`는 쓰지 않는다(Node 24에서 실험적, v1의 열린 질문 1 해결). 파일: `runs.ndjson`, `decisions.ndjson`, `submissions.ndjson`, `fills.ndjson`, `session.json`(0600), `cursor.json`, `kill-switch.json`. compose 볼륨에 저장한다.
+
+배포: compose 서비스 `bot` 추가 + `scripts/check-deployment-contract.mjs`의 서비스 집합·CI 단계 확장을 **같은 커밋에서** 한다.
+
+### 8.2 백테스트
+
+`--record`로 남긴 NDJSON 틱을 같은 `Strategy`·`RiskGate`로 재생한다. 체결은 `SimulatedExchange`(지정가 도달 시 체결, 시장가는 반대편 최우선호가).
+
+### 8.3 수수료
+
+설정에 요율·통화·반올림 자릿수·모드를 명시하고 `FeeModel`을 구성한다. 실제 원장 수수료와 다를 수 있음을 백테스트 보고서 머리에 명시한다. 공개 수수료 엔드포인트가 생기면 그때 설정 대신 조회한다.
+
+### 8.4 알려진 한계
+
+과거 캔들 API가 없어 백테스트 입력은 직접 기록한 틱뿐이다. Toss 계약의 `/market-indicators/{symbol}/candles`는 아직 어댑터·엔드포인트가 없다(별도 작업).
+
+## 9. paper-api 선행 작업 (봇 때문에 필요한 것)
+
+이것들은 봇 PR이 아니라 **API PR**로 먼저 낸다. 각각 스펙 §16 행을 동반한다.
+
+1. **체결(trade) 이벤트 발행**: 현재 `publishQuote`는 호가창만 보낸다. 체결 가격 틱이 필요하면 `trade` 이벤트도 발행해야 한다. 없으면 봇·웹 스파크라인 모두 중간가로만 산다. — 우선순위 판단 필요.
+2. #32/#33/#34 해결.
+3. (선택) 구독 상한 상향. 지금은 상한 4를 그대로 받아들인다.
 
 ## 10. 검증 계획
 
-| 층 | 대상 | 도구 |
-|---|---|---|
-| 단위 | 전략 `onTick` 결정표(경계값 포함), 파라미터 스키마, 리스크 게이트 각 한도, 멱등 키 생성 | vitest |
-| 계약 | 러너의 `Broker` 사용이 SDK 계약 테스트를 통과 | 기존 `@moi/strategy-sdk/testing` |
-| 통합 | 러너 ↔ 실제 paper-api(Testcontainers + `MARKET_DATA_ADAPTER=fake`): 세션 수립, 틱 소비, 주문 제출, 401/409/429 경로, 재시작 후 멱등 복원 | vitest + Testcontainers |
-| 백테스트 | 고정 틱 파일 → 고정 결과(스냅샷) | vitest |
-| 실패 주입 | WebSocket 강제 종료, paper-api 재시작, 킬 스위치 발동 | 통합 테스트 |
-| 배포 | compose `bot` 서비스 기동·헬스체크, systemd, Discord 임베드 1건 | `pnpm check:deployment` 확장 |
+| 층 | 대상 |
+|---|---|
+| 단위 | 전략 결정표(경계값), 파라미터 스키마, 리스크 각 한도, 멱등키 유도, 중간가 반올림, gap 판정 |
+| 계약 | `PaperBroker`가 **실제 앱**을 상대로 통과(Testcontainers) — #32의 회귀 방지 |
+| 통합 | 세션 재사용·만료·교체, 주문 왕복, 401/409/429 경로, 재시작 후 멱등 복원, 커서 재생으로 중복 없는 `onFill` |
+| 실패 주입 | WS 강제 종료 후 REST 보강, paper-api 재시작, 킬 스위치 배리어(in-flight 제출 중 발동), 두 전략이 같은 심볼을 설정했을 때 기동 거부 |
+| 백테스트 | 고정 틱 → 고정 결과 스냅샷 |
+| 배포 | `bot` 서비스 기동·헬스체크, 계약 체커 통과, Discord 임베드 1건 |
 
-**금지**: 실제 Toss 접속(AGENTS.md 규칙 1). 봇 테스트도 `fake-toss`와 fake 어댑터만 쓴다.
+**금지**: 실제 Toss 접속(AGENTS.md 규칙 1). 봇 테스트도 fake 어댑터만 쓴다.
 
 ## 11. 단계
 
 | 단계 | 산출물 | 완료 기준 |
 |---|---|---|
-| A | SDK 전략 계약 + 파라미터 스키마 + `sma-crossover` 전략 | 단위 테스트 통과, 백테스트 없이도 결정표 고정 |
-| B | 러너 골격(설정·세션·폴링 피드·상태·리스크·게이트웨이) | Testcontainers 통합 테스트에서 fake 어댑터로 주문 1건 왕복 |
-| C | WebSocket 피드 + 재연결 + 실패 경로 | 강제 종료 주입 테스트 통과 |
-| D | Discord 리포터 + compose/systemd 통합 | 호스트에서 임베드 수신, `check:deployment` 통과 |
-| E | 백테스트 하네스 + `grid` 전략 | 스냅샷 테스트, 두 전략 동시 실행 |
+| 0 | #32 해결 + `PaperBroker` 실앱 계약 테스트 | 실앱 상대 왕복 성공 |
+| A | 전략 계약·파라미터 스키마·`sma-crossover` | 결정표 단위 테스트 |
+| B | 러너 골격(설정·세션 영속·REST 피드·상태·리스크·게이트웨이) | 통합 테스트에서 주문 1건 왕복 + 재시작 멱등 |
+| C | WS 구독·재연결·gap 보강·체결 커서 | 강제 종료 주입 통과, 중복 `onFill` 없음 |
+| D | 킬 스위치 배리어·Discord·compose/계약 체커 | 배리어 테스트, 호스트에서 임베드 수신 |
+| E | 백테스트·`grid` 전략 | 스냅샷 테스트, 두 전략 동시 실행(다른 심볼) |
 
-각 단계는 독립 PR이며, 이전 단계가 초록이 아니면 다음 단계를 시작하지 않는다.
+이전 단계가 초록이 아니면 다음 단계를 시작하지 않는다.
 
-## 12. 열린 질문
+## 12. 남은 열린 질문
 
-1. `node:sqlite`(Node 24 내장, 실험 플래그 필요 여부 확인)로 충분한가, 아니면 상태를 append-only NDJSON으로 두고 SQLite를 피할 것인가.
-2. 봇 세션의 초기 자금(₩10,000,000)이 전략 규모에 맞는가. 필요하면 관리자 API로 시드하는 절차가 필요하다.
-3. 다중 전략이 같은 심볼을 거래할 때 포지션 충돌을 어떻게 다룰 것인가 — 전략별 논리적 포지션을 러너가 분리 관리할지, 아니면 심볼당 전략 1개로 강제할지.
-4. 봇 세션이 웹 UI 세션과 원장에서 구분되어야 하는가(감사 태그).
+1. 체결 이벤트 발행(§9.1)을 이번에 할 것인가, 중간가로만 갈 것인가. 중간가만 쓰면 체결가 기반 전략은 만들 수 없다.
+2. 구독 상한 4가 다중 전략 목표와 충돌한다. 상한을 올릴 것인가, 심볼 수를 제한할 것인가.
+3. 봇 세션을 원장에서 구분할 태그가 필요한가(감사·정리 용도).
