@@ -21,6 +21,7 @@ import {
   type Broker,
   type BrokerOrder,
   type BrokerPortfolio,
+  type BrokerPortfolioOrder,
   type BrokerWallet,
   type CancelOrderCommand,
   type ExchangeCommand,
@@ -49,13 +50,6 @@ export const CONTRACT_EXCHANGE_SOURCE_AMOUNT = '1000000';
 export const CONTRACT_EXCHANGE_RATE = '0.00075';
 export const CONTRACT_EXCHANGE_TARGET_AMOUNT = '750';
 export const CONTRACT_EXCHANGE_EXECUTED_AT = '2026-08-22T00:00:00.000Z';
-
-const TERMINAL_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
-  'FILLED',
-  'CANCELLED',
-  'EXPIRED',
-  'REJECTED',
-]);
 
 const subtract = (minuend: string, subtrahend: string): string =>
   canonicalDecimal(minuend, `-${subtrahend}`);
@@ -300,8 +294,10 @@ interface CommandBoundary {
 
 /**
  * The place shapes, with the status each one's *first* read earns: a `MARKET`
- * order fills on arrival, so it is terminal and gone from `activeOrders`, while
- * every other type rests `OPEN`. Every second read is invalid whichever shape it
+ * order fills on arrival and is terminal, while every other type rests `OPEN`.
+ * Both still appear in `activeOrders` — the server's query has no status filter
+ * (#33) — so the status is what distinguishes them, not their presence. Every
+ * second read is invalid whichever shape it
  * lands on — a drifted `type` is not an order type at all, a drifted `sessionId`
  * names another account, and a drifted price is forbidden on the types that
  * carry none — so an implementation that re-reads is refused rather than merely
@@ -343,12 +339,17 @@ const placeShapeBoundary = (
 
     expect(placed.status).toBe(shape.settledStatus);
 
-    // A resting order is live exactly once; a filled one is terminal and gone.
-    // Either way the placement is a durable effect, which the sequence records —
-    // so no shape can satisfy this by quietly doing nothing.
+    // The order appears exactly once whatever its status: `activeOrders` is
+    // every order the session has (#33 — the name is wrong, not the data, and
+    // narrowing it waits on #37 because these rows are the only path to fills).
+    // The placement is a durable effect, which the sequence records, so no
+    // shape can satisfy this by quietly doing nothing.
     expect(
       after.activeOrders.filter((order) => order.id === placed.id),
-    ).toHaveLength(TERMINAL_STATUSES.has(shape.settledStatus) ? 0 : 1);
+    ).toHaveLength(1);
+    expect(
+      after.activeOrders.find((order) => order.id === placed.id)?.status,
+    ).toBe(shape.settledStatus);
     expect(after.accountSequence).not.toBe(before.accountSequence);
   },
 });
@@ -815,6 +816,41 @@ export function createPaperAccountFake(): PaperAccountFake {
       { id: CONTRACT_OPEN_ORDER_ID, status: 'OPEN', version: 2n },
     ],
   ]);
+  /**
+   * What a portfolio row carries beyond the ledger's own order state. The fake
+   * keeps it beside `orders` so `portfolio()` can answer with the same fields
+   * the real repository selects.
+   */
+  const details = new Map<string, Omit<BrokerPortfolioOrder, 'id' | 'status'>>([
+    [
+      CONTRACT_TERMINAL_ORDER_ID,
+      {
+        market: 'US',
+        symbol: 'AAPL',
+        type: 'LIMIT',
+        side: 'BUY',
+        quantity: '1',
+        filledQuantity: '1',
+        limitPrice: '190.25',
+        fills: [],
+        siblingOrderIds: [],
+      },
+    ],
+    [
+      CONTRACT_OPEN_ORDER_ID,
+      {
+        market: 'US',
+        symbol: 'AAPL',
+        type: 'LIMIT',
+        side: 'BUY',
+        quantity: '1',
+        filledQuantity: '0',
+        limitPrice: '190.25',
+        fills: [],
+        siblingOrderIds: [],
+      },
+    ],
+  ]);
   const effects = new Map<string, StoredEffect>();
   let sequence = 0n;
   let placedOrders = 0;
@@ -849,22 +885,25 @@ export function createPaperAccountFake(): PaperAccountFake {
     return stored;
   };
 
-  /**
-   * The ledger row keeps its `version` — trading-core's state machine needs it
-   * — and the wire never carries one, exactly as the paper API behaves. Keeping
-   * the projection explicit is what stops this fake from inventing a field the
-   * real responses do not have, which is how the SDK drifted in the first place.
-   */
-  const wireOrder = (order: OrderSnapshot): BrokerOrder => ({
-    id: order.id,
-    status: order.status,
-    ...(order.filledQuantity === undefined
-      ? {}
-      : { filledQuantity: order.filledQuantity }),
-    ...(order.terminalReason === undefined
-      ? {}
-      : { terminalReason: order.terminalReason }),
-  });
+  const portfolioOrder = (order: OrderSnapshot): BrokerPortfolioOrder => {
+    const detail = details.get(order.id);
+
+    if (detail === undefined) {
+      throw new Error(`fake account has no portfolio detail for ${order.id}`);
+    }
+
+    return {
+      ...detail,
+      id: order.id,
+      status: order.status,
+      ...(order.filledQuantity === undefined
+        ? {}
+        : { filledQuantity: order.filledQuantity }),
+      ...(order.terminalReason === undefined
+        ? {}
+        : { terminalReason: order.terminalReason }),
+    };
+  };
 
   const wireWallet = (wallet: WalletSnapshot): BrokerWallet => ({
     currency: wallet.currency,
@@ -930,6 +969,22 @@ export function createPaperAccountFake(): PaperAccountFake {
           : opened;
 
       orders.set(order.id, order);
+      details.set(order.id, {
+        market: command.market,
+        symbol: command.symbol,
+        type: command.type,
+        side: command.side,
+        quantity: command.quantity,
+        filledQuantity: order.status === 'FILLED' ? command.quantity : '0',
+        ...(command.limitPrice === undefined
+          ? {}
+          : { limitPrice: command.limitPrice }),
+        ...(command.stopPrice === undefined
+          ? {}
+          : { stopPrice: command.stopPrice }),
+        fills: [],
+        siblingOrderIds: [],
+      });
       sequence += 1n;
       effects.set(command.idempotencyKey, { kind: 'order', hash, order });
 
@@ -1060,9 +1115,13 @@ export function createPaperAccountFake(): PaperAccountFake {
         sessionId,
         wallets: wallets.map(wireWallet),
         positions: [],
-        activeOrders: [...orders.values()]
-          .filter((order) => !TERMINAL_STATUSES.has(order.status))
-          .map(wireOrder),
+        // No status filter, because the server has none: the query behind
+        // `activeOrders` selects every order for the session (#33). The field
+        // name is wrong, not the data, and it cannot simply be narrowed —
+        // those rows are today the only way a client reaches fill data, so #33
+        // waits on #37. A fake that filtered here would agree with nothing but
+        // itself.
+        activeOrders: [...orders.values()].map(portfolioOrder),
         accountSequence: sequence.toString(),
       };
     },

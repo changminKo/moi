@@ -11,6 +11,7 @@
  * runtime, one real ledger, the published adapter, and no fake in between.
  */
 import { randomUUID } from 'node:crypto';
+import type { BrokerPortfolio } from '@moi/strategy-sdk';
 import {
   PaperBroker,
   type PaperBrokerRequest,
@@ -118,6 +119,23 @@ function httpTransport(session?: Session): PaperBrokerTransport {
 }
 
 const key = () => randomUUID();
+
+async function awaitPosition(
+  session: Session,
+  broker: PaperBroker,
+  symbol: string,
+): Promise<BrokerPortfolio> {
+  const deadline = Date.now() + 30_000;
+  let portfolio = await broker.getPortfolio(session.id);
+  while (
+    Date.now() < deadline &&
+    !portfolio.positions.some((position) => position.symbol === symbol)
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    portfolio = await broker.getPortfolio(session.id);
+  }
+  return portfolio;
+}
 
 /**
  * A MARKET order is sized against the book's touch, so a book has to exist
@@ -248,13 +266,43 @@ describe('PaperBroker against the real paper API', () => {
         idempotencyKey: key(),
         orderId: limit.id,
       });
-      expect(cancelled).toStrictEqual({
-        id: limit.id,
-        status: 'CANCELLED',
+      // The runtime narrows a cancellation to `{ id, status }`, so a cancel
+      // does not name the siblings it also closed. Pinned as it is.
+      expect(cancelled).toStrictEqual({ id: limit.id, status: 'CANCELLED' });
+
+      // A MARKET buy settles asynchronously, so the position it creates has to
+      // be waited for; asserting the portfolio before it lands would leave
+      // `positions` empty and never exercise the decoder at all.
+      const portfolio = await awaitPosition(session, broker, '005930');
+      expect(portfolio.sessionId).toBe(session.id);
+
+      const position = portfolio.positions.find(
+        (candidate) => candidate.symbol === '005930',
+      );
+      // `market` and `averageCost` are the two fields the old decoder dropped.
+      expect(position?.market).toBe('KR');
+      expect(position?.averageCost).toMatch(/^\d+(\.\d+)?$/);
+      expect(position?.total).toMatch(/^\d+$/);
+
+      // A portfolio order carries what a write's answer does not, and a
+      // strategy cannot recognise its own orders without it.
+      const limitRow = portfolio.activeOrders.find(
+        (order) => order.id === limit.id,
+      );
+      expect(limitRow).toMatchObject({
+        market: 'KR',
+        symbol: '005930',
+        type: 'LIMIT',
+        side: 'BUY',
+        quantity: '1',
+        limitPrice: '69000',
       });
 
-      const portfolio = await broker.getPortfolio(session.id);
-      expect(portfolio.sessionId).toBe(session.id);
+      // `activeOrders` has no status filter server-side (#33): a cancelled
+      // order is still listed. Pinned deliberately — the field name is wrong,
+      // not the data, and narrowing it waits on #37 because these rows are
+      // today the only path by which a client reaches fill data.
+      expect(limitRow?.status).toBe('CANCELLED');
       expect(
         portfolio.wallets.map((wallet) => wallet.currency).sort(),
       ).toStrictEqual(['KRW', 'USD']);
@@ -286,6 +334,52 @@ describe('PaperBroker against the real paper API', () => {
       const replayed = await broker.placeOrder(command);
 
       expect(replayed).toStrictEqual(first);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'answers a write without a CSRF token as FORBIDDEN, not as read-only',
+    async () => {
+      const session = await anonymousSession();
+      // The cookie is present, the CSRF token is not: `requireCsrf` answers 403.
+      // A client that read this as ACCOUNT_READ_ONLY would abandon a healthy
+      // account over a header it could simply have sent.
+      const broker = new PaperBroker({
+        async request(request) {
+          const response = await fetch(`${origin}${request.path}`, {
+            method: request.method,
+            headers: {
+              origin: PUBLIC_ORIGIN,
+              cookie: session.cookie,
+              'content-type': 'application/json',
+              ...(request.idempotencyKey === undefined
+                ? {}
+                : { 'idempotency-key': request.idempotencyKey }),
+            },
+            ...(request.body === undefined
+              ? {}
+              : { body: JSON.stringify(request.body) }),
+          });
+          return {
+            status: response.status,
+            body: await response.json().catch(() => undefined),
+          };
+        },
+      });
+
+      await expect(
+        broker.placeOrder({
+          sessionId: session.id,
+          idempotencyKey: key(),
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          quantity: '1',
+          type: 'LIMIT',
+          limitPrice: '69000',
+        }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN', retryable: false });
     },
     TEST_TIMEOUT_MS,
   );
