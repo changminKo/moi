@@ -11,14 +11,17 @@
   gap: var(--space-3);
 }
 
+/* This heading is not the panel's own — `.panel > h2` skips it — so the size
+   is restated here. `--type-md` is what ships: the `--type-body` that used to
+   sit here never applied (it tied with `.panel h2`, which came later in the
+   bundle and won), and shrinking the heading is not part of fixing the row.
+   The margin must stay zero: a flex row centres margin boxes, and the 16px
+   this heading used to inherit pushed its text half that far off the badge's
+   line. */
 .quote-header h2 {
   margin: 0;
   color: var(--color-muted);
-  font-size: var(--type-body);
-  /* Matches the badge's line box so `align-items: center` centres the two on
-     the same optical line; the display face's tall ascenders would otherwise
-     push the heading's box below the pill. */
-  line-height: 1.2;
+  font-size: var(--type-md);
 }
 
 .quote-price {

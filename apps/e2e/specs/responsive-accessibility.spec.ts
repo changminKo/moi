@@ -36,4 +36,28 @@ test('supports keyboard-only order validation without overflow', async ({
     `${testInfo.project.name} must not overflow horizontally`,
   ).toBe(false);
   await expect(page.getByText('HEALTHY')).toBeVisible();
+
+  // The pill and the heading beside it must read as one line. Measured, not
+  // eyeballed: a stray margin on the heading once shifted its text by half the
+  // margin while the badge stayed centred, and no unit test could see it
+  // because jsdom does no layout.
+  const centres = await page.evaluate(() => {
+    const header = document.querySelector('.quote-header');
+    const heading = header?.querySelector('h2');
+    const badge = header?.querySelector('.status-badge');
+    if (!heading || !badge) return null;
+    const centre = (element: Element) => {
+      const box = element.getBoundingClientRect();
+      return (box.top + box.bottom) / 2;
+    };
+    return { heading: centre(heading), badge: centre(badge) };
+  });
+  expect(
+    centres,
+    'the quote header must render a heading and a badge',
+  ).not.toBe(null);
+  expect(
+    Math.abs((centres?.badge ?? 0) - (centres?.heading ?? 0)),
+    `${testInfo.project.name}: badge and heading must share an optical line`,
+  ).toBeLessThan(1);
 });

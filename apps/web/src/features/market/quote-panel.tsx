@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { QuoteSnapshot } from '../../lib/api-types';
+import { formatTimestamp } from '../../lib/format-datetime';
 import { formatDecimal } from '../../lib/format-number';
 import { OrderBook } from './order-book';
 import { QuoteSparkline } from './quote-sparkline';
@@ -7,7 +8,7 @@ import { useQuoteTicks } from './use-quote-ticks';
 import './quote-panel.css';
 
 export function QuotePanel({ quote }: { quote: QuoteSnapshot | null }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const ticks = useQuoteTicks(quote);
   if (!quote)
     return (
@@ -26,7 +27,10 @@ export function QuotePanel({ quote }: { quote: QuoteSnapshot | null }) {
       </div>
       <p className="quote-price">{formatDecimal(quote.price ?? '—')}</p>
       <p className="quote-asof">
-        {t('quote.timestamp')}: {quote.asOf}
+        {t('quote.timestamp')}:{' '}
+        <time dateTime={quote.asOf} data-testid="quote-asof">
+          {formatTimestamp(quote.asOf, i18n.language)}
+        </time>
       </p>
       <QuoteSparkline ticks={ticks} />
       <OrderBook
