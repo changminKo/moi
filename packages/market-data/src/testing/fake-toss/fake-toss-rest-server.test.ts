@@ -154,6 +154,35 @@ describe('FakeTossRestServer (§9.2)', () => {
     expect(unseeded.status).toBe(404);
   });
 
+  it('serves seeded instrument names in the stocks/all contract shape', async () => {
+    server.seedInstrument('KR', '005930', '삼성전자');
+    server.seedInstrument('US', 'AAPL', '애플');
+    const access = await token();
+
+    const response = await fetch(`${base}/api/v1/stocks/all`, {
+      headers: { Authorization: `Bearer ${access}` },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      result: [
+        {
+          symbol: '005930',
+          name: '삼성전자',
+          securityType: 'STOCK',
+          isCommonShare: true,
+        },
+        {
+          symbol: 'AAPL',
+          name: '애플',
+          securityType: 'FOREIGN_STOCK',
+          isCommonShare: true,
+        },
+      ],
+    });
+  });
+
   it('records requests without token values and honours failNext/invalidateAllTokens', async () => {
     server.seedSnapshot('KR', '005930', '72000', {
       asks: [{ price: '72100', volume: '1' }],

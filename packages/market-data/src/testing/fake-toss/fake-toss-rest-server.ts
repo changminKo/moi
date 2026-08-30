@@ -69,6 +69,10 @@ export class FakeTossRestServer {
   readonly #tokens = new Map<string, { clientId: string; expiresAt: number }>();
   readonly #activeTokenByClient = new Map<string, string>();
   readonly #snapshots = new Map<string, { price: string; book: FakeBook }>();
+  readonly #instruments = new Map<
+    string,
+    { market: Market; symbol: string; name: string }
+  >();
   readonly #failNext = new Map<string, { status: number; remaining: number }>();
   readonly #requests: FakeRestRequestRecord[] = [];
   #tokenTtlSeconds = DEFAULT_TOKEN_TTL_SECONDS;
@@ -134,6 +138,9 @@ export class FakeTossRestServer {
     book: FakeBook,
   ): void {
     this.#snapshots.set(`${market}:${symbol}`, { price, book });
+  }
+  seedInstrument(market: Market, symbol: string, name: string): void {
+    this.#instruments.set(`${market}:${symbol}`, { market, symbol, name });
   }
   requests(): readonly FakeRestRequestRecord[] {
     return [...this.#requests];
@@ -258,6 +265,19 @@ export class FakeTossRestServer {
       }
       record(200);
       json(response, 200, { success: true, result: rows });
+      return;
+    }
+    if (url.pathname === '/api/v1/stocks/all') {
+      record(200);
+      json(response, 200, {
+        success: true,
+        result: [...this.#instruments.values()].map((instrument) => ({
+          symbol: instrument.symbol,
+          name: instrument.name,
+          securityType: instrument.market === 'US' ? 'FOREIGN_STOCK' : 'STOCK',
+          isCommonShare: true,
+        })),
+      });
       return;
     }
     if (url.pathname === '/api/v1/orderbook') {

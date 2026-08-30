@@ -18,8 +18,16 @@ import { registerAdminRoutes } from '../modules/admin/admin-routes.js';
 import { registerFxRoutes } from '../modules/fx/fx-routes.js';
 import { FxService } from '../modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../modules/health/health-routes.js';
+import {
+  INSTRUMENT_NAME_SNAPSHOT,
+  instrumentSearchAliases,
+  loadInstrumentNames,
+} from '../modules/instruments/instrument-names.js';
 import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
-import { InstrumentService } from '../modules/instruments/instrument-service.js';
+import {
+  type CatalogInstrument,
+  InstrumentService,
+} from '../modules/instruments/instrument-service.js';
 import { calendarPortFromSource } from '../modules/instruments/market-calendar-port.js';
 import { MarketCalendarService } from '../modules/instruments/market-calendar-service.js';
 import { registerMarketSessionRoutes } from '../modules/instruments/market-session-routes.js';
@@ -221,6 +229,7 @@ export class ProductionRuntime {
   readonly #stores = new Map<Market, MarketStateStore>();
   #resolveListening: () => void = () => undefined;
   #app: FastifyInstance | undefined;
+  #instruments: InstrumentService | undefined;
   #bridge: StreamUpgradeHandler | undefined;
   #activeIncidents: readonly SafetyIncident[] = [];
   #reelecting: Promise<void> | null = null;
@@ -449,6 +458,7 @@ export class ProductionRuntime {
         acquireLeases: async (signal) => {
           this.state.transition('ACQUIRING_LEASES');
           await this.#acquireBundle(signal);
+          await this.#refreshInstrumentNames(signal);
         },
         recover: async (market, signal) => {
           if (this.state.current !== 'RECOVERING')
@@ -884,6 +894,15 @@ export class ProductionRuntime {
         (this.#o.symbols ?? this.#o.bundle.symbols)[m].map((s) => `${m}:${s}`),
       ),
     );
+    const instrumentService = this.#instrumentService(
+      new Map(
+        INSTRUMENT_NAME_SNAPSHOT.map((row) => [
+          `${row.market}:${row.symbol}`,
+          row.name,
+        ]),
+      ),
+    );
+    this.#instruments = instrumentService;
     const app = await buildApp(config, {
       clock: { now: () => Date.now() },
       registerIngress: (instance) => this.#gate.register(instance),
@@ -927,7 +946,7 @@ export class ProductionRuntime {
         });
         await registerInstrumentRoutes(
           instance,
-          this.#instrumentService(),
+          instrumentService,
           (market, symbol) => this.#quote(market, symbol),
         );
         await registerMarketSessionRoutes(instance, {
@@ -1080,19 +1099,41 @@ export class ProductionRuntime {
     return app;
   }
 
-  #instrumentService(): InstrumentService {
+  #instrumentCatalog(
+    names: ReadonlyMap<string, string>,
+  ): readonly CatalogInstrument[] {
     const symbols = this.#o.symbols ?? this.#o.bundle.symbols;
-    return new InstrumentService({
-      catalog: MARKETS.flatMap((market) =>
-        symbols[market].map((symbol) => ({
+    const aliases = instrumentSearchAliases(symbols);
+    return MARKETS.flatMap((market) =>
+      symbols[market].map((symbol) => {
+        const instrumentKey = `${market}:${symbol}` as const;
+        const searchAliases = aliases.get(instrumentKey);
+        return {
           market,
           symbol,
-          name: symbol,
+          name: names.get(instrumentKey) ?? symbol,
           tradable: true,
           currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
-        })),
-      ),
+          ...(searchAliases === undefined ? {} : { aliases: searchAliases }),
+        };
+      }),
+    );
+  }
+
+  #instrumentService(names: ReadonlyMap<string, string>): InstrumentService {
+    return new InstrumentService({
+      catalog: this.#instrumentCatalog(names),
     });
+  }
+
+  async #refreshInstrumentNames(signal: AbortSignal): Promise<void> {
+    const names = await loadInstrumentNames({
+      source: this.#o.bundle.instruments,
+      symbols: this.#o.symbols ?? this.#o.bundle.symbols,
+      signal,
+      log: this.#log,
+    });
+    this.#instruments?.replaceCatalog(this.#instrumentCatalog(names));
   }
 
   /** Current book-derived quote from this leader's market state (never invented). */
