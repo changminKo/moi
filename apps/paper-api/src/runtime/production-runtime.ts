@@ -20,6 +20,9 @@ import { FxService } from '../modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../modules/health/health-routes.js';
 import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
 import { InstrumentService } from '../modules/instruments/instrument-service.js';
+import { calendarPortFromSource } from '../modules/instruments/market-calendar-port.js';
+import { MarketCalendarService } from '../modules/instruments/market-calendar-service.js';
+import { registerMarketSessionRoutes } from '../modules/instruments/market-session-routes.js';
 import { OrderPlacementService } from '../modules/orders/order-placement-service.js';
 import { registerOrderRoutes } from '../modules/orders/order-routes.js';
 import { OrderService } from '../modules/orders/order-service.js';
@@ -201,6 +204,8 @@ export class ProductionRuntime {
   readonly #log: LogFn;
   readonly #db: Database;
   readonly #uow: CountingUnitOfWork;
+  /** Trading calendar behind the public market-session route (§16.31). */
+  readonly #calendar: MarketCalendarService;
   readonly #admission = new AdmissionLatch();
   readonly #matching = new Map<Market, AdmissionLatch>();
   readonly #incidents: IncidentService;
@@ -240,6 +245,9 @@ export class ProductionRuntime {
         );
       },
     });
+    this.#calendar = new MarketCalendarService(
+      calendarPortFromSource(options.bundle.calendar),
+    );
     // Snapshot reads for stream enrichment run in REPEATABLE READ so the nine
     // portfolio queries see one consistent state (issue #11, first step).
     this.#snapshotUow = new UnitOfWork(this.#db, {
@@ -922,6 +930,9 @@ export class ProductionRuntime {
           this.#instrumentService(),
           (market, symbol) => this.#quote(market, symbol),
         );
+        await registerMarketSessionRoutes(instance, {
+          calendar: this.#calendar,
+        });
         await registerFxRoutes(instance, this.#fxService(), {
           principal,
           canFx: () =>

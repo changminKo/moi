@@ -1,4 +1,8 @@
 export {
+  FakeCalendarSource,
+  type FakeCalendarSourceOptions,
+} from './fake-calendar-source.js';
+export {
   FakeConnectionLedger,
   type FakeInitialSnapshotMode,
   FakeMarketData,
