@@ -117,6 +117,52 @@ describe('TradePage', () => {
     ).toBeTruthy();
   });
 
+  it('focuses the deep-linked row once, like following an anchor link', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade?symbol=AAPL']}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+    const apple = await screen.findByRole('button', { name: /Apple \(AAPL\)/ });
+    await waitFor(() => expect(apple).toHaveFocus());
+
+    // Spent: selecting another row must not move focus onto it. (jsdom does
+    // not focus what a click activates, so focus staying on the old row is
+    // exactly the absence of a programmatic move.)
+    const other = screen.getByRole('button', { name: /Private \(XYZ\)/ });
+    fireEvent.click(other);
+    await screen.findByText('This instrument is not tradable');
+    expect(other).not.toHaveFocus();
+  });
+
+  it('does not steal focus for an ordinary click selection', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade']}>{children}</MemoryRouter>
+      ),
+    });
+    const apple = await screen.findByRole('button', { name: /Apple \(AAPL\)/ });
+    fireEvent.click(apple);
+    expect(await screen.findByText('189.10')).toBeVisible();
+    // The browser focuses what the pointer activates; the page must not add a
+    // programmatic focus of its own on top of that.
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('leaves focus alone when the deep-linked symbol is not listed', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade?symbol=MSFT']}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+    await screen.findByRole('button', { name: /Apple \(AAPL\)/ });
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('follows browser back and forward through the selection', async () => {
     render(
       <WithHistoryControls>

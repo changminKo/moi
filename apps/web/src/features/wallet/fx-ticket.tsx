@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { GroupedNumberInput } from '../../components/grouped-number-input';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
@@ -67,11 +68,11 @@ export function FxTicket({
     <section className="panel fx-ticket" aria-labelledby="fx-title">
       <h2 id="fx-title">{t('fx.title')}</h2>
       <label htmlFor="fx-amount">{t('fx.amount')}</label>
-      <input
+      <GroupedNumberInput
         id="fx-amount"
         inputMode="decimal"
         value={amount}
-        onChange={(e) => setAmount(e.target.value)}
+        onValueChange={setAmount}
       />
       <button type="button" onClick={quoteFx} disabled={!capability.canFx}>
         {t('fx.getQuote')}
