@@ -19,6 +19,9 @@ import {
 import { beforeEach, expect, it } from 'vitest';
 import {
   type Broker,
+  type BrokerOrder,
+  type BrokerPortfolio,
+  type BrokerWallet,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
@@ -29,7 +32,6 @@ import {
   type PlaceOrderCommand,
   type PlaceStopOrderCommand,
   type PlaceTakeProfitOrderCommand,
-  type PortfolioSnapshot,
   readCancelOrderCommand,
   readExchangeCommand,
   readPlaceOrderCommand,
@@ -62,9 +64,9 @@ const add = (augend: string, addend: string): string =>
   canonicalDecimal(augend, addend);
 
 const walletFor = (
-  snapshot: PortfolioSnapshot,
+  snapshot: BrokerPortfolio,
   currency: Currency,
-): WalletSnapshot => {
+): BrokerWallet => {
   const wallet = snapshot.wallets.find(
     (candidate) => candidate.currency === currency,
   );
@@ -112,7 +114,7 @@ const stopBuy = (idempotencyKey: string): PlaceStopOrderCommand => ({
   side: 'BUY',
   type: 'STOP',
   quantity: '1',
-  triggerPrice: '188.00',
+  stopPrice: '188.00',
 });
 
 const takeProfitSell = (
@@ -125,7 +127,7 @@ const takeProfitSell = (
   side: 'SELL',
   type: 'TAKE_PROFIT',
   quantity: '1',
-  triggerPrice: '210.00',
+  stopPrice: '210.00',
 });
 
 /**
@@ -144,7 +146,7 @@ const ocoBuy = (idempotencyKey: string): PlaceOcoOrderCommand => ({
   type: 'OCO',
   quantity: '2',
   limitPrice: '190.25',
-  triggerPrice: '180.00',
+  stopPrice: '180.00',
 });
 
 const cancelOpenOrder = (
@@ -768,10 +770,10 @@ export function runBrokerContract(factory: BrokerContractFactory): void {
  * defers to the trading-core state machine instead of restating its rules.
  */
 export interface PaperAccountFake {
-  place(command: PlaceOrderCommand): OrderSnapshot;
-  cancel(command: CancelOrderCommand): OrderSnapshot;
+  place(command: PlaceOrderCommand): BrokerOrder;
+  cancel(command: CancelOrderCommand): BrokerOrder;
   exchange(command: ExchangeCommand): ExchangeReceipt;
-  portfolio(sessionId: string): PortfolioSnapshot;
+  portfolio(sessionId: string): BrokerPortfolio;
 }
 
 type StoredEffect =
@@ -847,6 +849,30 @@ export function createPaperAccountFake(): PaperAccountFake {
     return stored;
   };
 
+  /**
+   * The ledger row keeps its `version` — trading-core's state machine needs it
+   * — and the wire never carries one, exactly as the paper API behaves. Keeping
+   * the projection explicit is what stops this fake from inventing a field the
+   * real responses do not have, which is how the SDK drifted in the first place.
+   */
+  const wireOrder = (order: OrderSnapshot): BrokerOrder => ({
+    id: order.id,
+    status: order.status,
+    ...(order.filledQuantity === undefined
+      ? {}
+      : { filledQuantity: order.filledQuantity }),
+    ...(order.terminalReason === undefined
+      ? {}
+      : { terminalReason: order.terminalReason }),
+  });
+
+  const wireWallet = (wallet: WalletSnapshot): BrokerWallet => ({
+    currency: wallet.currency,
+    total: wallet.total,
+    available: wallet.available,
+    reserved: wallet.reserved,
+  });
+
   const walletAt = (currency: Currency): WalletSnapshot => {
     const wallet = wallets.find((candidate) => candidate.currency === currency);
 
@@ -876,7 +902,7 @@ export function createPaperAccountFake(): PaperAccountFake {
         command.type,
         command.quantity,
         command.limitPrice ?? null,
-        command.triggerPrice ?? null,
+        command.stopPrice ?? null,
       ]);
       const stored = replay(command.idempotencyKey, hash);
 
@@ -1032,11 +1058,11 @@ export function createPaperAccountFake(): PaperAccountFake {
 
       return {
         sessionId,
-        wallets,
+        wallets: wallets.map(wireWallet),
         positions: [],
-        activeOrders: [...orders.values()].filter(
-          (order) => !TERMINAL_STATUSES.has(order.status),
-        ),
+        activeOrders: [...orders.values()]
+          .filter((order) => !TERMINAL_STATUSES.has(order.status))
+          .map(wireOrder),
         accountSequence: sequence.toString(),
       };
     },

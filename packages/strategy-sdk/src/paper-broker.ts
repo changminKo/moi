@@ -3,19 +3,20 @@ import {
   type DecimalString,
   DomainError,
   type DomainErrorCode,
-  type OrderSnapshot,
+  type Market,
   type OrderStatus,
-  type PositionSnapshot,
   type Quantity,
-  type WalletSnapshot,
 } from '@moi/trading-core';
 import {
   type Broker,
+  type BrokerOrder,
+  type BrokerPortfolio,
+  type BrokerPosition,
+  type BrokerWallet,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
   type PlaceOrderCommand,
-  type PortfolioSnapshot,
   readCancelOrderCommand,
   readExchangeCommand,
   readPlaceOrderCommand,
@@ -35,8 +36,15 @@ const PORTFOLIO_PATH = '/api/v1/portfolio';
 
 /**
  * The paths this adapter is allowed to reach. There is no configurable base
- * path, so a strategy written against `PaperBroker` cannot be pointed at a live
- * venue by changing configuration.
+ * path, so a strategy cannot make this adapter request an endpoint the paper
+ * API does not serve.
+ *
+ * What this does **not** do is pin the host: `PaperBrokerTransport` builds the
+ * URL, so the origin is the transport's to choose and a misconfigured one
+ * reaches whatever it names. Keeping a strategy off a live venue is therefore
+ * the transport's obligation — pin the origin there against an allow-list — and
+ * an earlier version of this comment claimed the path union alone achieved it,
+ * which it never did.
  */
 export type PaperBrokerPath =
   | typeof ORDERS_PATH
@@ -85,6 +93,7 @@ const DOMAIN_ERROR_CODES: Readonly<Record<DomainErrorCode, true>> = {
   RATE_LIMITED: true,
   RECOVERY_IN_PROGRESS: true,
   SERVICE_UNAVAILABLE: true,
+  SESSION_EXPIRED: true,
   SYMBOL_NOT_TRADABLE: true,
 };
 
@@ -102,6 +111,8 @@ const ORDER_STATUSES: Readonly<Record<OrderStatus, true>> = {
 
 const CURRENCIES: Readonly<Record<Currency, true>> = { KRW: true, USD: true };
 
+const MARKETS: Readonly<Record<Market, true>> = { KR: true, US: true };
+
 const isDomainErrorCode = (code: string): code is DomainErrorCode =>
   Object.hasOwn(DOMAIN_ERROR_CODES, code);
 
@@ -110,6 +121,9 @@ const isOrderStatus = (status: string): status is OrderStatus =>
 
 const isCurrency = (currency: string): currency is Currency =>
   Object.hasOwn(CURRENCIES, currency);
+
+const isMarket = (market: string): market is Market =>
+  Object.hasOwn(MARKETS, market);
 
 /**
  * A response the paper API should never produce is a broken contract, not a
@@ -179,10 +193,6 @@ function readInstant(value: unknown, description: string): string {
   return value;
 }
 
-function readVersion(value: unknown, description: string): bigint {
-  return BigInt(readWholeNumber(value, description));
-}
-
 function readArray(value: unknown, description: string): readonly unknown[] {
   if (!Array.isArray(value)) {
     malformed(description);
@@ -191,7 +201,7 @@ function readArray(value: unknown, description: string): readonly unknown[] {
   return value;
 }
 
-function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
+function decodeOrder(payload: unknown): BrokerOrder {
   const body = readObject(payload, 'order snapshot');
   const status = readString(body.status, 'order status');
 
@@ -199,10 +209,9 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
     malformed('order status');
   }
 
-  const base: OrderSnapshot = {
+  const base: BrokerOrder = {
     id: readString(body.id, 'order id'),
     status,
-    version: readVersion(body.version, 'order version'),
   };
   // One read per optional field, for the same reason the command side reads each
   // caller field once: a response body is an object too, so its fields may be
@@ -212,22 +221,26 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
   // paper API never reported, on an order it also reports as `OPEN`.
   const suppliedFilledQuantity = body.filledQuantity;
   const suppliedTerminalReason = body.terminalReason;
+  // The paper API spells an absent optional field `null` — its order rows come
+  // straight from nullable ledger columns — while a placement response omits
+  // the key entirely. Both mean the same thing, and treating only `undefined`
+  // as absence made every portfolio read fail on the first order that had no
+  // terminal reason. A *wrong* value is still malformed.
   const filledQuantity =
-    suppliedFilledQuantity === undefined
+    suppliedFilledQuantity === undefined || suppliedFilledQuantity === null
       ? undefined
       : readQuantity(suppliedFilledQuantity, 'filled quantity');
+  const terminalReason =
+    suppliedTerminalReason === null ? undefined : suppliedTerminalReason;
 
-  if (
-    suppliedTerminalReason !== undefined &&
-    suppliedTerminalReason !== 'IOC_REMAINDER'
-  ) {
+  if (terminalReason !== undefined && terminalReason !== 'IOC_REMAINDER') {
     malformed('order terminal reason');
   }
 
   return {
     ...base,
     ...(filledQuantity === undefined ? {} : { filledQuantity }),
-    ...(suppliedTerminalReason === undefined
+    ...(terminalReason === undefined
       ? {}
       : { terminalReason: 'IOC_REMAINDER' as const }),
   };
@@ -243,7 +256,17 @@ function decodeCurrency(payload: unknown, description: string): Currency {
   return currency;
 }
 
-function decodeWallet(payload: unknown): WalletSnapshot {
+function decodeMarket(payload: unknown, description: string): Market {
+  const market = readString(payload, description);
+
+  if (!isMarket(market)) {
+    malformed(description);
+  }
+
+  return market;
+}
+
+function decodeWallet(payload: unknown): BrokerWallet {
   const body = readObject(payload, 'wallet snapshot');
 
   return {
@@ -251,19 +274,21 @@ function decodeWallet(payload: unknown): WalletSnapshot {
     total: readMoneyAmount(body.total, 'wallet total'),
     available: readMoneyAmount(body.available, 'wallet available'),
     reserved: readMoneyAmount(body.reserved, 'wallet reserved'),
-    version: readVersion(body.version, 'wallet version'),
   };
 }
 
-function decodePosition(payload: unknown): PositionSnapshot {
+function decodePosition(payload: unknown): BrokerPosition {
   const body = readObject(payload, 'position snapshot');
 
   return {
+    market: decodeMarket(body.market, 'position market'),
     symbol: readString(body.symbol, 'position symbol'),
     total: readQuantity(body.total, 'position total'),
     available: readQuantity(body.available, 'position available'),
     reserved: readQuantity(body.reserved, 'position reserved'),
-    version: readVersion(body.version, 'position version'),
+    // A position values what it holds, so its average cost is money the
+    // strategy sizes and marks against — never a JS number.
+    averageCost: readMoneyAmount(body.averageCost, 'position average cost'),
   };
 }
 
@@ -313,10 +338,10 @@ function readSessionId(
   return sessionId;
 }
 
-function decodePortfolioSnapshot(
+function decodePortfolio(
   payload: unknown,
   expectedSessionId: string,
-): PortfolioSnapshot {
+): BrokerPortfolio {
   const body = readObject(payload, 'portfolio snapshot');
   const sessionId = readSessionId(
     body.sessionId,
@@ -350,7 +375,7 @@ function decodePortfolioSnapshot(
     wallets,
     positions,
     activeOrders: readArray(body.activeOrders, 'portfolio orders').map(
-      decodeOrderSnapshot,
+      decodeOrder,
     ),
     // A sequence counts durable effects, so it is a whole number, not a rate.
     accountSequence: readWholeNumber(
@@ -373,7 +398,17 @@ function fallbackCode(status: number): DomainErrorCode {
     return 'INVARIANT_VIOLATION';
   }
 
-  if (status === 401 || status === 403) {
+  // 401 and 403 are different recoveries and must not be collapsed. An expired
+  // session is re-established and the write retried under its unchanged key;
+  // a forbidden request is the account itself refusing, and retrying it is
+  // exactly the loop that must not happen. The paper API names both
+  // (`SESSION_EXPIRED` 401, `FORBIDDEN` 403 in the error contract), so this
+  // fallback only decides when the envelope carried no code at all.
+  if (status === 401) {
+    return 'SESSION_EXPIRED';
+  }
+
+  if (status === 403) {
     return 'ACCOUNT_READ_ONLY';
   }
 
@@ -465,26 +500,52 @@ export class PaperBroker implements Broker {
     this.#transport = transport;
   }
 
-  async placeOrder(command: PlaceOrderCommand): Promise<OrderSnapshot> {
+  async placeOrder(command: PlaceOrderCommand): Promise<BrokerOrder> {
     // The snapshot the price rules were applied to, not the caller's object: a
     // command's fields may be accessors, and a second read of an accessor is a
     // second call into caller code that need not answer the same way.
     const validated = readPlaceOrderCommand(command);
 
-    const body = {
+    const common = {
       market: validated.market,
       symbol: validated.symbol,
       side: validated.side,
-      type: validated.type,
       quantity: validated.quantity,
-      // The snapshot is plain own data with no prototype, so this is the same
-      // policy over the same values the validator saw: the wire carries exactly
-      // the price fields it inspected — never one more, and never one fewer.
-      ...projectOptionalField(validated, 'limitPrice'),
-      ...projectOptionalField(validated, 'triggerPrice'),
     };
+    // `placeOrderSchema` is `.strict()`, so the body carries the fields that
+    // type accepts and no others. An OCO is the one type whose request shape
+    // differs from the command's: the API takes two explicit legs, so the pair
+    // the command expresses flatly is expanded here rather than on the server.
+    const body =
+      validated.type === 'OCO'
+        ? {
+            ...common,
+            type: 'OCO' as const,
+            legs: [
+              {
+                ...common,
+                type: 'LIMIT' as const,
+                limitPrice: validated.limitPrice as DecimalString,
+              },
+              {
+                ...common,
+                type: 'STOP' as const,
+                stopPrice: validated.stopPrice as DecimalString,
+              },
+            ],
+          }
+        : {
+            ...common,
+            type: validated.type,
+            // The snapshot is plain own data with no prototype, so this is the
+            // same policy over the same values the validator saw: the wire
+            // carries exactly the price fields it inspected — never one more,
+            // and never one fewer.
+            ...projectOptionalField(validated, 'limitPrice'),
+            ...projectOptionalField(validated, 'stopPrice'),
+          };
 
-    return decodeOrderSnapshot(
+    return decodeOrder(
       await this.#send({
         method: 'POST',
         path: ORDERS_PATH,
@@ -494,10 +555,10 @@ export class PaperBroker implements Broker {
     );
   }
 
-  async cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot> {
+  async cancelOrder(command: CancelOrderCommand): Promise<BrokerOrder> {
     const { idempotencyKey, orderId } = readCancelOrderCommand(command);
 
-    return decodeOrderSnapshot(
+    return decodeOrder(
       await this.#send({
         method: 'DELETE',
         path: `${ORDERS_PATH}/${encodeURIComponent(orderId)}`,
@@ -520,10 +581,10 @@ export class PaperBroker implements Broker {
     );
   }
 
-  async getPortfolio(sessionId: string): Promise<PortfolioSnapshot> {
+  async getPortfolio(sessionId: string): Promise<BrokerPortfolio> {
     assertIdentifier(sessionId, 'sessionId');
 
-    return decodePortfolioSnapshot(
+    return decodePortfolio(
       await this.#send({ method: 'GET', path: PORTFOLIO_PATH }),
       sessionId,
     );
