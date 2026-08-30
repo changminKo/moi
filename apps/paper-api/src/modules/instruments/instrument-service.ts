@@ -1,4 +1,5 @@
 import type { Market } from '@moi/trading-core';
+import { matchesInstrument } from './hangul-match.js';
 import type { WhitelistService } from './whitelist-service.js';
 export interface Instrument {
   readonly market: Market;
@@ -19,12 +20,11 @@ export class InstrumentService {
     this.#whitelist = options.whitelist;
   }
   async search(query = '', market?: Market) {
-    const q = query.trim().toLowerCase();
     const items = this.#catalog
       .filter(
         (i) =>
           (!market || i.market === market) &&
-          (!q || `${i.symbol} ${i.name}`.toLowerCase().includes(q)),
+          matchesInstrument(query, i),
       )
       .map((i) => ({
         ...i,

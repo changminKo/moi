@@ -77,6 +77,9 @@ importers:
       '@moi/trading-core':
         specifier: workspace:*
         version: link:../../packages/trading-core
+      es-hangul:
+        specifier: 2.4.0
+        version: 2.4.0
       fastify:
         specifier: 5.12.1
         version: 5.12.1
@@ -1246,6 +1249,9 @@ packages:
   entities@8.0.0:
     resolution: {integrity: sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA==}
     engines: {node: '>=20.19.0'}
+
+  es-hangul@2.4.0:
+    resolution: {integrity: sha512-9ouVct+rsUw7d5+JeyEV+Lf4PAytSK4cWnLGHM4FJDyG9BS5d3iSPnEmH/rVgmSyxyps5cWZ+NeDAlJyq8eKaw==}
 
   es-module-lexer@2.3.2:
     resolution: {integrity: sha512-poHGpORABojJJucnV9KbOavETW8lBVnphkW77ER5/BQ5Fz7oXSoCNek7IH3vR5nRjdsEz926ibFYX8KtLQmdyw==}
@@ -3031,6 +3037,8 @@ snapshots:
       once: 1.4.0
 
   entities@8.0.0: {}
+
+  es-hangul@2.4.0: {}
 
   es-module-lexer@2.3.2: {}
 
