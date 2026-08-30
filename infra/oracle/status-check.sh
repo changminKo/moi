@@ -86,7 +86,16 @@ fi
 line="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement mem_avail=${mem_avail_pct}% swap_used=${swap_used_pct}% disk_used=${disk_used_pct}%"
 echo "$line"
 
-# State file: line 1 = last delivered status line, line 2 = epoch of that post.
+# Change detection compares a *signature* — level, probe results and which
+# thresholds are breached — never the raw percentages, which drift a little
+# every tick and would turn "post on change" into a post every five minutes.
+mem_flag=ok; [ "$mem_avail_pct" -lt "$MEM_AVAIL_MIN" ] && mem_flag=low
+swap_flag=ok; [ "$swap_used_pct" -gt "$SWAP_USED_MAX" ] && swap_flag=high
+disk_flag=ok; [ "$disk_used_pct" -gt "$DISK_USED_MAX" ] && disk_flag=high
+signature="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement mem=$mem_flag swap=$swap_flag disk=$disk_flag"
+
+# State file: line 1 = signature of the last delivered status, line 2 = epoch
+# of that post.
 previous=""; last_post=0
 if [ -f "$state_file" ]; then
   previous="$(sed -n 1p "$state_file")"
@@ -100,10 +109,10 @@ post() { NOTIFY_STRICT=1 "$here/notify.sh" "$@"; }
 record() {
   local dir; dir="$(dirname "$state_file")"
   [ -d "$dir" ] || mkdir -p -m 0700 "$dir"
-  printf '%s\n%s\n' "$line" "$now" > "$state_file"
+  printf '%s\n%s\n' "$signature" "$now" > "$state_file"
 }
 
-if [ "$line" != "$previous" ]; then
+if [ "$signature" != "$previous" ]; then
   prev_level="${previous%% *}"
   title="Moi status $(printf %s "$level" | tr '[:lower:]' '[:upper:]')"
   if [ "$level" = ok ] && [ -n "$prev_level" ] && [ "$prev_level" != ok ]; then
