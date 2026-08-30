@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TradePage } from './trade-page';
@@ -50,6 +56,41 @@ describe('TradePage', () => {
     expect(screen.getByText('HEALTHY')).toBeVisible();
     expect(screen.getByText('KRW')).toBeVisible();
     expect(screen.getAllByText('available')).toHaveLength(2);
+  });
+
+  it('keeps the full list, toggles the selection off, and resets via Show all', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade?symbol=AAPL']}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+    // Deep link selects AAPL but the list is not narrowed to it.
+    expect(await screen.findByText('189.10')).toBeVisible();
+    const apple = await screen.findByRole('button', {
+      name: /Apple \(AAPL\)/,
+    });
+    expect(
+      await screen.findByRole('button', { name: /Private \(XYZ\)/ }),
+    ).toBeVisible();
+
+    // Clicking the selected row again deselects it.
+    fireEvent.click(apple);
+    expect(
+      await screen.findByText('Select an instrument to see its quote.'),
+    ).toBeVisible();
+    const reset = screen.getByRole('button', { name: 'Show all' });
+    expect(reset).toBeDisabled();
+
+    // A search enables the reset control, which clears the query.
+    fireEvent.change(screen.getByLabelText('Search'), {
+      target: { value: 'AAPL' },
+    });
+    await waitFor(() => expect(reset).toBeEnabled());
+    fireEvent.click(reset);
+    expect(screen.getByLabelText('Search')).toHaveValue('');
+    expect(reset).toBeDisabled();
   });
 
   it('marks non-tradable selections and disables the order ticket', async () => {

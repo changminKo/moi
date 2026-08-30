@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { InstrumentSearch } from '../features/instruments/instrument-search';
 import { useInstruments } from '../features/instruments/use-instruments';
@@ -23,10 +23,7 @@ export function TradePage({
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Instrument | null>(null);
-  const { data } = useInstruments(
-    query || params.get('symbol') || '',
-    apiClient,
-  );
+  const { data } = useInstruments(query, apiClient);
   const { quote } = useQuoteStream(
     selected?.tradable ? selected.market : undefined,
     selected?.tradable ? selected.symbol : undefined,
@@ -34,9 +31,13 @@ export function TradePage({
   );
   const [wallets, setWallets] = useState<readonly Wallet[]>([]);
   const { availability } = useTradingStatus();
+  // The ?symbol= deep link selects once on load; afterwards the list rules,
+  // otherwise deselecting would race the effect re-selecting from stale params.
+  const deepLinkConsumed = useRef(false);
   useEffect(() => {
     const symbol = params.get('symbol');
-    if (symbol && !selected) {
+    if (symbol && !selected && !deepLinkConsumed.current) {
+      deepLinkConsumed.current = true;
       apiClient
         .get<Instrument[]>(
           `/api/v1/instruments?q=${encodeURIComponent(symbol)}`,
@@ -54,12 +55,30 @@ export function TradePage({
       .catch(() => setWallets([]));
   }, [apiClient]);
   const instruments = useMemo(() => data, [data]);
+  const deselect = () => {
+    setSelected(null);
+    setParams((current) => {
+      current.delete('symbol');
+      return current;
+    });
+  };
   const select = (instrument: Instrument) => {
+    const isToggleOff =
+      selected?.market === instrument.market &&
+      selected.symbol === instrument.symbol;
+    if (isToggleOff) {
+      deselect();
+      return;
+    }
     setSelected(instrument);
     setParams((current) => {
       current.set('symbol', instrument.symbol);
       return current;
     });
+  };
+  const reset = () => {
+    setQuery('');
+    deselect();
   };
   return (
     <QueryClientProvider client={queryClient}>
@@ -71,6 +90,8 @@ export function TradePage({
             instruments={instruments}
             onSelect={select}
             selected={selected}
+            onReset={reset}
+            canReset={Boolean(selected) || query !== ''}
           />
         </div>
         <div className="trade-col trade-col-main">

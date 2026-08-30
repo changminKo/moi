@@ -11,12 +11,16 @@ export function InstrumentSearch({
   instruments,
   onSelect,
   selected = null,
+  onReset,
+  canReset = false,
 }: {
   query: string;
   onQuery: (value: string) => void;
   instruments: readonly Instrument[];
   onSelect: (instrument: Instrument) => void;
   selected?: Instrument | null;
+  onReset?: () => void;
+  canReset?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -32,6 +36,16 @@ export function InstrumentSearch({
         onChange={(e) => onQuery(e.target.value)}
         placeholder={t('instruments.searchPlaceholder')}
       />
+      {onReset && (
+        <button
+          type="button"
+          className="instrument-reset"
+          onClick={onReset}
+          disabled={!canReset}
+        >
+          {t('instruments.showAll')}
+        </button>
+      )}
       <ul className="instrument-list">
         {instruments.map((instrument) => (
           <li key={`${instrument.market}-${instrument.symbol}`}>
