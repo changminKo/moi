@@ -1,13 +1,18 @@
+import { useTranslation } from 'react-i18next';
 import type { QuoteSnapshot } from '../../lib/api-types';
 import { formatDecimal } from '../../lib/format-number';
 import { OrderBook } from './order-book';
+import { QuoteSparkline } from './quote-sparkline';
+import { useQuoteTicks } from './use-quote-ticks';
 import './quote-panel.css';
 
 export function QuotePanel({ quote }: { quote: QuoteSnapshot | null }) {
+  const { t } = useTranslation();
+  const ticks = useQuoteTicks(quote);
   if (!quote)
     return (
       <section className="panel quote-panel is-empty" aria-live="polite">
-        Select an instrument to see its quote.
+        {t('quote.empty')}
       </section>
     );
   const health = quote.health ?? 'HEALTHY';
@@ -20,7 +25,10 @@ export function QuotePanel({ quote }: { quote: QuoteSnapshot | null }) {
         <span className={`status-badge status-${health}`}>{health}</span>
       </div>
       <p className="quote-price">{formatDecimal(quote.price ?? '—')}</p>
-      <p className="quote-asof">Timestamp: {quote.asOf}</p>
+      <p className="quote-asof">
+        {t('quote.timestamp')}: {quote.asOf}
+      </p>
+      <QuoteSparkline ticks={ticks} />
       <OrderBook
         {...(quote.bids ? { bids: quote.bids } : {})}
         {...(quote.asks ? { asks: quote.asks } : {})}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertKnownReason,
   composeTradingAvailability,
   presentationForReason,
 } from './system-status-provider';
@@ -53,6 +54,16 @@ describe('trading availability', () => {
 
   it('requires every server reason to have presentation text', () => {
     expect(presentationForReason('ACCOUNT_READ_ONLY')).toMatch(/account/i);
-    expect(() => presentationForReason('NEW_SERVER_REASON')).toThrow();
+    expect(presentationForReason('ACCOUNT_READ_ONLY', 'ko')).toBe(
+      '계정 보호 잠금',
+    );
+    expect(() => assertKnownReason('NEW_SERVER_REASON')).toThrow();
+    expect(() => assertKnownReason('ACCOUNT_READ_ONLY')).not.toThrow();
+  });
+
+  it('degrades an unknown reason to its raw code instead of throwing', () => {
+    // A newly emitted server code must not blank the app mid-incident.
+    expect(presentationForReason('MARKET_CLOSED')).toBe('MARKET_CLOSED');
+    expect(presentationForReason('MARKET_CLOSED', 'ko')).toBe('MARKET_CLOSED');
   });
 });

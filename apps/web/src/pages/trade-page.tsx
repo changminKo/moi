@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { InstrumentSearch } from '../features/instruments/instrument-search';
 import { useInstruments } from '../features/instruments/use-instruments';
@@ -20,13 +21,11 @@ export function TradePage({
 }: {
   apiClient?: ApiClient;
 }) {
+  const { t } = useTranslation();
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Instrument | null>(null);
-  const { data } = useInstruments(
-    query || params.get('symbol') || '',
-    apiClient,
-  );
+  const { data } = useInstruments(query, apiClient);
   const { quote } = useQuoteStream(
     selected?.tradable ? selected.market : undefined,
     selected?.tradable ? selected.symbol : undefined,
@@ -34,32 +33,70 @@ export function TradePage({
   );
   const [wallets, setWallets] = useState<readonly Wallet[]>([]);
   const { availability } = useTradingStatus();
+  // `?symbol=` is the source of truth for the selection: the effect reconciles
+  // state with the URL on every change, so deep links, the toggle and browser
+  // back/forward all land on the same code path.
+  const instruments = useMemo(() => data, [data]);
+  const symbolParam = params.get('symbol');
   useEffect(() => {
-    const symbol = params.get('symbol');
-    if (symbol && !selected) {
-      apiClient
-        .get<Instrument[]>(
-          `/api/v1/instruments?q=${encodeURIComponent(symbol)}`,
-        )
-        .then((items) => {
-          const found = items.find((item) => item.symbol === symbol);
-          if (found) setSelected(found);
-        });
+    let active = true;
+    // Only an empty URL clears the selection. A lookup that fails or comes
+    // back empty leaves it alone: dropping it would unmount the order ticket
+    // under the user's hands, losing a half-typed order.
+    if (!symbolParam) {
+      setSelected(null);
+      return;
     }
-  }, [apiClient, params, selected]);
+    if (selected?.symbol === symbolParam) return;
+    const known = instruments.find((item) => item.symbol === symbolParam);
+    if (known) {
+      setSelected(known);
+      return;
+    }
+    apiClient
+      .get<Instrument[]>(
+        `/api/v1/instruments?q=${encodeURIComponent(symbolParam)}`,
+      )
+      .then((items) => {
+        const found = items.find((item) => item.symbol === symbolParam);
+        if (active && found) setSelected(found);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [apiClient, instruments, symbolParam, selected]);
   useEffect(() => {
     apiClient
       .get<{ wallets: readonly Wallet[] }>('/api/v1/portfolio')
       .then((x) => setWallets(x.wallets ?? []))
       .catch(() => setWallets([]));
   }, [apiClient]);
-  const instruments = useMemo(() => data, [data]);
+  // Only the URL is written here. `selected` is derived from it by the effect
+  // above, so there is no window in which local state and the query string
+  // disagree — writing both raced when React committed them separately and
+  // unmounted the order ticket mid-interaction.
+  const deselect = () =>
+    setParams((current) => {
+      current.delete('symbol');
+      return current;
+    });
   const select = (instrument: Instrument) => {
-    setSelected(instrument);
+    const isToggleOff =
+      selected?.market === instrument.market &&
+      selected.symbol === instrument.symbol;
+    if (isToggleOff) {
+      deselect();
+      return;
+    }
     setParams((current) => {
       current.set('symbol', instrument.symbol);
       return current;
     });
+  };
+  const reset = () => {
+    setQuery('');
+    deselect();
   };
   return (
     <QueryClientProvider client={queryClient}>
@@ -71,11 +108,13 @@ export function TradePage({
             instruments={instruments}
             onSelect={select}
             selected={selected}
+            onReset={reset}
+            canReset={Boolean(selected) || query !== ''}
           />
         </div>
         <div className="trade-col trade-col-main">
           {selected && !selected.tradable && (
-            <p role="alert">SYMBOL_NOT_TRADABLE</p>
+            <p role="alert">{t('reason.SYMBOL_NOT_TRADABLE')}</p>
           )}
           <QuotePanel quote={quote} />
         </div>

@@ -7,13 +7,13 @@ describe('App', () => {
   it('renders the primary navigation and one main landmark', () => {
     render(<App />, { wrapper: MemoryRouter });
 
-    expect(screen.getByRole('navigation', { name: '주요 메뉴' })).toBeVisible();
+    expect(screen.getByRole('navigation', { name: 'Main menu' })).toBeVisible();
     expect(screen.getAllByRole('main')).toHaveLength(1);
-    expect(screen.getByRole('link', { name: '거래' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Trade' })).toHaveAttribute(
       'href',
       '/trade',
     );
-    expect(screen.getByRole('link', { name: '포트폴리오' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Portfolio' })).toHaveAttribute(
       'href',
       '/portfolio',
     );

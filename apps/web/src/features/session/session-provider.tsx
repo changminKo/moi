@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   type ApiClient,
   apiClient as defaultApiClient,
@@ -32,6 +33,7 @@ export function SessionProvider({
   children: ReactNode;
   apiClient?: ApiClient;
 }) {
+  const { t } = useTranslation();
   const csrfToken = useRef<string | undefined>(undefined);
   const bootstrapPromise = useRef<Promise<SessionSnapshot> | undefined>(
     undefined,
@@ -72,10 +74,10 @@ export function SessionProvider({
   useEffect(() => bootstrap(), []);
   const content =
     state.status === 'loading' ? (
-      <p role="status">Loading session…</p>
+      <p role="status">{t('session.loading')}</p>
     ) : state.status === 'error' ? (
       <button type="button" onClick={state.retry}>
-        Retry session
+        {t('session.retry')}
       </button>
     ) : (
       children

@@ -1,8 +1,10 @@
 import Decimal from 'decimal.js';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
+import { useAppLocale } from '../../lib/i18n';
 import { newIdempotencyKey } from '../../lib/idempotency';
 import { presentationForReason } from '../system/system-status-provider';
 import './wallet.css';
@@ -20,9 +22,11 @@ export function FxTicket({
   const [quote, setQuote] = useState<FxQuote | null>(null);
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
+  const { t } = useTranslation();
+  const locale = useAppLocale();
   const quoteFx = async () => {
     if (!/^\d+(?:\.\d+)?$/.test(amount) || new Decimal(amount || '0').lte(0)) {
-      setError('Amount must be positive');
+      setError(t('fx.amountPositive'));
       return;
     }
     setError('');
@@ -50,10 +54,10 @@ export function FxTicket({
       const code = e as { code?: string };
       setError(
         code.code === 'QUOTE_EXPIRED'
-          ? 'Quote expired. Refresh explicitly.'
+          ? t('fx.quoteExpired')
           : code.code === 'INSUFFICIENT_AVAILABLE_BALANCE'
-            ? 'Insufficient available balance'
-            : 'Conversion failed',
+            ? t('fx.insufficient')
+            : t('fx.failed'),
       );
     } finally {
       setPending(false);
@@ -61,8 +65,8 @@ export function FxTicket({
   };
   return (
     <section className="panel fx-ticket" aria-labelledby="fx-title">
-      <h2 id="fx-title">Virtual FX</h2>
-      <label htmlFor="fx-amount">Amount</label>
+      <h2 id="fx-title">{t('fx.title')}</h2>
+      <label htmlFor="fx-amount">{t('fx.amount')}</label>
       <input
         id="fx-amount"
         inputMode="decimal"
@@ -70,26 +74,34 @@ export function FxTicket({
         onChange={(e) => setAmount(e.target.value)}
       />
       <button type="button" onClick={quoteFx} disabled={!capability.canFx}>
-        Get quote
+        {t('fx.getQuote')}
       </button>
       {capability.reasonCodes.map((reason) => (
         <p key={reason} role="status">
-          {presentationForReason(reason)}
+          {presentationForReason(reason, locale)}
         </p>
       ))}
       {error && <p role="alert">{error}</p>}
       {quote && (
         <div aria-live="polite" className="fx-quote">
-          <p>Rate: {quote.rate}</p>
-          <p>Fee: {quote.fee}</p>
-          <p>Source: {quote.sourceAmount}</p>
-          <p>Destination: {quote.destinationAmount}</p>
+          <p>
+            {t('fx.rate')}: {quote.rate}
+          </p>
+          <p>
+            {t('fx.fee')}: {quote.fee}
+          </p>
+          <p>
+            {t('fx.source')}: {quote.sourceAmount}
+          </p>
+          <p>
+            {t('fx.destination')}: {quote.destinationAmount}
+          </p>
           <button
             type="button"
             disabled={pending || !capability.canFx}
             onClick={convert}
           >
-            Convert
+            {t('fx.convert')}
           </button>
         </div>
       )}

@@ -38,7 +38,7 @@ test('reconciles a KR limit order after partial and complete fills', async ({
   await page.getByLabel('Quantity').fill('3');
   await page.getByLabel('Price').fill('70000');
   await submitOrder(page);
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await expect(page.getByText('PARTIALLY_FILLED')).toBeVisible();
   await expect(page.getByText('Filled 2 / Remaining 1')).toBeVisible();
 
@@ -59,7 +59,7 @@ test('deduplicates a duplicate US fill delivery', async ({
   await page.getByLabel('Quantity').fill('1');
   await page.getByLabel('Price').fill('200');
   await submitOrder(page);
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await paperSystem.waitForStream();
   const orderId = await paperSystem.latestOrderId();
   await paperSystem.fill({
@@ -93,7 +93,7 @@ test('cancels the OCO sibling and releases its reservation', async ({
   await page.getByLabel('Stop price').fill('190');
   await submitOrder(page);
   const orderId = await paperSystem.latestOrderId();
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await expect(page.getByRole('row', { name: /AAPL 0 2 2/ })).toBeVisible();
   const reservation = await page.evaluate(async () => {
     const response = await fetch('/api/v1/portfolio');

@@ -1,0 +1,126 @@
+// English message catalogue. `en` is the reference bundle: its keys define
+// `MessageKey`, and the Korean catalogue must provide every one of them.
+export const en = {
+  'app.brandAria': 'Moi — go to trading',
+  'app.navAria': 'Main menu',
+  'app.navTrade': 'Trade',
+  'app.navPortfolio': 'Portfolio',
+  'app.localeSwitchAria': 'Language',
+
+  'session.loading': 'Loading session…',
+  'session.retry': 'Retry session',
+
+  'banner.systemStatusAria': 'Trading system status',
+  'common.retry': 'Retry',
+  'common.dismiss': 'Dismiss',
+  'common.close': 'Close',
+  'common.cancel': 'Cancel',
+
+  'instruments.title': 'Instrument search',
+  'instruments.searchLabel': 'Search',
+  'instruments.searchPlaceholder': 'Search symbols',
+  'instruments.nonTradable': 'non-tradable',
+  'instruments.showAll': 'Show all',
+
+  'quote.empty': 'Select an instrument to see its quote.',
+  'quote.timestamp': 'Timestamp',
+  'quote.bookTitle': 'Order book depth',
+  'quote.asks': 'Asks',
+  'quote.bids': 'Bids',
+  'quote.ask': 'ask',
+  'quote.bid': 'bid',
+  'quote.noAsks': 'No asks',
+  'quote.noBids': 'No bids',
+  'quote.sparklineCollecting': 'Collecting chart data…',
+  'quote.sparklineSummary': 'Last {{count}} ticks, high {{high}}, low {{low}}',
+
+  'ticket.title': 'Order ticket',
+  'ticket.side': 'Side',
+  'ticket.buy': 'Buy',
+  'ticket.sell': 'Sell',
+  'ticket.orderType': 'Order type',
+  'ticket.type': 'Type',
+  'ticket.typeMarket': 'Market',
+  'ticket.typeLimit': 'Limit',
+  'ticket.typeStop': 'Stop',
+  'ticket.typeTakeProfit': 'Take profit',
+  'ticket.typeOco': 'OCO',
+  'ticket.quantity': 'Quantity',
+  'ticket.price': 'Price',
+  'ticket.triggerPrice': 'Trigger price',
+  'ticket.stopPrice': 'Stop price',
+  'ticket.place': 'Place order',
+  'ticket.placeAria': 'Order ticket — Place order',
+  'ticket.invalidOrder': 'Invalid order',
+  'ticket.rejected': 'Order rejected',
+
+  'validation.quantity': 'Quantity must be a positive whole number',
+  'validation.limitPrice': 'Limit price is required',
+  'validation.stopPrice': 'Stop price is required',
+  'validation.triggerPrice': 'Trigger price is required',
+  'validation.takeProfitPrice': 'Take-profit price is required',
+  'validation.ocoTriggersDiffer': 'OCO triggers must differ',
+
+  'wallet.title': 'Wallets',
+  'wallet.available': 'available',
+  'wallet.reserved': 'reserved',
+  'wallet.total': 'total',
+
+  'fx.title': 'Virtual FX',
+  'fx.amount': 'Amount',
+  'fx.getQuote': 'Get quote',
+  'fx.convert': 'Convert',
+  'fx.rate': 'Rate',
+  'fx.fee': 'Fee',
+  'fx.source': 'Source',
+  'fx.destination': 'Destination',
+  'fx.amountPositive': 'Amount must be positive',
+  'fx.quoteExpired': 'Quote expired. Refresh explicitly.',
+  'fx.insufficient': 'Insufficient available balance',
+  'fx.failed': 'Conversion failed',
+
+  'portfolio.loading': 'Loading portfolio…',
+  'portfolio.title': 'Portfolio',
+  'portfolio.eyebrow': 'ACCOUNT / 02',
+  'positions.title': 'Positions',
+  'positions.empty': 'No positions yet.',
+  'positions.caption':
+    'Available and reserved position quantities with average cost',
+  'positions.symbol': 'Symbol',
+  'positions.available': 'Available',
+  'positions.reserved': 'Reserved',
+  'positions.total': 'Total',
+  'positions.avgCost': 'Avg cost',
+
+  'orders.title': 'Open orders',
+  'orders.empty': 'No open orders.',
+  'orders.filled': 'Filled',
+  'orders.remaining': 'Remaining',
+  'orders.ocoSibling': 'OCO sibling',
+  'orders.cancelFailed': 'Cancellation failed',
+
+  'fills.title': 'Fill history',
+  'fills.empty': 'No fills yet.',
+  'fills.fee': 'fee',
+  'fills.recovery': 'Recovery fill',
+
+  'amend.title': 'Amend order',
+  'amend.save': 'Save changes',
+  'amend.unavailable': 'Amendment unavailable.',
+
+  // Trading reason codes. Both catalogues are typed against the same key
+  // set, so a code translated in one language and not the other is a
+  // compile error rather than a blank panel at runtime.
+  'reason.MARKET_DATA_DEGRADED': 'Market data delayed',
+  'reason.RECOVERY_IN_PROGRESS': 'Recovery in progress',
+  'reason.CANCEL_ONLY': 'Safety mode: cancellations only',
+  'reason.ACCOUNT_READ_ONLY': 'Account safety lock',
+  'reason.UNAVAILABLE': 'Service unavailable',
+  'reason.SERVICE_UNAVAILABLE': 'Service unavailable',
+  'reason.SESSION_EXPIRED': 'Session expired — start a new session',
+  'reason.SYMBOL_NOT_TRADABLE': 'This instrument is not tradable',
+
+  'guard.unavailable': 'Action unavailable',
+} as const;
+
+export type MessageKey = keyof typeof en;

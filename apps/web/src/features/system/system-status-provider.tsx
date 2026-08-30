@@ -7,6 +7,8 @@ import {
 } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
+import { en } from '../../lib/i18n/messages.en';
+import { ko } from '../../lib/i18n/messages.ko';
 
 export type TradingAvailability = Readonly<{
   place: { enabled: boolean; reasons: readonly string[] };
@@ -25,21 +27,27 @@ export type TradingHealth = Readonly<{
   reasons?: readonly string[];
 }>;
 
-const reasonText: Record<string, string> = {
-  MARKET_DATA_DEGRADED: 'Market data delayed',
-  RECOVERY_IN_PROGRESS: 'Recovery in progress',
-  CANCEL_ONLY: 'Safety mode: cancellations only',
-  ACCOUNT_READ_ONLY: 'Account safety lock',
-  UNAVAILABLE: 'Service unavailable',
-  SERVICE_UNAVAILABLE: 'Service unavailable',
-  SESSION_EXPIRED: 'Session expired — start a new session',
-  SYMBOL_NOT_TRADABLE: 'This instrument is not tradable',
-};
+type ReasonKey = Extract<keyof typeof en, `reason.${string}`>;
+const reasonKey = (reason: string) => `reason.${reason}` as ReasonKey;
 
-export function presentationForReason(reason: string): string {
-  const text = reasonText[reason];
-  if (!text) throw new Error(`Unknown trading reason code: ${reason}`);
-  return text;
+/**
+ * Render-safe: an unrecognised code degrades to the raw code instead of
+ * throwing. A newly emitted server code must never blank the app while
+ * trading is already degraded.
+ */
+export function presentationForReason(
+  reason: string,
+  locale: 'ko' | 'en' = 'en',
+): string {
+  const bundle = locale === 'ko' ? ko : en;
+  return bundle[reasonKey(reason)] ?? reason;
+}
+
+/** Fail-fast validation for codes arriving from the API (both catalogues). */
+export function assertKnownReason(reason: string): void {
+  const key = reasonKey(reason);
+  if (!(key in en) || !(key in ko))
+    throw new Error(`Unknown trading reason code: ${reason}`);
 }
 
 export function composeTradingAvailability(
@@ -121,7 +129,9 @@ export function SystemStatusProvider({
       .get<TradingHealth>(`/api/v1/health/trading${query}`)
       .then((health) => {
         const reasons = [...(health.reasonCodes ?? health.reasons ?? [])];
-        reasons.forEach(presentationForReason);
+        for (const reason of reasons) {
+          assertKnownReason(reason);
+        }
         setState({
           availability: composeTradingAvailability(health),
           reasons,
