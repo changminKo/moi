@@ -419,8 +419,10 @@ describe('ledger migration', () => {
           '001_ledger',
           '002_audit_partitions',
           '003_leader_release',
+          '004_fill_history',
         ]);
         expect(results.map((result) => result.status)).toEqual([
+          'Success',
           'Success',
           'Success',
           'Success',
@@ -453,6 +455,7 @@ describe('ledger migration', () => {
           '001_ledger',
           '002_audit_partitions',
           '003_leader_release',
+          '004_fill_history',
         ]);
       } finally {
         await fresh.destroy();

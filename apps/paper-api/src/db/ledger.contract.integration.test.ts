@@ -976,9 +976,11 @@ function createPlan1Driver(target: Database): LedgerScenarioDriver {
 
         await sql`
           insert into fills (
-            id, order_id, price, quantity, fee, slippage, occurred_at
+            id, order_id, session_id, price, quantity, fee, slippage, occurred_at
           ) values (
-            ${randomUUID()}, ${request.orderId}, ${fill.price}, ${fill.quantity},
+            ${randomUUID()}, ${request.orderId},
+            (select session_id from orders where id = ${request.orderId}),
+            ${fill.price}, ${fill.quantity},
             ${fill.fee}, ${execution.slippageAmount}, ${PARTIALLY_FILLED_AT}
           )
         `.execute(executor);

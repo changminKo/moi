@@ -189,6 +189,10 @@ export const LEDGER_UNIQUE_INDEXES: Readonly<
   outbox_events_pkey: { table: 'outbox_events', arbiter: 'FRESH_IDENTITY' },
   reservations_pkey: { table: 'reservations', arbiter: 'FRESH_IDENTITY' },
   fills_pkey: { table: 'fills', arbiter: 'UNWRITTEN' },
+  // The fill cursor. Its value comes from a bigserial default, so two writers
+  // never compute the same one; like `fills_pkey` it is UNWRITTEN because no
+  // repository statement inserts a fill — the runtime's raw-SQL fill path does.
+  fills_sequence_idx: { table: 'fills', arbiter: 'UNWRITTEN' },
   markets_pkey: { table: 'markets', arbiter: 'UNWRITTEN' },
   account_sequences_pkey: {
     table: 'account_sequences',

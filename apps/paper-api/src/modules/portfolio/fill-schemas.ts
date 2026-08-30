@@ -51,10 +51,7 @@ export interface FillContext {
   readonly occurredAt?: string;
 }
 
-export function fillRecord(
-  fill: FillFacts,
-  context: FillContext,
-): FillRecord {
+export function fillRecord(fill: FillFacts, context: FillContext): FillRecord {
   return {
     id: fill.id,
     fillSequence: fill.fillSequence,

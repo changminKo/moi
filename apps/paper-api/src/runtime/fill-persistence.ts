@@ -5,7 +5,10 @@ import type { Database } from '../db/database.js';
 import type { OrderMatch } from '../engine/match-orders.js';
 import type { PaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
-import { type FillFacts, fillRecord } from '../modules/portfolio/fill-schemas.js';
+import {
+  type FillFacts,
+  fillRecord,
+} from '../modules/portfolio/fill-schemas.js';
 import { lockBalances, settleFill } from './fill-settlement.js';
 import {
   allocateAccountSequence,
