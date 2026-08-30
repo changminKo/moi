@@ -995,6 +995,18 @@ describe('ProductionRuntime', () => {
         () => expect(waiting.runtime.state.current).toBe('SERVING'),
         { timeout: 15_000 },
       );
+      const refreshedEnglishSearch = await json(
+        `${waiting.origin}/api/v1/instruments?q=apple`,
+      );
+      expect(refreshedEnglishSearch.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            market: 'US',
+            symbol: 'AAPL',
+            name: '애플',
+          }),
+        ]),
+      );
 
       waiting.bundle.streamFor('US').emitOrderBook({
         market: 'US',

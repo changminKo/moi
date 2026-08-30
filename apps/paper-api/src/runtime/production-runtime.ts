@@ -24,7 +24,10 @@ import {
   loadInstrumentNames,
 } from '../modules/instruments/instrument-names.js';
 import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
-import { InstrumentService } from '../modules/instruments/instrument-service.js';
+import {
+  type CatalogInstrument,
+  InstrumentService,
+} from '../modules/instruments/instrument-service.js';
 import { calendarPortFromSource } from '../modules/instruments/market-calendar-port.js';
 import { MarketCalendarService } from '../modules/instruments/market-calendar-service.js';
 import { registerMarketSessionRoutes } from '../modules/instruments/market-session-routes.js';
@@ -1096,24 +1099,30 @@ export class ProductionRuntime {
     return app;
   }
 
-  #instrumentService(names: ReadonlyMap<string, string>): InstrumentService {
+  #instrumentCatalog(
+    names: ReadonlyMap<string, string>,
+  ): readonly CatalogInstrument[] {
     const symbols = this.#o.symbols ?? this.#o.bundle.symbols;
     const aliases = instrumentSearchAliases(symbols);
+    return MARKETS.flatMap((market) =>
+      symbols[market].map((symbol) => {
+        const instrumentKey = `${market}:${symbol}` as const;
+        const searchAliases = aliases.get(instrumentKey);
+        return {
+          market,
+          symbol,
+          name: names.get(instrumentKey) ?? symbol,
+          tradable: true,
+          currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
+          ...(searchAliases === undefined ? {} : { aliases: searchAliases }),
+        };
+      }),
+    );
+  }
+
+  #instrumentService(names: ReadonlyMap<string, string>): InstrumentService {
     return new InstrumentService({
-      catalog: MARKETS.flatMap((market) =>
-        symbols[market].map((symbol) => {
-          const instrumentKey = `${market}:${symbol}` as const;
-          const searchAliases = aliases.get(instrumentKey);
-          return {
-            market,
-            symbol,
-            name: names.get(instrumentKey) ?? symbol,
-            tradable: true,
-            currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
-            ...(searchAliases === undefined ? {} : { aliases: searchAliases }),
-          };
-        }),
-      ),
+      catalog: this.#instrumentCatalog(names),
     });
   }
 
@@ -1124,8 +1133,7 @@ export class ProductionRuntime {
       signal,
       log: this.#log,
     });
-    const refreshed = this.#instrumentService(names);
-    this.#instruments?.replaceCatalog((await refreshed.search()).items);
+    this.#instruments?.replaceCatalog(this.#instrumentCatalog(names));
   }
 
   /** Current book-derived quote from this leader's market state (never invented). */
