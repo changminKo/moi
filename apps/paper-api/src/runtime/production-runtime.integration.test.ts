@@ -925,13 +925,16 @@ describe('ProductionRuntime', () => {
         'idempotency-key': randomUUID(),
         ...extra,
       });
-      const search = await json(`${waiting.origin}/api/v1/instruments?q=AAPL`);
+      const search = await json(
+        `${waiting.origin}/api/v1/instruments?q=${encodeURIComponent('ㅅㅅㅈㅈ')}`,
+      );
       expect(search.status).toBe(200);
       expect(search.body).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            market: 'US',
-            symbol: 'AAPL',
+            market: 'KR',
+            symbol: '005930',
+            name: '삼성전자',
             tradable: true,
           }),
         ]),

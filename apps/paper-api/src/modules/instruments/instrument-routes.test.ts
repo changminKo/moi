@@ -31,26 +31,55 @@ describe('instrument service', () => {
     ['apple', ['AAPL']],
     ['  ', ['005930', 'AAPL']],
     ['banana', []],
-  ])('matches %j against instrument names and symbols', async (query, symbols) => {
+  ])(
+    'matches %j against instrument names and symbols',
+    async (query, symbols) => {
+      const service = new InstrumentService({
+        catalog: [
+          {
+            market: 'KR',
+            symbol: '005930',
+            name: '삼성전자',
+            tradable: true,
+          },
+          {
+            market: 'US',
+            symbol: 'AAPL',
+            name: 'Apple',
+            tradable: true,
+          },
+        ],
+      });
+
+      const result = await service.search(query);
+
+      expect(result.items.map((item) => item.symbol)).toEqual(symbols);
+    },
+  );
+
+  it('atomically replaces the catalog after provider names load', async () => {
     const service = new InstrumentService({
       catalog: [
         {
           market: 'KR',
           symbol: '005930',
-          name: '삼성전자',
-          tradable: true,
-        },
-        {
-          market: 'US',
-          symbol: 'AAPL',
-          name: 'Apple',
+          name: '005930',
           tradable: true,
         },
       ],
     });
 
-    const result = await service.search(query);
+    service.replaceCatalog([
+      {
+        market: 'KR',
+        symbol: '005930',
+        name: '삼성전자',
+        tradable: true,
+      },
+    ]);
 
-    expect(result.items.map((item) => item.symbol)).toEqual(symbols);
+    expect((await service.search('ㅅㅅㅈㅈ')).items).toEqual([
+      expect.objectContaining({ symbol: '005930', name: '삼성전자' }),
+    ]);
   });
 });

@@ -13,18 +13,19 @@ export interface InstrumentServiceOptions {
   readonly whitelist?: WhitelistService;
 }
 export class InstrumentService {
-  readonly #catalog: readonly Instrument[];
+  #catalog: readonly Instrument[];
   readonly #whitelist: WhitelistService | undefined;
   constructor(options: InstrumentServiceOptions) {
     this.#catalog = options.catalog;
     this.#whitelist = options.whitelist;
   }
+  replaceCatalog(catalog: readonly Instrument[]): void {
+    this.#catalog = catalog;
+  }
   async search(query = '', market?: Market) {
     const items = this.#catalog
       .filter(
-        (i) =>
-          (!market || i.market === market) &&
-          matchesInstrument(query, i),
+        (i) => (!market || i.market === market) && matchesInstrument(query, i),
       )
       .map((i) => ({
         ...i,

@@ -1,4 +1,7 @@
-import type { InstrumentCatalog } from '@moi/market-data';
+import {
+  type InstrumentCatalog,
+  TOSS_SYMBOL_WHITELIST,
+} from '@moi/market-data';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   INSTRUMENT_NAMES_TIMEOUT_MS,
@@ -138,5 +141,19 @@ describe('loadInstrumentNames', () => {
         ['US:AAPL', '애플'],
       ]),
     );
+  });
+
+  it('keeps a non-symbol snapshot name for every production symbol', async () => {
+    const names = await loadInstrumentNames({
+      source: source(async () => []),
+      symbols: { KR: ['005930'], US: TOSS_SYMBOL_WHITELIST },
+      signal,
+      log: vi.fn(),
+    });
+
+    expect(names.size).toBe(TOSS_SYMBOL_WHITELIST.length + 1);
+    for (const [instrumentKey, name] of names) {
+      expect(name).not.toBe(instrumentKey.split(':')[1]);
+    }
   });
 });
