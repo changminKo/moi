@@ -49,8 +49,17 @@ export class PortfolioService {
       });
   }
 
-  snapshot(sessionId: string): Promise<PortfolioSnapshot> {
-    return this.#runSnapshot((tx) => tx.snapshot(sessionId));
+  /**
+   * The payload names the session it belongs to. A client holds its session in
+   * a cookie the transport owns, so without this it cannot check that the
+   * account it just read is the account it thinks it is — and a portfolio
+   * silently belonging to another session is the one mix-up that must never
+   * pass quietly. The value is the caller's own id, so naming it discloses
+   * nothing the caller did not already hold.
+   */
+  async snapshot(sessionId: string): Promise<PortfolioSnapshot> {
+    const snapshot = await this.#runSnapshot((tx) => tx.snapshot(sessionId));
+    return { ...snapshot, sessionId };
   }
 
   listOrders(

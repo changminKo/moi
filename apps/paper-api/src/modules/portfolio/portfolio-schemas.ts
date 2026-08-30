@@ -9,6 +9,8 @@ export const portfolioQuerySchema = z
 export type PortfolioQuery = z.infer<typeof portfolioQuerySchema>;
 
 export interface PortfolioSnapshot {
+  /** Added by `PortfolioService.snapshot`, not by the repository read. */
+  readonly sessionId?: string;
   readonly wallets: readonly Record<string, string>[];
   readonly positions: readonly Record<string, string>[];
   readonly reservations: readonly Record<string, string | boolean | null>[];
