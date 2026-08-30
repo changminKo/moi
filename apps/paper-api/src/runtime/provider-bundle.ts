@@ -6,6 +6,7 @@ import {
   type MarketCalendarSource,
   type MarketDataStream,
   type MarketSnapshotSource,
+  type InstrumentCatalog,
   OAuthTokenProvider,
   TOSS_SYMBOL_WHITELIST,
   type TokenProvider,
@@ -19,6 +20,8 @@ export interface ProviderBundle {
   readonly kind: 'fake' | 'toss';
   streamFor(market: Market): MarketDataStream;
   readonly snapshots: MarketSnapshotSource;
+  /** Display-name catalog used once while the HTTP instrument routes boot. */
+  readonly instruments: InstrumentCatalog;
   /** Trading calendar behind `GET /api/v1/markets/:market/session` (§16.31). */
   readonly calendar: MarketCalendarSource;
   readonly tokenProvider?: TokenProvider;
@@ -67,6 +70,38 @@ export function createFakeProviderBundle(
   const ledger = options.ledger ?? new FakeConnectionLedger();
   const streams = new Map<Market, FakeMarketData>();
   const snapshots = new FakeSnapshotSource();
+  const catalog = [
+    {
+      market: 'KR' as const,
+      symbol: '005930',
+      name: '삼성전자',
+      currency: 'KRW' as const,
+      tradable: true,
+    },
+    {
+      market: 'US' as const,
+      symbol: 'AAPL',
+      name: '애플',
+      currency: 'USD' as const,
+      tradable: true,
+    },
+  ];
+  const instruments: InstrumentCatalog = {
+    searchInstruments: async (query) => {
+      const normalized = query.trim().toLowerCase();
+      return catalog.filter(
+        (instrument) =>
+          !normalized ||
+          instrument.symbol.toLowerCase().includes(normalized) ||
+          instrument.name.toLowerCase().includes(normalized),
+      );
+    },
+    getInstrument: async (market, symbol) =>
+      catalog.find(
+        (instrument) =>
+          instrument.market === market && instrument.symbol === symbol,
+      ) ?? null,
+  };
   const calendar = new FakeCalendarSource();
   snapshots.seedDefault('KR', '005930', '70000');
   snapshots.seedDefault('US', 'AAPL', '190.25');
@@ -84,6 +119,7 @@ export function createFakeProviderBundle(
     kind: 'fake',
     ledger,
     snapshots,
+    instruments,
     calendar,
     symbols: FAKE_SYMBOLS,
     streamFor: (market) => streams.get(market) as FakeMarketData,
@@ -142,6 +178,7 @@ export function createTossProviderBundle(
     kind: 'toss',
     tokenProvider,
     snapshots,
+    instruments: snapshots,
     calendar: snapshots,
     symbols: options.symbols ?? TOSS_SYMBOLS,
     streamFor: (market) => streams.get(market) as TossWebSocketMarketData,
