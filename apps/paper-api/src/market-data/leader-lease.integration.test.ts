@@ -17,7 +17,6 @@ import { createDatabase, type Database } from '../db/database.js';
 import { migrateToLatest } from '../db/migrate.js';
 import { leaseAuditPort } from '../runtime/lease-audit.js';
 import {
-  LEASE_POLL_INTERVAL_MS,
   LeaderLease,
   type LeaseAuditPort,
   type LeaseConnection,
@@ -25,7 +24,6 @@ import {
 
 const CONTAINER_TIMEOUT_MS = 300_000;
 const TEST_TIMEOUT_MS = 60_000;
-const ROUND_TRIP_SLACK_MS = 400;
 
 let container: StartedPostgreSqlContainer;
 let connectionString: string;
@@ -33,7 +31,31 @@ let database: Database;
 let observer: Client;
 const openLeases: LeaderLease[] = [];
 
+const POLL_QUERY = 'select pg_try_advisory_lock';
+const UNLOCK_QUERY = 'select pg_advisory_unlock';
+
+type TimelinePhase = 'issued' | 'settled';
+
+/**
+ * One observed moment of one query on one connection. Every recorder writes
+ * into the same array, so `seq` is a total order over what this process did —
+ * which is what lets a test state "A happened before B" without measuring how
+ * long either took. A loaded runner reorders nothing; it only makes the gaps
+ * bigger.
+ */
+interface TimelineEntry {
+  readonly seq: number;
+  readonly label: string;
+  readonly query: string;
+  readonly phase: TimelinePhase;
+}
+
+let timeline: TimelineEntry[] = [];
+let timelineSeq = 0;
+let connectionCount = 0;
+
 interface Recorder {
+  readonly label: string;
   readonly queries: string[];
   readonly connection: LeaseConnection;
   readonly pid: () => Promise<number>;
@@ -42,20 +64,28 @@ interface Recorder {
 
 /** Wraps a pg Client so tests can assert the exact query order and hook the lock result. */
 async function recordingConnection(
-  options: { onLockAcquired?: () => void } = {},
+  options: { onLockAcquired?: () => void; label?: string } = {},
 ): Promise<Recorder> {
   const client = new Client({ connectionString });
   await client.connect();
   const pidRow = await client.query('select pg_backend_pid() as pid');
   const pid = Number(pidRow.rows[0].pid);
+  connectionCount += 1;
+  const label = options.label ?? `conn-${connectionCount}`;
   const recorder: Recorder = {
+    label,
     queries: [],
     ended: false,
     pid: async () => pid,
     connection: {
       query: async (text, values) => {
-        recorder.queries.push(text.trim().split(/\s+/).slice(0, 3).join(' '));
+        const query = text.trim().split(/\s+/).slice(0, 3).join(' ');
+        recorder.queries.push(query);
+        timelineSeq += 1;
+        timeline.push({ seq: timelineSeq, label, query, phase: 'issued' });
         const result = await client.query(text, values as unknown[]);
+        timelineSeq += 1;
+        timeline.push({ seq: timelineSeq, label, query, phase: 'settled' });
         if (
           /pg_try_advisory_lock/.test(text) &&
           result.rows[0]?.pg_try_advisory_lock === true
@@ -71,6 +101,23 @@ async function recordingConnection(
     },
   };
   return recorder;
+}
+
+const pollsOf = (recorder: Recorder): number =>
+  recorder.queries.filter((query) => query.startsWith(POLL_QUERY)).length;
+
+function findEntry(
+  entries: readonly TimelineEntry[],
+  label: string,
+  prefix: string,
+  phase: TimelinePhase,
+): TimelineEntry | undefined {
+  return entries.find(
+    (entry) =>
+      entry.label === label &&
+      entry.phase === phase &&
+      entry.query.startsWith(prefix),
+  );
 }
 
 function acquire(
@@ -135,6 +182,8 @@ beforeAll(async () => {
 }, CONTAINER_TIMEOUT_MS);
 
 afterEach(async () => {
+  timeline = [];
+  timelineSeq = 0;
   for (const lease of openLeases.splice(0))
     await lease.release().catch(() => undefined);
   await observer.query('select pg_advisory_unlock_all()');
@@ -253,36 +302,62 @@ describe('LeaderLease (§5.4)', () => {
   it(
     '4. no race: a waiter acquires only after release, audits serialize under the lock',
     async () => {
-      const p1 = await recordingConnection();
+      const p1 = await recordingConnection({ label: 'p1' });
       const lease1 = await acquire('KR', p1, { leaderId: 'p1' });
-      const p2 = await recordingConnection();
+      const p2 = await recordingConnection({ label: 'p2' });
       let settled = false;
       const waiting = acquire('KR', p2, { leaderId: 'p2' }).then((lease) => {
         settled = true;
         return lease;
       });
-      await sleep(1_000);
+      // (a) The waiter keeps polling and never opens a transaction while the
+      // lock is held. Wait for the polls to happen rather than for a span of
+      // time in which they ought to: a loaded runner fires the timers late
+      // without breaking the rule under test.
+      await vi.waitFor(() => expect(pollsOf(p2)).toBeGreaterThanOrEqual(3), {
+        timeout: 10_000,
+        interval: 25,
+      });
       expect(settled).toBe(false);
-      expect(
-        p2.queries.filter((q) => q.startsWith('select pg_try_advisory_lock'))
-          .length,
-      ).toBeGreaterThanOrEqual(3);
       expect(p2.queries.some((q) => q === 'begin')).toBe(false);
+      const fromRelease = timeline.length;
       const releasedAt = Date.now();
       const releasing = lease1.release();
-      // (b) LEADER_RELEASED is visible to a third connection before P2 resolves
-      let releasedSeenBeforeP2 = false;
-      while (!settled) {
-        const released = await auditRows('LEADER_RELEASED');
-        if (released.length === 1 && !settled) releasedSeenBeforeP2 = true;
-        await sleep(5);
-      }
-      await releasing;
-      const lease2 = await waiting;
-      expect(releasedSeenBeforeP2).toBe(true);
-      expect(Date.now() - releasedAt).toBeLessThan(
-        LEASE_POLL_INTERVAL_MS + ROUND_TRIP_SLACK_MS + 200,
+      const [, lease2] = await Promise.all([releasing, waiting]);
+      const after = timeline.slice(fromRelease);
+      const seq = (
+        label: string,
+        prefix: string,
+        phase: TimelinePhase,
+      ): number => {
+        const entry = findEntry(after, label, prefix, phase);
+        if (entry === undefined)
+          throw new Error(
+            `expected ${label} to have ${phase} "${prefix}" after the release`,
+          );
+        return entry.seq;
+      };
+      // (b) LEADER_RELEASED commits — and is therefore visible to every other
+      // session — before the waiter's own transaction begins. Stated as the
+      // ordering fact it is, instead of racing an observer against P2.
+      expect(seq('p1', 'commit', 'settled')).toBeLessThan(
+        seq('p2', 'begin', 'issued'),
       );
+      // (c) The waiter takes the lock on its first poll after the unlock: the
+      // poll interval is fixed and there is no backoff. Counting polls says
+      // that independently of how slowly the runner schedules them.
+      const unlockSeq = seq('p1', UNLOCK_QUERY, 'settled');
+      const pollsAfterUnlock = after.filter(
+        (entry) =>
+          entry.label === 'p2' &&
+          entry.phase === 'issued' &&
+          entry.query.startsWith(POLL_QUERY) &&
+          entry.seq > unlockSeq,
+      );
+      expect(pollsAfterUnlock.length).toBeLessThanOrEqual(1);
+      // Secondary margin, generous by design: (c) is the real assertion, this
+      // only catches a regression to a wildly longer poll interval.
+      expect(Date.now() - releasedAt).toBeLessThan(5_000);
       const [row] = await epochRows('KR');
       expect(row).toMatchObject({
         epoch: '2',
@@ -371,16 +446,24 @@ describe('LeaderLease (§5.4)', () => {
     async () => {
       const p1 = await recordingConnection();
       const holder = await acquire('KR', p1);
-      const p2 = await recordingConnection();
+      const p2 = await recordingConnection({ label: 'waiter' });
       const controller = new AbortController();
       const waiting = acquire('KR', p2, { signal: controller.signal });
-      await sleep(700);
+      await vi.waitFor(() => expect(pollsOf(p2)).toBeGreaterThanOrEqual(2), {
+        timeout: 10_000,
+        interval: 25,
+      });
+      // Read and abort with no await between them, so no timer can fire in the
+      // gap and add a poll this count would then blame on the abort.
+      const pollsBeforeAbort = pollsOf(p2);
       const abortedAt = Date.now();
       controller.abort();
       await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
-      expect(Date.now() - abortedAt).toBeLessThan(
-        LEASE_POLL_INTERVAL_MS + ROUND_TRIP_SLACK_MS,
-      );
+      // The abort interrupts the sleep instead of being noticed at the next
+      // poll — so the waiter issues no further poll at all.
+      expect(pollsOf(p2)).toBe(pollsBeforeAbort);
+      // Secondary margin only; the poll count above is the real assertion.
+      expect(Date.now() - abortedAt).toBeLessThan(5_000);
       expect(p2.ended).toBe(true);
       expect(await epochRows('KR')).toHaveLength(1);
       expect(await auditRows('LEADER_ACQUIRED')).toHaveLength(1);
