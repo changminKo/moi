@@ -127,7 +127,12 @@ main {
   box-shadow: var(--shadow-card);
 }
 
-.panel h2 {
+/* A panel's own heading, hence the child combinator. A heading nested deeper
+   sits in a layout of its own — the quote header puts one in a flex row beside
+   a badge, where this bottom margin would be part of the centred box and push
+   the heading's text off the badge's line. Same specificity as before, so
+   nothing else about the cascade changes. */
+.panel > h2 {
   margin: 0 0 var(--space-4);
   font-size: var(--type-md);
 }
