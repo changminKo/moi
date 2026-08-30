@@ -1,7 +1,9 @@
 import {
+  FakeCalendarSource,
   FakeConnectionLedger,
   FakeMarketData,
   FakeSnapshotSource,
+  type MarketCalendarSource,
   type MarketDataStream,
   type MarketSnapshotSource,
   OAuthTokenProvider,
@@ -17,6 +19,8 @@ export interface ProviderBundle {
   readonly kind: 'fake' | 'toss';
   streamFor(market: Market): MarketDataStream;
   readonly snapshots: MarketSnapshotSource;
+  /** Trading calendar behind `GET /api/v1/markets/:market/session` (§16.31). */
+  readonly calendar: MarketCalendarSource;
   readonly tokenProvider?: TokenProvider;
   /** Symbols each market subscribes to and snapshots on recovery. */
   readonly symbols: Readonly<Record<Market, readonly string[]>>;
@@ -29,6 +33,7 @@ export interface FakeProviderBundle extends ProviderBundle {
   readonly kind: 'fake';
   streamFor(market: Market): FakeMarketData;
   readonly snapshots: FakeSnapshotSource;
+  readonly calendar: FakeCalendarSource;
   readonly ledger: FakeConnectionLedger;
   connectCalls(): number;
   snapshotCalls(): number;
@@ -62,6 +67,7 @@ export function createFakeProviderBundle(
   const ledger = options.ledger ?? new FakeConnectionLedger();
   const streams = new Map<Market, FakeMarketData>();
   const snapshots = new FakeSnapshotSource();
+  const calendar = new FakeCalendarSource();
   snapshots.seedDefault('KR', '005930', '70000');
   snapshots.seedDefault('US', 'AAPL', '190.25');
   let connectCalls = 0;
@@ -78,6 +84,7 @@ export function createFakeProviderBundle(
     kind: 'fake',
     ledger,
     snapshots,
+    calendar,
     symbols: FAKE_SYMBOLS,
     streamFor: (market) => streams.get(market) as FakeMarketData,
     connectionsOpen: () => ledger.open,
@@ -135,6 +142,7 @@ export function createTossProviderBundle(
     kind: 'toss',
     tokenProvider,
     snapshots,
+    calendar: snapshots,
     symbols: options.symbols ?? TOSS_SYMBOLS,
     streamFor: (market) => streams.get(market) as TossWebSocketMarketData,
     connectionsOpen: () =>
