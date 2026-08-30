@@ -114,6 +114,15 @@ class PaperSystem {
 }
 
 export const test = base.extend<{ paperSystem: PaperSystem }>({
+  // The UI defaults to Korean; the journeys assert the English vocabulary, so
+  // every context seeds the persisted locale before any document loads. The
+  // locale spec clears this seed where it needs the real default.
+  context: async ({ context }, use) => {
+    await context.addInitScript(() => {
+      window.localStorage.setItem('moi.locale', 'en');
+    });
+    await use(context);
+  },
   paperSystem: async ({ request }, use) => {
     const state = JSON.parse(
       await readFile(stateFilePath, 'utf8'),

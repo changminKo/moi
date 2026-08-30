@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { formatDecimal } from '../../lib/format-number';
 
 export type Position = Readonly<Record<string, unknown>>;
@@ -9,23 +10,22 @@ export function PositionsTable({
 }: {
   positions?: readonly Position[];
 }) {
+  const { t } = useTranslation();
   return (
     <section className="panel" aria-labelledby="positions-title">
-      <h2 id="positions-title">Positions</h2>
+      <h2 id="positions-title">{t('positions.title')}</h2>
       {positions.length === 0 ? (
-        <p>No positions yet.</p>
+        <p>{t('positions.empty')}</p>
       ) : (
         <table>
-          <caption className="sr-only">
-            Available and reserved position quantities with average cost
-          </caption>
+          <caption className="sr-only">{t('positions.caption')}</caption>
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Available</th>
-              <th>Reserved</th>
-              <th>Total</th>
-              <th>Avg cost</th>
+              <th>{t('positions.symbol')}</th>
+              <th>{t('positions.available')}</th>
+              <th>{t('positions.reserved')}</th>
+              <th>{t('positions.total')}</th>
+              <th>{t('positions.avgCost')}</th>
             </tr>
           </thead>
           <tbody>

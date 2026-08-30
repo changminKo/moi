@@ -77,14 +77,14 @@ test('rejects placement while degraded, permits cancel, then labels a recovery f
   ).toBeDisabled();
   expect(await bypassOrderStatus(page, await mutationToken(page))).toBe(409);
 
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await page.getByRole('button', { name: 'Cancel' }).first().click();
   await expect
     .poll(() => paperSystem.orderStatus(cancelOrderId))
     .toBe('CANCELLED');
 
   await paperSystem.recover();
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await page.reload();
   await expect
     .poll(() => paperSystem.orderStatus(recoveryOrderId))
@@ -122,7 +122,7 @@ test('emergency latch enforces cancel-only while preserving cancellation', async
     return response.status;
   }, csrfToken);
   expect(fxStatus).toBe(409);
-  await page.getByRole('link', { name: '포트폴리오' }).click();
+  await page.getByRole('link', { name: 'Portfolio' }).click();
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect.poll(() => paperSystem.orderStatus(orderId)).toBe('CANCELLED');
 });

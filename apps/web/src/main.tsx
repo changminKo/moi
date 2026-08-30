@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './app';
 import { SessionProvider } from './features/session/session-provider';
+import './lib/i18n';
 import { queryClient } from './lib/query-client';
 import './styles/tokens.css';
 import './styles/fonts.css';

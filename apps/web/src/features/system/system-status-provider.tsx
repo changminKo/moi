@@ -36,8 +36,22 @@ const reasonText: Record<string, string> = {
   SYMBOL_NOT_TRADABLE: 'This instrument is not tradable',
 };
 
-export function presentationForReason(reason: string): string {
-  const text = reasonText[reason];
+const reasonTextKo: Record<string, string> = {
+  MARKET_DATA_DEGRADED: '시세가 지연되고 있습니다',
+  RECOVERY_IN_PROGRESS: '복구가 진행 중입니다',
+  CANCEL_ONLY: '안전 모드: 취소만 가능합니다',
+  ACCOUNT_READ_ONLY: '계정 보호 잠금',
+  UNAVAILABLE: '서비스를 이용할 수 없습니다',
+  SERVICE_UNAVAILABLE: '서비스를 이용할 수 없습니다',
+  SESSION_EXPIRED: '세션이 만료되었습니다 — 새 세션을 시작하세요',
+  SYMBOL_NOT_TRADABLE: '거래할 수 없는 종목입니다',
+};
+
+export function presentationForReason(
+  reason: string,
+  locale: 'ko' | 'en' = 'en',
+): string {
+  const text = locale === 'ko' ? reasonTextKo[reason] : reasonText[reason];
   if (!text) throw new Error(`Unknown trading reason code: ${reason}`);
   return text;
 }
@@ -121,7 +135,9 @@ export function SystemStatusProvider({
       .get<TradingHealth>(`/api/v1/health/trading${query}`)
       .then((health) => {
         const reasons = [...(health.reasonCodes ?? health.reasons ?? [])];
-        reasons.forEach(presentationForReason);
+        for (const reason of reasons) {
+          presentationForReason(reason);
+        }
         setState({
           availability: composeTradingAvailability(health),
           reasons,

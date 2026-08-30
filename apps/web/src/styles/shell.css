@@ -87,6 +87,30 @@ nav {
   box-shadow: 0 0 0.6rem currentColor;
 }
 
+.locale-switch {
+  display: inline-flex;
+  margin: 0;
+  border: 0;
+  gap: 2px;
+  padding: 2px;
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-pill);
+}
+
+.locale-option {
+  padding: var(--space-1) var(--space-3);
+  color: var(--color-muted);
+  background: transparent;
+  border-radius: var(--radius-pill);
+  font-size: var(--type-xs);
+  cursor: pointer;
+}
+
+.locale-option[aria-pressed="true"] {
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+}
+
 main {
   max-width: var(--layout-max);
   margin: 0 auto;

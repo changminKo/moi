@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { Instrument } from '../../lib/api-types';
 import './instrument-search.css';
 
@@ -17,18 +18,19 @@ export function InstrumentSearch({
   onSelect: (instrument: Instrument) => void;
   selected?: Instrument | null;
 }) {
+  const { t } = useTranslation();
   return (
     <section
       aria-labelledby="instrument-search-title"
       className="panel instrument-search"
     >
-      <h2 id="instrument-search-title">Instrument search</h2>
-      <label htmlFor="instrument-search">Search</label>
+      <h2 id="instrument-search-title">{t('instruments.title')}</h2>
+      <label htmlFor="instrument-search">{t('instruments.searchLabel')}</label>
       <input
         id="instrument-search"
         value={query}
         onChange={(e) => onQuery(e.target.value)}
-        placeholder="Search symbols"
+        placeholder={t('instruments.searchPlaceholder')}
       />
       <ul className="instrument-list">
         {instruments.map((instrument) => (
@@ -45,7 +47,10 @@ export function InstrumentSearch({
               <span className="instrument-symbol">({instrument.symbol})</span>
             </button>
             {!instrument.tradable && (
-              <span className="status-badge"> non-tradable</span>
+              <span className="status-badge">
+                {' '}
+                {t('instruments.nonTradable')}
+              </span>
             )}
           </li>
         ))}

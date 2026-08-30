@@ -1,8 +1,10 @@
 import Decimal from 'decimal.js';
 import { useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import { formatDecimal } from '../../lib/format-number';
+import { useAppLocale } from '../../lib/i18n';
 import { presentationForReason } from '../system/system-status-provider';
 import { useOrderMutations } from './use-order-mutations';
 
@@ -18,6 +20,8 @@ export function OpenOrders({
   apiClient?: ApiClient;
   capability?: { canCancel: boolean; reasonCodes: readonly string[] };
 }) {
+  const { t } = useTranslation();
+  const locale = useAppLocale();
   const { cancel } = useOrderMutations(apiClient);
   const pending = useRef(new Map<string, Promise<unknown>>());
   const [error, setError] = useState('');
@@ -28,7 +32,7 @@ export function OpenOrders({
       .mutateAsync(id)
       .catch((failure: unknown) => {
         setError(
-          failure instanceof Error ? failure.message : 'Cancellation failed',
+          failure instanceof Error ? failure.message : t('orders.cancelFailed'),
         );
         throw failure;
       })
@@ -38,15 +42,15 @@ export function OpenOrders({
   };
   return (
     <section className="panel" aria-labelledby="open-orders-title">
-      <h2 id="open-orders-title">Open orders</h2>
+      <h2 id="open-orders-title">{t('orders.title')}</h2>
       {capability.reasonCodes.map((reason) => (
         <p key={reason} role="status">
-          {presentationForReason(reason)}
+          {presentationForReason(reason, locale)}
         </p>
       ))}
       {error && <p role="alert">{error}</p>}
       {orders.length === 0 ? (
-        <p>No open orders.</p>
+        <p>{t('orders.empty')}</p>
       ) : (
         <ul>
           {orders.map((order) => {
@@ -64,7 +68,8 @@ export function OpenOrders({
                   {text(order, 'symbol')} {status}
                 </span>
                 <span>
-                  Filled {formatDecimal(filled)} / Remaining{' '}
+                  {t('orders.filled')} {formatDecimal(filled)} /{' '}
+                  {t('orders.remaining')}{' '}
                   {formatDecimal(
                     quantity && filled !== quantity
                       ? new Decimal(quantity).sub(filled).toString()
@@ -72,7 +77,10 @@ export function OpenOrders({
                   )}
                 </span>
                 {siblings?.length ? (
-                  <span> OCO sibling: {siblings.join(', ')}</span>
+                  <span>
+                    {' '}
+                    {t('orders.ocoSibling')}: {siblings.join(', ')}
+                  </span>
                 ) : null}
                 {!isTerminal && capability.canCancel && (
                   <button
@@ -80,7 +88,7 @@ export function OpenOrders({
                     onClick={() => void cancelOnce(id)}
                     disabled={cancel.isPending && cancel.variables === id}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
               </li>

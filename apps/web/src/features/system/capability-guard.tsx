@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useAppLocale } from '../../lib/i18n';
 import {
   presentationForReason,
   useTradingStatus,
@@ -11,12 +13,15 @@ export function CapabilityGuard({
   children: ReactNode;
 }) {
   const { availability } = useTradingStatus();
+  const { t } = useTranslation();
+  const locale = useAppLocale();
   const capability = availability[action];
   if (capability.enabled) return <>{children}</>;
   return (
     <p role="status">
-      {capability.reasons.map(presentationForReason).join(' · ') ||
-        'Action unavailable'}
+      {capability.reasons
+        .map((reason) => presentationForReason(reason, locale))
+        .join(' · ') || t('guard.unavailable')}
     </p>
   );
 }
