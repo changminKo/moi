@@ -15,6 +15,10 @@
   margin: 0;
   color: var(--color-muted);
   font-size: var(--type-body);
+  /* Matches the badge's line box so `align-items: center` centres the two on
+     the same optical line; the display face's tall ascenders would otherwise
+     push the heading's box below the pill. */
+  line-height: 1.2;
 }
 
 .quote-price {
