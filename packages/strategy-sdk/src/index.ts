@@ -1,6 +1,10 @@
 export {
   assertPlaceOrderCommand,
   type Broker,
+  type BrokerOrder,
+  type BrokerPortfolio,
+  type BrokerPosition,
+  type BrokerWallet,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
@@ -10,7 +14,6 @@ export {
   type PlaceOrderCommand,
   type PlaceStopOrderCommand,
   type PlaceTakeProfitOrderCommand,
-  type PortfolioSnapshot,
   readCancelOrderCommand,
   readExchangeCommand,
   readPlaceOrderCommand,

@@ -93,6 +93,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@moi/strategy-sdk':
+        specifier: workspace:*
+        version: link:../../packages/strategy-sdk
       '@testcontainers/postgresql':
         specifier: 12.1.0
         version: 12.1.0

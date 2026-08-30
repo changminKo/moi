@@ -4,8 +4,16 @@ import type {
   PortfolioSnapshot,
 } from './portfolio-schemas.js';
 
+/**
+ * The repository reads rows; it does not echo its own argument back. Naming the
+ * session is the service's job (`snapshot` below), so the read type is the
+ * response minus that field — which also keeps the required `sessionId` on
+ * `PortfolioSnapshot` from being satisfiable by accident.
+ */
+export type PortfolioReadSnapshot = Omit<PortfolioSnapshot, 'sessionId'>;
+
 export interface PortfolioReadTransaction {
-  readonly snapshot: (sessionId: string) => Promise<PortfolioSnapshot>;
+  readonly snapshot: (sessionId: string) => Promise<PortfolioReadSnapshot>;
   readonly listOrders: (
     sessionId: string,
     query: PortfolioQuery,
@@ -49,8 +57,17 @@ export class PortfolioService {
       });
   }
 
-  snapshot(sessionId: string): Promise<PortfolioSnapshot> {
-    return this.#runSnapshot((tx) => tx.snapshot(sessionId));
+  /**
+   * The payload names the session it belongs to. A client holds its session in
+   * a cookie the transport owns, so without this it cannot check that the
+   * account it just read is the account it thinks it is — and a portfolio
+   * silently belonging to another session is the one mix-up that must never
+   * pass quietly. The value is the caller's own id, so naming it discloses
+   * nothing the caller did not already hold.
+   */
+  async snapshot(sessionId: string): Promise<PortfolioSnapshot> {
+    const snapshot = await this.#runSnapshot((tx) => tx.snapshot(sessionId));
+    return { ...snapshot, sessionId };
   }
 
   listOrders(

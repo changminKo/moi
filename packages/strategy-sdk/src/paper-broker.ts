@@ -3,19 +3,23 @@ import {
   type DecimalString,
   DomainError,
   type DomainErrorCode,
-  type OrderSnapshot,
+  type Market,
   type OrderStatus,
-  type PositionSnapshot,
+  type OrderType,
   type Quantity,
-  type WalletSnapshot,
 } from '@moi/trading-core';
 import {
   type Broker,
+  type BrokerFill,
+  type BrokerOrder,
+  type BrokerPortfolio,
+  type BrokerPortfolioOrder,
+  type BrokerPosition,
+  type BrokerWallet,
   type CancelOrderCommand,
   type ExchangeCommand,
   type ExchangeReceipt,
   type PlaceOrderCommand,
-  type PortfolioSnapshot,
   readCancelOrderCommand,
   readExchangeCommand,
   readPlaceOrderCommand,
@@ -35,8 +39,15 @@ const PORTFOLIO_PATH = '/api/v1/portfolio';
 
 /**
  * The paths this adapter is allowed to reach. There is no configurable base
- * path, so a strategy written against `PaperBroker` cannot be pointed at a live
- * venue by changing configuration.
+ * path, so a strategy cannot make this adapter request an endpoint the paper
+ * API does not serve.
+ *
+ * What this does **not** do is pin the host: `PaperBrokerTransport` builds the
+ * URL, so the origin is the transport's to choose and a misconfigured one
+ * reaches whatever it names. Keeping a strategy off a live venue is therefore
+ * the transport's obligation — pin the origin there against an allow-list — and
+ * an earlier version of this comment claimed the path union alone achieved it,
+ * which it never did.
  */
 export type PaperBrokerPath =
   | typeof ORDERS_PATH
@@ -71,6 +82,7 @@ const DOMAIN_ERROR_CODES: Readonly<Record<DomainErrorCode, true>> = {
   ACCOUNT_READ_ONLY: true,
   CANCEL_ONLY: true,
   CAPACITY_REACHED: true,
+  FORBIDDEN: true,
   IDEMPOTENCY_CONFLICT: true,
   INSUFFICIENT_AVAILABLE_CASH: true,
   INSUFFICIENT_AVAILABLE_POSITION: true,
@@ -85,6 +97,7 @@ const DOMAIN_ERROR_CODES: Readonly<Record<DomainErrorCode, true>> = {
   RATE_LIMITED: true,
   RECOVERY_IN_PROGRESS: true,
   SERVICE_UNAVAILABLE: true,
+  SESSION_EXPIRED: true,
   SYMBOL_NOT_TRADABLE: true,
 };
 
@@ -102,6 +115,8 @@ const ORDER_STATUSES: Readonly<Record<OrderStatus, true>> = {
 
 const CURRENCIES: Readonly<Record<Currency, true>> = { KRW: true, USD: true };
 
+const MARKETS: Readonly<Record<Market, true>> = { KR: true, US: true };
+
 const isDomainErrorCode = (code: string): code is DomainErrorCode =>
   Object.hasOwn(DOMAIN_ERROR_CODES, code);
 
@@ -110,6 +125,20 @@ const isOrderStatus = (status: string): status is OrderStatus =>
 
 const isCurrency = (currency: string): currency is Currency =>
   Object.hasOwn(CURRENCIES, currency);
+
+const isMarket = (market: string): market is Market =>
+  Object.hasOwn(MARKETS, market);
+
+const ORDER_TYPES: Readonly<Record<OrderType, true>> = {
+  MARKET: true,
+  LIMIT: true,
+  STOP: true,
+  TAKE_PROFIT: true,
+  OCO: true,
+};
+
+const isOrderType = (type: string): type is OrderType =>
+  Object.hasOwn(ORDER_TYPES, type);
 
 /**
  * A response the paper API should never produce is a broken contract, not a
@@ -179,10 +208,6 @@ function readInstant(value: unknown, description: string): string {
   return value;
 }
 
-function readVersion(value: unknown, description: string): bigint {
-  return BigInt(readWholeNumber(value, description));
-}
-
 function readArray(value: unknown, description: string): readonly unknown[] {
   if (!Array.isArray(value)) {
     malformed(description);
@@ -191,7 +216,7 @@ function readArray(value: unknown, description: string): readonly unknown[] {
   return value;
 }
 
-function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
+function decodeOrder(payload: unknown): BrokerOrder {
   const body = readObject(payload, 'order snapshot');
   const status = readString(body.status, 'order status');
 
@@ -199,10 +224,9 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
     malformed('order status');
   }
 
-  const base: OrderSnapshot = {
+  const base: BrokerOrder = {
     id: readString(body.id, 'order id'),
     status,
-    version: readVersion(body.version, 'order version'),
   };
   // One read per optional field, for the same reason the command side reads each
   // caller field once: a response body is an object too, so its fields may be
@@ -216,20 +240,110 @@ function decodeOrderSnapshot(payload: unknown): OrderSnapshot {
     suppliedFilledQuantity === undefined
       ? undefined
       : readQuantity(suppliedFilledQuantity, 'filled quantity');
+  // `terminal_reason` is the one nullable column behind an order row, so it is
+  // the one field whose absence the API spells `null`; a write response omits
+  // the key instead. Both mean absent, and reading only `undefined` that way
+  // failed every portfolio containing an order that ended normally. Every other
+  // field stays fail-closed: `null` there is malformed, not absent.
+  const terminalReason =
+    suppliedTerminalReason === null ? undefined : suppliedTerminalReason;
 
-  if (
-    suppliedTerminalReason !== undefined &&
-    suppliedTerminalReason !== 'IOC_REMAINDER'
-  ) {
+  if (terminalReason !== undefined && terminalReason !== 'IOC_REMAINDER') {
+    malformed('order terminal reason');
+  }
+
+  const suppliedQuantity = body.quantity;
+  const quantity =
+    suppliedQuantity === undefined
+      ? undefined
+      : readQuantity(suppliedQuantity, 'order quantity');
+  return {
+    ...base,
+    ...(quantity === undefined ? {} : { quantity }),
+    ...(filledQuantity === undefined ? {} : { filledQuantity }),
+    ...(terminalReason === undefined
+      ? {}
+      : { terminalReason: 'IOC_REMAINDER' as const }),
+  };
+}
+
+function decodeFill(payload: unknown): BrokerFill {
+  const body = readObject(payload, 'fill');
+
+  return {
+    id: readString(body.id, 'fill id'),
+    symbol: readString(body.symbol, 'fill symbol'),
+    quantity: readQuantity(body.quantity, 'fill quantity'),
+    price: readMoneyAmount(body.price, 'fill price'),
+    fee: readMoneyAmount(body.fee, 'fill fee'),
+    recoveryFill: body.recoveryFill === true,
+  };
+}
+
+/**
+ * The portfolio's own order shape. It carries what a write response does not —
+ * market, symbol, type, side, prices, fills, OCO siblings — and a strategy
+ * cannot recognise its own orders without them.
+ */
+function decodePortfolioOrder(payload: unknown): BrokerPortfolioOrder {
+  const body = readObject(payload, 'portfolio order');
+  const status = readString(body.status, 'order status');
+
+  if (!isOrderStatus(status)) {
+    malformed('order status');
+  }
+
+  const type = readString(body.type, 'order type');
+
+  if (!isOrderType(type)) {
+    malformed('order type');
+  }
+
+  const side = readString(body.side, 'order side');
+
+  if (side !== 'BUY' && side !== 'SELL') {
+    malformed('order side');
+  }
+
+  // Same absence policy as the write response: the API sends `null` for a
+  // nullable column, and only a wrong value is malformed.
+  const suppliedLimitPrice = body.limitPrice;
+  const suppliedStopPrice = body.stopPrice;
+  const suppliedTerminalReason = body.terminalReason;
+  const limitPrice =
+    suppliedLimitPrice === undefined || suppliedLimitPrice === null
+      ? undefined
+      : readMoneyAmount(suppliedLimitPrice, 'order limit price');
+  const stopPrice =
+    suppliedStopPrice === undefined || suppliedStopPrice === null
+      ? undefined
+      : readMoneyAmount(suppliedStopPrice, 'order stop price');
+  const terminalReason =
+    suppliedTerminalReason === null ? undefined : suppliedTerminalReason;
+
+  if (terminalReason !== undefined && terminalReason !== 'IOC_REMAINDER') {
     malformed('order terminal reason');
   }
 
   return {
-    ...base,
-    ...(filledQuantity === undefined ? {} : { filledQuantity }),
-    ...(suppliedTerminalReason === undefined
+    id: readString(body.id, 'order id'),
+    market: decodeMarket(body.market, 'order market'),
+    symbol: readString(body.symbol, 'order symbol'),
+    type,
+    side,
+    quantity: readQuantity(body.quantity, 'order quantity'),
+    filledQuantity: readQuantity(body.filledQuantity, 'order filled quantity'),
+    status,
+    ...(limitPrice === undefined ? {} : { limitPrice }),
+    ...(stopPrice === undefined ? {} : { stopPrice }),
+    ...(terminalReason === undefined
       ? {}
       : { terminalReason: 'IOC_REMAINDER' as const }),
+    fills: readArray(body.fills ?? [], 'order fills').map(decodeFill),
+    siblingOrderIds: readArray(
+      body.siblingOrderIds ?? [],
+      'order sibling ids',
+    ).map((id) => readString(id, 'order sibling id')),
   };
 }
 
@@ -243,7 +357,17 @@ function decodeCurrency(payload: unknown, description: string): Currency {
   return currency;
 }
 
-function decodeWallet(payload: unknown): WalletSnapshot {
+function decodeMarket(payload: unknown, description: string): Market {
+  const market = readString(payload, description);
+
+  if (!isMarket(market)) {
+    malformed(description);
+  }
+
+  return market;
+}
+
+function decodeWallet(payload: unknown): BrokerWallet {
   const body = readObject(payload, 'wallet snapshot');
 
   return {
@@ -251,19 +375,21 @@ function decodeWallet(payload: unknown): WalletSnapshot {
     total: readMoneyAmount(body.total, 'wallet total'),
     available: readMoneyAmount(body.available, 'wallet available'),
     reserved: readMoneyAmount(body.reserved, 'wallet reserved'),
-    version: readVersion(body.version, 'wallet version'),
   };
 }
 
-function decodePosition(payload: unknown): PositionSnapshot {
+function decodePosition(payload: unknown): BrokerPosition {
   const body = readObject(payload, 'position snapshot');
 
   return {
+    market: decodeMarket(body.market, 'position market'),
     symbol: readString(body.symbol, 'position symbol'),
     total: readQuantity(body.total, 'position total'),
     available: readQuantity(body.available, 'position available'),
     reserved: readQuantity(body.reserved, 'position reserved'),
-    version: readVersion(body.version, 'position version'),
+    // A position values what it holds, so its average cost is money the
+    // strategy sizes and marks against — never a JS number.
+    averageCost: readMoneyAmount(body.averageCost, 'position average cost'),
   };
 }
 
@@ -313,10 +439,10 @@ function readSessionId(
   return sessionId;
 }
 
-function decodePortfolioSnapshot(
+function decodePortfolio(
   payload: unknown,
   expectedSessionId: string,
-): PortfolioSnapshot {
+): BrokerPortfolio {
   const body = readObject(payload, 'portfolio snapshot');
   const sessionId = readSessionId(
     body.sessionId,
@@ -337,7 +463,12 @@ function decodePortfolioSnapshot(
   const positions = readArray(body.positions, 'portfolio positions').map(
     decodePosition,
   );
-  const symbols = new Set(positions.map((position) => position.symbol));
+  // The ledger keys a position by `(session_id, market_code, symbol)`, so the
+  // same ticker can legitimately exist in both markets; deduping on the symbol
+  // alone would reject a portfolio the ledger considers perfectly valid.
+  const symbols = new Set(
+    positions.map((position) => `${position.market}:${position.symbol}`),
+  );
 
   // The same guard for positions: trading-core's own account invariant allows
   // at most one position per symbol, so a duplicate double-counts an exposure.
@@ -350,7 +481,7 @@ function decodePortfolioSnapshot(
     wallets,
     positions,
     activeOrders: readArray(body.activeOrders, 'portfolio orders').map(
-      decodeOrderSnapshot,
+      decodePortfolioOrder,
     ),
     // A sequence counts durable effects, so it is a whole number, not a rate.
     accountSequence: readWholeNumber(
@@ -373,8 +504,18 @@ function fallbackCode(status: number): DomainErrorCode {
     return 'INVARIANT_VIOLATION';
   }
 
-  if (status === 401 || status === 403) {
-    return 'ACCOUNT_READ_ONLY';
+  // 401 and 403 are different recoveries and must not be collapsed. An expired
+  // session is re-established and the write retried under its unchanged key;
+  // a forbidden request is the account itself refusing, and retrying it is
+  // exactly the loop that must not happen. The paper API names both
+  // (`SESSION_EXPIRED` 401, `FORBIDDEN` 403 in the error contract), so this
+  // fallback only decides when the envelope carried no code at all.
+  if (status === 401) {
+    return 'SESSION_EXPIRED';
+  }
+
+  if (status === 403) {
+    return 'FORBIDDEN';
   }
 
   // 408 and 425 are transient by definition, and every write carries an
@@ -465,26 +606,57 @@ export class PaperBroker implements Broker {
     this.#transport = transport;
   }
 
-  async placeOrder(command: PlaceOrderCommand): Promise<OrderSnapshot> {
+  async placeOrder(command: PlaceOrderCommand): Promise<BrokerOrder> {
     // The snapshot the price rules were applied to, not the caller's object: a
     // command's fields may be accessors, and a second read of an accessor is a
     // second call into caller code that need not answer the same way.
     const validated = readPlaceOrderCommand(command);
 
-    const body = {
+    const common = {
       market: validated.market,
       symbol: validated.symbol,
       side: validated.side,
-      type: validated.type,
       quantity: validated.quantity,
-      // The snapshot is plain own data with no prototype, so this is the same
-      // policy over the same values the validator saw: the wire carries exactly
-      // the price fields it inspected — never one more, and never one fewer.
-      ...projectOptionalField(validated, 'limitPrice'),
-      ...projectOptionalField(validated, 'triggerPrice'),
     };
+    // `placeOrderSchema` is `.strict()`, so the body carries the fields that
+    // type accepts and no others. An OCO is the one type whose request shape
+    // differs from the command's: the API takes two explicit legs, so the pair
+    // the command expresses flatly is expanded here rather than on the server.
+    const body =
+      validated.type === 'OCO'
+        ? {
+            ...common,
+            type: 'OCO' as const,
+            // `PLACE_ORDER_PRICE_RULES` marks both prices `required` for an
+            // OCO and `readPlaceOrderCommand` has already enforced it, so the
+            // legs project the validated fields rather than re-asserting their
+            // type — a cast here would re-open exactly what the validator
+            // closed.
+            legs: [
+              {
+                ...common,
+                type: 'LIMIT' as const,
+                ...projectOptionalField(validated, 'limitPrice'),
+              },
+              {
+                ...common,
+                type: 'STOP' as const,
+                ...projectOptionalField(validated, 'stopPrice'),
+              },
+            ],
+          }
+        : {
+            ...common,
+            type: validated.type,
+            // The snapshot is plain own data with no prototype, so this is the
+            // same policy over the same values the validator saw: the wire
+            // carries exactly the price fields it inspected — never one more,
+            // and never one fewer.
+            ...projectOptionalField(validated, 'limitPrice'),
+            ...projectOptionalField(validated, 'stopPrice'),
+          };
 
-    return decodeOrderSnapshot(
+    return decodeOrder(
       await this.#send({
         method: 'POST',
         path: ORDERS_PATH,
@@ -494,10 +666,10 @@ export class PaperBroker implements Broker {
     );
   }
 
-  async cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot> {
+  async cancelOrder(command: CancelOrderCommand): Promise<BrokerOrder> {
     const { idempotencyKey, orderId } = readCancelOrderCommand(command);
 
-    return decodeOrderSnapshot(
+    return decodeOrder(
       await this.#send({
         method: 'DELETE',
         path: `${ORDERS_PATH}/${encodeURIComponent(orderId)}`,
@@ -520,10 +692,10 @@ export class PaperBroker implements Broker {
     );
   }
 
-  async getPortfolio(sessionId: string): Promise<PortfolioSnapshot> {
+  async getPortfolio(sessionId: string): Promise<BrokerPortfolio> {
     assertIdentifier(sessionId, 'sessionId');
 
-    return decodePortfolioSnapshot(
+    return decodePortfolio(
       await this.#send({ method: 'GET', path: PORTFOLIO_PATH }),
       sessionId,
     );

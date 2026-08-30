@@ -48,16 +48,16 @@ const wallet = (overrides: Record<string, unknown> = {}): unknown => ({
   total: '1000',
   available: '1000',
   reserved: '0',
-  version: '1',
   ...overrides,
 });
 
 const position = (overrides: Record<string, unknown> = {}): unknown => ({
+  market: 'US',
   symbol: 'AAPL',
   total: '3',
   available: '3',
   reserved: '0',
-  version: '1',
+  averageCost: '190.2500',
   ...overrides,
 });
 
@@ -156,7 +156,7 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     'rejects a filled quantity of %s',
     async (filledQuantity) => {
       const broker = new PaperBroker(
-        ok({ id: 'order-1', status: 'OPEN', version: '1', filledQuantity }),
+        ok({ id: 'order-1', status: 'OPEN', filledQuantity }),
       );
 
       await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
@@ -196,6 +196,39 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     expect(decoded.targetAmount).toBe('750');
   });
 
+  // `terminal_reason` is the one nullable column behind an order row, so it is
+  // the only field whose absence the API spells `null`; a write response omits
+  // the key instead. Both are absence — for that field alone.
+  it('reads a null terminal reason as absent rather than as malformed', async () => {
+    const snapshot = await new PaperBroker(
+      ok({ id: 'order-1', status: 'OPEN', terminalReason: null }),
+    ).placeOrder(marketBuy);
+
+    expect(snapshot).toStrictEqual({ id: 'order-1', status: 'OPEN' });
+  });
+
+  // `filled_quantity` is `not null default 0` and the repository coerces it, so
+  // a null there is a broken contract, not an absence. Fail closed (rule 6).
+  it('rejects a null filled quantity instead of treating it as absent', async () => {
+    const broker = new PaperBroker(
+      ok({ id: 'order-1', status: 'OPEN', filledQuantity: null }),
+    );
+
+    await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
+      'INVARIANT_VIOLATION',
+    );
+  });
+
+  it('still rejects a terminal reason the domain does not define', async () => {
+    const broker = new PaperBroker(
+      ok({ id: 'order-1', status: 'OPEN', terminalReason: 'GAVE_UP' }),
+    );
+
+    await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
+      'INVARIANT_VIOLATION',
+    );
+  });
+
   it('rejects two wallets of the same currency', async () => {
     const broker = new PaperBroker(
       ok(portfolio({ wallets: [wallet(), wallet()] })),
@@ -232,7 +265,6 @@ describe('PaperBroker decodes the order snapshot it validated', () => {
     const body: Record<string, unknown> = {
       id: 'order-decode-1',
       status: 'OPEN',
-      version: '1',
     };
 
     Object.defineProperty(body, field, {
@@ -259,7 +291,6 @@ describe('PaperBroker decodes the order snapshot it validated', () => {
     expect(snapshot).toStrictEqual({
       id: 'order-decode-1',
       status: 'OPEN',
-      version: 1n,
     });
     expect(reads()).toBe(1);
   });
@@ -275,7 +306,6 @@ describe('PaperBroker decodes the order snapshot it validated', () => {
     expect(snapshot).toStrictEqual({
       id: 'order-decode-1',
       status: 'OPEN',
-      version: 1n,
       terminalReason: 'IOC_REMAINDER',
     });
     expect(reads()).toBe(1);
@@ -289,7 +319,6 @@ describe('PaperBroker decodes the order snapshot it validated', () => {
     expect(snapshot).toStrictEqual({
       id: 'order-decode-1',
       status: 'OPEN',
-      version: 1n,
       filledQuantity: '2',
     });
     expect(reads()).toBe(1);
@@ -317,7 +346,7 @@ describe('PaperBroker scopes every response to the requested session', () => {
 });
 
 describe('PaperBroker guards every public method at the runtime boundary', () => {
-  const orderResponse = ok({ id: 'order-1', status: 'OPEN', version: '1' });
+  const orderResponse = ok({ id: 'order-1', status: 'OPEN' });
 
   it.each([
     ['a number', 12345],
@@ -389,7 +418,7 @@ describe('PaperBroker guards every public method at the runtime boundary', () =>
       request: async (request) => {
         paths.push(request.path);
 
-        return { status: 200, body: { id: 'o', status: 'OPEN', version: '1' } };
+        return { status: 200, body: { id: 'o', status: 'OPEN' } };
       },
     });
 
@@ -450,7 +479,7 @@ describe('PaperBroker guards the transport answer itself', () => {
     ['a string', '200'],
   ])('rejects %s status', async (_label, status) => {
     const broker = new PaperBroker(
-      answering({ status, body: { id: 'o', status: 'OPEN', version: '1' } }),
+      answering({ status, body: { id: 'o', status: 'OPEN' } }),
     );
 
     await expect(codeOf(() => broker.placeOrder(marketBuy))).resolves.toBe(
@@ -462,8 +491,10 @@ describe('PaperBroker guards the transport answer itself', () => {
 describe('PaperBroker classifies transport statuses', () => {
   const CASES: readonly (readonly [number, string, boolean])[] = [
     [400, 'INVALID_ORDER', false],
-    [401, 'ACCOUNT_READ_ONLY', false],
-    [403, 'ACCOUNT_READ_ONLY', false],
+    // 401 and 403 must not collapse: one is re-authenticate, the other is the
+    // account refusing, and the recoveries are opposites.
+    [401, 'SESSION_EXPIRED', false],
+    [403, 'FORBIDDEN', false],
     [404, 'INVALID_ORDER', false],
     [408, 'SERVICE_UNAVAILABLE', true],
     [409, 'ORDER_STATE_CONFLICT', false],

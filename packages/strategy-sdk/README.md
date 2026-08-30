@@ -15,7 +15,7 @@ a compile error rather than a server rejection. The price rules are not a
 preference — they mirror trading-core's executable gates, and
 `src/broker.test.ts` pins them against those gates so drift fails CI:
 
-| `type` | `limitPrice` | `triggerPrice` |
+| `type` | `limitPrice` | `stopPrice` |
 | --- | --- | --- |
 | `MARKET` | forbidden | forbidden |
 | `LIMIT` | required | forbidden |
@@ -33,17 +33,21 @@ compile time to runtime.
 
 ## OCO is a request shape, not a reservable order
 
-`PlaceOcoOrderCommand` is a single command that the server desugars into the
-two-leg group trading-core actually models: `limitPrice` becomes the `LIMIT`
-leg's limit price and `triggerPrice` becomes the triggered leg's reference
-price, which is exactly the pair `planOcoReservation` accepts. trading-core
+`PlaceOcoOrderCommand` is a single command for the two-leg group trading-core
+actually models. The server does **not** desugar it: `POST /api/v1/orders`
+requires an explicit two-element `legs` array and its schema is `.strict()`, so
+`PaperBroker` expands the pair on the wire — `limitPrice` becomes the `LIMIT`
+leg's limit price and `stopPrice` becomes the `STOP` leg's stop price, which is
+exactly the pair `planOcoReservation` accepts. trading-core
 excludes `'OCO'` from single-order reservation
 (`ReservationOrder.type: Exclude<OrderType, 'OCO'>`), so an OCO placement is
 only ever the group.
 
-**Known limitation.** `Broker.placeOrder` returns one `OrderSnapshot`, so an OCO
+**Known limitation.** `Broker.placeOrder` returns one `BrokerOrder`, so an OCO
 placement cannot name its sibling leg or its group id, and `CancelOrderCommand`
-addresses a single `orderId` rather than a group. A strategy that needs to track
+addresses a single `orderId` rather than a group — though a cancel's answer does
+carry `cancelledOrderIds`, so a strategy learns after the fact that the sibling
+went with it. A strategy that needs to track
 or cancel both legs individually should place two separate orders — a `LIMIT`
 and a `STOP` or `TAKE_PROFIT` — and manage the either-or itself.
 
@@ -54,7 +58,7 @@ cookie, and no command's `sessionId` is ever put on the wire. `sessionId` is a
 scoping assertion, checked back against every response that names a session —
 `getPortfolio` against the returned portfolio and `exchange` against the
 receipt, both failing with `INVARIANT_VIOLATION` on a mismatch. `placeOrder` and
-`cancelOrder` return an `OrderSnapshot`, which carries no session, so there is
+`cancelOrder` return a `BrokerOrder`, which carries no session, so there is
 nothing to compare. Use one broker per session rather than multiplexing
 accounts over one instance.
 
@@ -79,7 +83,8 @@ status:
 | Status | Code | Retryable |
 | --- | --- | --- |
 | `3xx` | `INVARIANT_VIOLATION` | no |
-| `401`, `403` | `ACCOUNT_READ_ONLY` | no |
+| `401` | `SESSION_EXPIRED` | no |
+| `403` | `FORBIDDEN` | no |
 | `408`, `425` | `SERVICE_UNAVAILABLE` | yes |
 | `409` | `ORDER_STATE_CONFLICT` | no |
 | `429` | `RATE_LIMITED` | yes |

@@ -4,12 +4,10 @@ import {
   type DecimalString,
   DomainError,
   type Market,
-  type OrderSnapshot,
+  type OrderStatus,
   type OrderType,
-  type PositionSnapshot,
   type Quantity,
   type Side,
-  type WalletSnapshot,
 } from '@moi/trading-core';
 
 import {
@@ -41,14 +39,14 @@ interface PlaceOrderCommandBase {
 export interface PlaceMarketOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'MARKET';
   readonly limitPrice?: never;
-  readonly triggerPrice?: never;
+  readonly stopPrice?: never;
 }
 
 /** A limit order is defined by its limit price, so the price is required. */
 export interface PlaceLimitOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'LIMIT';
   readonly limitPrice: DecimalString;
-  readonly triggerPrice?: never;
+  readonly stopPrice?: never;
 }
 
 /**
@@ -60,28 +58,30 @@ export interface PlaceLimitOrderCommand extends PlaceOrderCommandBase {
  */
 export interface PlaceStopOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'STOP';
-  readonly triggerPrice: DecimalString;
+  readonly stopPrice: DecimalString;
   readonly limitPrice?: never;
 }
 
 /** Take-profit mirrors stop: a trigger, and no limit price, for the same reason. */
 export interface PlaceTakeProfitOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'TAKE_PROFIT';
-  readonly triggerPrice: DecimalString;
+  readonly stopPrice: DecimalString;
   readonly limitPrice?: never;
 }
 
 /**
  * OCO pairs a limit leg with a triggered leg, so both prices are required.
  *
- * This is a single-command *request* shape that the server desugars into the
- * two-leg group trading-core models: `limitPrice` becomes the `LIMIT` leg's
- * limit price and `triggerPrice` becomes the triggered leg's reference price,
- * which is exactly what `planOcoReservation` accepts. trading-core excludes
- * `'OCO'` from single-order reservation (`Exclude<OrderType, 'OCO'>`), so an
- * OCO placement is only ever the group.
+ * This is a single-command *request* shape. The server does **not** desugar it:
+ * `POST /api/v1/orders` requires an explicit two-element `legs` array for an
+ * OCO (`placeOrderSchema`, and the schema is `.strict()`), so `PaperBroker`
+ * expands the pair on the wire — `limitPrice` becomes the `LIMIT` leg's limit
+ * price and `stopPrice` becomes the `STOP` leg's stop price, which is exactly
+ * what `planOcoReservation` accepts. trading-core excludes `'OCO'` from
+ * single-order reservation (`Exclude<OrderType, 'OCO'>`), so an OCO placement
+ * is only ever the group.
  *
- * Known limitation: `Broker.placeOrder` returns one `OrderSnapshot`, so an OCO
+ * Known limitation: `Broker.placeOrder` returns one `BrokerOrder`, so an OCO
  * placement cannot name its sibling leg or its group id, and
  * `CancelOrderCommand` cannot address the group. A strategy that needs to track
  * or cancel both legs individually must place two separate orders — a `LIMIT`
@@ -90,7 +90,7 @@ export interface PlaceTakeProfitOrderCommand extends PlaceOrderCommandBase {
 export interface PlaceOcoOrderCommand extends PlaceOrderCommandBase {
   readonly type: 'OCO';
   readonly limitPrice: DecimalString;
-  readonly triggerPrice: DecimalString;
+  readonly stopPrice: DecimalString;
 }
 
 /**
@@ -131,14 +131,101 @@ export interface ExchangeReceipt {
 }
 
 /**
+ * The wire shapes below describe *what the paper API returns*, which is not the
+ * same thing as trading-core's `OrderSnapshot` / `WalletSnapshot` /
+ * `PositionSnapshot`. Those are the ledger's own rows and carry `version`, the
+ * optimistic-concurrency token every internal mutation compares. The public API
+ * accepts no client-supplied version on any write — concurrency is controlled by
+ * the `Idempotency-Key` header, and ordering a client can observe is
+ * `accountSequence` — so a version is neither sent nor useful to a strategy.
+ *
+ * Reusing the ledger types here is what let the SDK drift: it demanded a
+ * `version` no response carries (so every accepted order decoded as malformed)
+ * while dropping `market` and `averageCost`, which the API does return and a
+ * strategy needs to size and value a position. These types are therefore owned
+ * by this package and mirror the payload, field for field.
+ */
+/**
+ * A write's answer. `POST /api/v1/orders` replies with the order it created
+ * (`{ id, status, filledQuantity, quantity }`) and `DELETE` replies with just
+ * `{ id, status }` — the runtime narrows its cancellation result to those two
+ * fields (`production-runtime.ts`), so an OCO cancel does not name the sibling
+ * leg it also closed. Publishing that list would be a change to the API, not to
+ * this decoder, and is out of scope here.
+ *
+ * The read shape is `BrokerPortfolioOrder`: it is a different payload, so it is
+ * a different type rather than one type half-covering both.
+ */
+export interface BrokerOrder {
+  readonly id: string;
+  readonly status: OrderStatus;
+  readonly quantity?: Quantity;
+  readonly filledQuantity?: Quantity;
+  readonly terminalReason?: 'IOC_REMAINDER';
+}
+
+export interface BrokerFill {
+  readonly id: string;
+  readonly symbol: string;
+  readonly quantity: Quantity;
+  readonly price: DecimalString;
+  readonly fee: DecimalString;
+  readonly recoveryFill: boolean;
+}
+
+/**
+ * An order as the portfolio reports it. This carries what a strategy needs to
+ * recognise its own orders — which market, which symbol, which side, at what
+ * price — none of which a write response repeats.
+ */
+export interface BrokerPortfolioOrder {
+  readonly id: string;
+  readonly market: Market;
+  readonly symbol: string;
+  readonly type: OrderType;
+  readonly side: Side;
+  readonly quantity: Quantity;
+  readonly filledQuantity: Quantity;
+  readonly status: OrderStatus;
+  readonly limitPrice?: DecimalString;
+  readonly stopPrice?: DecimalString;
+  readonly terminalReason?: 'IOC_REMAINDER';
+  readonly fills: readonly BrokerFill[];
+  readonly siblingOrderIds: readonly string[];
+}
+
+export interface BrokerWallet {
+  readonly currency: Currency;
+  readonly total: DecimalString;
+  readonly available: DecimalString;
+  readonly reserved: DecimalString;
+}
+
+export interface BrokerPosition {
+  readonly market: Market;
+  readonly symbol: string;
+  readonly total: Quantity;
+  readonly available: Quantity;
+  readonly reserved: Quantity;
+  readonly averageCost: DecimalString;
+}
+
+/**
  * One committed view of an account. Balances stay per-currency wallets: there is
  * no aggregate total, so no cross-currency sum can leak between them.
  */
-export interface PortfolioSnapshot {
+export interface BrokerPortfolio {
   readonly sessionId: string;
-  readonly wallets: readonly WalletSnapshot[];
-  readonly positions: readonly PositionSnapshot[];
-  readonly activeOrders: readonly OrderSnapshot[];
+  readonly wallets: readonly BrokerWallet[];
+  readonly positions: readonly BrokerPosition[];
+  /**
+   * Named `activeOrders` by the API, but the query behind it has no status
+   * filter, so terminal orders appear here too (#33). Do not assume these are
+   * open — filter on `status`. The field cannot simply be narrowed server-side:
+   * these rows are currently the only path by which a client can reach fill
+   * data, so #33 is sequenced after #37.
+   */
+  readonly activeOrders: readonly BrokerPortfolioOrder[];
   readonly accountSequence: DecimalString;
 }
 
@@ -151,23 +238,23 @@ export interface PortfolioSnapshot {
  * checked back against every response that names a session: `getPortfolio`
  * compares the returned portfolio's session and `exchange` compares the
  * receipt's, both failing with `INVARIANT_VIOLATION` on a mismatch.
- * `placeOrder` and `cancelOrder` return an `OrderSnapshot`, which carries no
+ * `placeOrder` and `cancelOrder` return a `BrokerOrder`, which carries no
  * session, so there is nothing to compare — a write is only ever applied to the
  * session the implementation is bound to. Do not treat `sessionId` as a way to
  * multiplex accounts over one broker instance; use one broker per session.
  */
 export interface Broker {
-  placeOrder(command: PlaceOrderCommand): Promise<OrderSnapshot>;
-  cancelOrder(command: CancelOrderCommand): Promise<OrderSnapshot>;
+  placeOrder(command: PlaceOrderCommand): Promise<BrokerOrder>;
+  cancelOrder(command: CancelOrderCommand): Promise<BrokerOrder>;
   exchange(command: ExchangeCommand): Promise<ExchangeReceipt>;
-  getPortfolio(sessionId: string): Promise<PortfolioSnapshot>;
+  getPortfolio(sessionId: string): Promise<BrokerPortfolio>;
 }
 
 export type PriceRule = 'required' | 'optional' | 'forbidden';
 
 export interface PriceRules {
   readonly limitPrice: PriceRule;
-  readonly triggerPrice: PriceRule;
+  readonly stopPrice: PriceRule;
 }
 
 /**
@@ -179,11 +266,11 @@ export interface PriceRules {
  */
 export const PLACE_ORDER_PRICE_RULES: Readonly<Record<OrderType, PriceRules>> =
   {
-    MARKET: { limitPrice: 'forbidden', triggerPrice: 'forbidden' },
-    LIMIT: { limitPrice: 'required', triggerPrice: 'forbidden' },
-    STOP: { limitPrice: 'forbidden', triggerPrice: 'required' },
-    TAKE_PROFIT: { limitPrice: 'forbidden', triggerPrice: 'required' },
-    OCO: { limitPrice: 'required', triggerPrice: 'required' },
+    MARKET: { limitPrice: 'forbidden', stopPrice: 'forbidden' },
+    LIMIT: { limitPrice: 'required', stopPrice: 'forbidden' },
+    STOP: { limitPrice: 'forbidden', stopPrice: 'required' },
+    TAKE_PROFIT: { limitPrice: 'forbidden', stopPrice: 'required' },
+    OCO: { limitPrice: 'required', stopPrice: 'required' },
   };
 
 function assertMember<T extends string>(
@@ -212,7 +299,7 @@ function assertPositivePrice(value: unknown, field: string): void {
 
 function assertPriceField(
   read: OptionalFieldRead,
-  field: 'limitPrice' | 'triggerPrice',
+  field: 'limitPrice' | 'stopPrice',
   rule: PriceRule,
   type: OrderType,
 ): void {
@@ -293,7 +380,7 @@ function snapshotPlaceOrderCommand(command: unknown): Record<string, unknown> {
     type: source.type,
     quantity: source.quantity,
     ...projectOptionalField(source, 'limitPrice'),
-    ...projectOptionalField(source, 'triggerPrice'),
+    ...projectOptionalField(source, 'stopPrice'),
   });
 }
 
@@ -338,9 +425,9 @@ function assertPlaceOrderFields(
     type,
   );
   assertPriceField(
-    readOptionalField(candidate, 'triggerPrice'),
-    'triggerPrice',
-    rules.triggerPrice,
+    readOptionalField(candidate, 'stopPrice'),
+    'stopPrice',
+    rules.stopPrice,
     type,
   );
 }
