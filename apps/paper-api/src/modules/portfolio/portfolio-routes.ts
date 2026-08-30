@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { fillsQuerySchema } from './fill-schemas.js';
 import { portfolioQuerySchema } from './portfolio-schemas.js';
 import {
   createPortfolioService,
@@ -45,6 +46,22 @@ export async function registerPortfolioRoutes(
         requestId: request.id,
       });
     return service.listOrders(await session(request), parsed.data);
+  });
+  // Session-scoped catch-up for a client that was offline longer than the
+  // account stream's replay window keeps events. `no-store`, because it is one
+  // session's own ledger history and a shared cache must never hold it.
+  app.get('/api/v1/fills', async (request, reply) => {
+    const parsed = fillsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success)
+      return reply.code(400).send({
+        code: 'VALIDATION_ERROR',
+        message: parsed.error.message,
+        retryable: false,
+        requestId: request.id,
+      });
+    const sessionId = await session(request);
+    void reply.header('Cache-Control', 'private, no-store');
+    return service.listFills(sessionId, parsed.data);
   });
   app.get('/api/v1/orders/:id', async (request, reply) => {
     const order = await service.getOrder(

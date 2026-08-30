@@ -5,6 +5,7 @@ import type { Database } from '../db/database.js';
 import type { OrderMatch } from '../engine/match-orders.js';
 import type { PaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
+import { type FillFacts, fillRecord } from '../modules/portfolio/fill-schemas.js';
 import { lockBalances, settleFill } from './fill-settlement.js';
 import {
   allocateAccountSequence,
@@ -12,6 +13,8 @@ import {
 } from './ledger-transaction.js';
 
 type LogFn = (event: string, fields: Record<string, unknown>) => void;
+
+type PersistedFill = FillFacts;
 
 const TERMINAL_STATUSES = ['FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'];
 
@@ -90,19 +93,43 @@ export function createFillPersistence(deps: {
                 market_data_epoch = ${pricing.recoveryEpoch}, updated_at = now(), version = version + 1
           where id = ${order.id}::uuid
         `.execute(trx);
+        // The sequence is allocated before the rows so each fill can record the
+        // ORDER_FILLED event it will be published in; a client can then align a
+        // `GET /api/v1/fills` page with the account stream it was reading.
+        const sequence = await allocateAccountSequence(
+          trx,
+          order.sessionId,
+          'ORDER_FILLED',
+        );
+        const persisted: PersistedFill[] = [];
         for (const fill of match.execution.fills) {
-          await sql`
+          const inserted = await sql<{ id: string; fill_sequence: string }>`
             insert into fills (
-              id, order_id, price, quantity, fee, slippage, reference_trade_price,
-              recovery_epoch, market_data_version, leader_fencing_token, is_recovery_fill,
-              fee_model_version_id
+              id, order_id, session_id, account_sequence, price, quantity, fee, slippage,
+              reference_trade_price, recovery_epoch, market_data_version, leader_fencing_token,
+              is_recovery_fill, fee_model_version_id
             ) values (
-              ${randomUUID()}::uuid, ${order.id}::uuid, ${fill.price}, ${fill.quantity}, ${fill.fee},
+              ${randomUUID()}::uuid, ${order.id}::uuid, ${order.sessionId}::uuid, ${sequence},
+              ${fill.price}, ${fill.quantity}, ${fill.fee},
               ${match.execution.slippageAmount}, ${pricing.referencePrice}, ${pricing.recoveryEpoch},
               ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true},
               ${deps.feeModelVersionId?.() ?? null}::uuid
             )
+            returning id::text as id, fill_sequence::text as fill_sequence
           `.execute(trx);
+          const row = inserted.rows[0];
+          if (row === undefined)
+            throw new DomainError(
+              'INVARIANT_VIOLATION',
+              'fill insert returned no row',
+            );
+          persisted.push({
+            id: row.id,
+            fillSequence: row.fill_sequence,
+            price: fill.price,
+            quantity: fill.quantity,
+            fee: fill.fee,
+          });
         }
         await settleFill(trx, {
           order: {
@@ -124,17 +151,25 @@ export function createFillPersistence(deps: {
             ? {}
             : { estimateFee: deps.estimateFee }),
         });
-        const sequence = await allocateAccountSequence(
-          trx,
-          order.sessionId,
-          'ORDER_FILLED',
-        );
         const payload = {
           orderId: order.id,
           status: match.nextStatus,
           filledQuantity: match.filledQuantity,
           recoveryEpoch: pricing.recoveryEpoch.toString(),
           recoveryFill: pricing.recoveryFill === true,
+          // Nested rather than spread: the publisher merges a portfolio
+          // snapshot over this payload, and top-level `market` would be
+          // overwritten by the snapshot's own `market` object.
+          fills: persisted.map((fill) =>
+            fillRecord(fill, {
+              orderId: order.id,
+              market: order.market,
+              symbol: order.symbol,
+              side: order.side,
+              accountSequence: sequence,
+              isRecoveryFill: pricing.recoveryFill === true,
+            }),
+          ),
         };
         await sql`
           insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)

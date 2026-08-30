@@ -4,6 +4,7 @@ import { sql } from 'kysely';
 import type { Database } from '../db/database.js';
 import type { ConditionalPaperOrder } from '../engine/paper-engine.js';
 import type { PricingContext } from '../engine/pricing-context.js';
+import { fillRecord } from '../modules/portfolio/fill-schemas.js';
 import { lockBalances, settleFill } from './fill-settlement.js';
 import {
   allocateAccountSequence,
@@ -102,17 +103,24 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
                 market_data_epoch = ${pricing.recoveryEpoch}, updated_at = now(), version = version + 1
           where id = ${order.id}::uuid
         `.execute(trx);
-        await sql`
+        const insertedFill = await sql<{ id: string; fill_sequence: string }>`
           insert into fills (
-            id, order_id, price, quantity, fee, slippage, reference_trade_price,
+            id, order_id, session_id, price, quantity, fee, slippage, reference_trade_price,
             recovery_epoch, market_data_version, leader_fencing_token, is_recovery_fill,
             fee_model_version_id
           ) values (
-            ${randomUUID()}::uuid, ${order.id}::uuid, ${price}, ${quantity}, ${fee}, 0, ${price},
+            ${randomUUID()}::uuid, ${order.id}::uuid, ${order.sessionId}::uuid, ${price}, ${quantity}, ${fee}, 0, ${price},
             ${pricing.recoveryEpoch}, ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true},
             ${deps.feeModelVersionId?.() ?? null}::uuid
           )
+          returning id::text as id, fill_sequence::text as fill_sequence
         `.execute(trx);
+        const fillRow = insertedFill.rows[0];
+        if (fillRow === undefined)
+          throw new DomainError(
+            'INVARIANT_VIOLATION',
+            'fill insert returned no row',
+          );
         await settleFill(trx, {
           order: {
             id: order.id,
@@ -169,18 +177,49 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
         }
 
         for (const event of events) {
-          await sql`
-            insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
-            values (${randomUUID()}::uuid, ${order.sessionId}, ${event.orderId}::uuid, ${event.type}, ${JSON.stringify(event.payload)}::jsonb, now())
-          `.execute(trx);
+          // Allocated before the rows are written so the ORDER_FILLED payload
+          // and the fill row can both name the sequence the fill is published
+          // under; audit and outbox then carry the identical payload.
           const sequence = await allocateAccountSequence(
             trx,
             order.sessionId,
             event.type,
           );
+          let payload = event.payload;
+          if (event.type === 'ORDER_FILLED') {
+            payload = {
+              ...event.payload,
+              fills: [
+                fillRecord(
+                  {
+                    id: fillRow.id,
+                    fillSequence: fillRow.fill_sequence,
+                    price,
+                    quantity,
+                    fee,
+                  },
+                  {
+                    orderId: order.id,
+                    market: order.market,
+                    symbol: order.symbol,
+                    side: order.side,
+                    accountSequence: sequence,
+                    isRecoveryFill: pricing.recoveryFill === true,
+                  },
+                ),
+              ],
+            };
+            await sql`
+              update fills set account_sequence = ${sequence} where id = ${fillRow.id}::uuid
+            `.execute(trx);
+          }
+          await sql`
+            insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)
+            values (${randomUUID()}::uuid, ${order.sessionId}, ${event.orderId}::uuid, ${event.type}, ${JSON.stringify(payload)}::jsonb, now())
+          `.execute(trx);
           await sql`
             insert into outbox_events (id, event_id, session_id, stream_sequence, event_type, payload)
-            values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${order.sessionId}::uuid, ${sequence}, ${event.type}, ${JSON.stringify(event.payload)}::jsonb)
+            values (${randomUUID()}::uuid, ${randomUUID()}::uuid, ${order.sessionId}::uuid, ${sequence}, ${event.type}, ${JSON.stringify(payload)}::jsonb)
           `.execute(trx);
         }
       }),

@@ -1,3 +1,4 @@
+import type { FillsPage, FillsQuery } from './fill-schemas.js';
 import type {
   HistoricalOrdersPage,
   PortfolioQuery,
@@ -22,6 +23,10 @@ export interface PortfolioReadTransaction {
     sessionId: string,
     orderId: string,
   ) => Promise<Record<string, string | null> | undefined>;
+  readonly listFills: (
+    sessionId: string,
+    query: FillsQuery,
+  ) => Promise<FillsPage>;
 }
 
 export interface PortfolioServiceDependencies {
@@ -82,5 +87,9 @@ export class PortfolioService {
     orderId: string,
   ): Promise<Record<string, string | null> | undefined> {
     return this.#runSnapshot((tx) => tx.getOrder(sessionId, orderId));
+  }
+
+  listFills(sessionId: string, query: FillsQuery): Promise<FillsPage> {
+    return this.#runSnapshot((tx) => tx.listFills(sessionId, query));
   }
 }

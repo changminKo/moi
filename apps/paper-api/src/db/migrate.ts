@@ -13,6 +13,7 @@ const MIGRATION_NAMES = [
   '001_ledger',
   '002_audit_partitions',
   '003_leader_release',
+  '004_fill_history',
 ] as const;
 
 const MIGRATIONS_DIRECTORY = join(

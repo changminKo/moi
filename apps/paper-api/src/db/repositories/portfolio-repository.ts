@@ -1,6 +1,11 @@
 import { decimal } from '@moi/trading-core';
 import { sql } from 'kysely';
 import type {
+  FillRecord,
+  FillsPage,
+  FillsQuery,
+} from '../../modules/portfolio/fill-schemas.js';
+import type {
   HistoricalOrdersPage,
   PortfolioQuery,
 } from '../../modules/portfolio/portfolio-schemas.js';
@@ -40,6 +45,26 @@ function order(row: Row): Record<string, string | null> {
     limitPrice: nullableNumeric(row.limit_price),
     stopPrice: nullableNumeric(row.stop_price),
     terminalReason: nullable(row.terminal_reason),
+  };
+}
+
+function fill(row: Row): FillRecord {
+  return {
+    id: text(row.id),
+    fillSequence: text(row.fill_sequence),
+    accountSequence: nullable(row.account_sequence),
+    orderId: text(row.order_id),
+    market: text(row.market_code) as FillRecord['market'],
+    symbol: text(row.symbol),
+    side: text(row.side) as FillRecord['side'],
+    quantity: numeric(row.quantity) as FillRecord['quantity'],
+    price: numeric(row.price) as FillRecord['price'],
+    fee: numeric(row.fee) as FillRecord['fee'],
+    feeCurrency: (text(row.market_code) === 'KR'
+      ? 'KRW'
+      : 'USD') as FillRecord['feeCurrency'],
+    isRecoveryFill: row.is_recovery_fill === true,
+    occurredAt: new Date(String(row.occurred_at)).toISOString(),
   };
 }
 
@@ -167,6 +192,27 @@ export const createPortfolioRepository = (
               rows[rows.length - 1]?.id,
             ),
           }
+        : {}),
+    };
+  },
+  async listFills(sessionId, query: FillsQuery): Promise<FillsPage> {
+    const limit = query.limit;
+    // `fill_sequence` is monotonic per session (every write holds the session
+    // row `for update`), so an exclusive `>` is a complete, gap-free page.
+    const result =
+      query.after === undefined
+        ? await sql<Row>`select f.id::text as id, f.fill_sequence::text as fill_sequence, f.account_sequence::text as account_sequence, f.order_id::text as order_id, o.market_code, o.symbol, o.side, f.quantity, f.price, f.fee, f.is_recovery_fill, f.occurred_at from fills f join orders o on o.id = f.order_id where f.session_id = ${sessionId}::uuid order by f.fill_sequence limit ${limit + 1}`.execute(
+            connection.executor,
+          )
+        : await sql<Row>`select f.id::text as id, f.fill_sequence::text as fill_sequence, f.account_sequence::text as account_sequence, f.order_id::text as order_id, o.market_code, o.symbol, o.side, f.quantity, f.price, f.fee, f.is_recovery_fill, f.occurred_at from fills f join orders o on o.id = f.order_id where f.session_id = ${sessionId}::uuid and f.fill_sequence > ${query.after}::bigint order by f.fill_sequence limit ${limit + 1}`.execute(
+            connection.executor,
+          );
+    const rows = result.rows.slice(0, limit);
+    const last = rows[rows.length - 1];
+    return {
+      items: rows.map(fill),
+      ...(result.rows.length > limit && last !== undefined
+        ? { nextCursor: text(last.fill_sequence) }
         : {}),
     };
   },
