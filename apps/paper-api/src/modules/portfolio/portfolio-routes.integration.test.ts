@@ -206,6 +206,11 @@ describe('portfolio routes', () => {
       '/api/v1/fills?limit=0',
       '/api/v1/fills?after=abc',
       '/api/v1/fills?after=-1',
+      // Beyond bigint: unbounded digits reach `::bigint`, which raises 22003
+      // and surfaces as a 500 — a caller's bad cursor must read as a 400, and
+      // must not pollute the deploy verification or the alerting signal.
+      '/api/v1/fills?after=99999999999999999999',
+      '/api/v1/fills?after=9223372036854775808',
       '/api/v1/fills?sessionId=other',
     ]) {
       const rejected = await app.inject({ method: 'GET', url });

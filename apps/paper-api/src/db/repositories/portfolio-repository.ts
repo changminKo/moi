@@ -1,9 +1,10 @@
 import { decimal } from '@moi/trading-core';
 import { sql } from 'kysely';
-import type {
-  FillRecord,
-  FillsPage,
-  FillsQuery,
+import {
+  type FillRecord,
+  type FillsPage,
+  type FillsQuery,
+  fillRecord,
 } from '../../modules/portfolio/fill-schemas.js';
 import type {
   HistoricalOrdersPage,
@@ -49,23 +50,30 @@ function order(row: Row): Record<string, string | null> {
 }
 
 function fill(row: Row): FillRecord {
-  return {
-    id: text(row.id),
-    fillSequence: text(row.fill_sequence),
-    accountSequence: nullable(row.account_sequence),
-    orderId: text(row.order_id),
-    market: text(row.market_code) as FillRecord['market'],
-    symbol: text(row.symbol),
-    side: text(row.side) as FillRecord['side'],
-    quantity: numeric(row.quantity) as FillRecord['quantity'],
-    price: numeric(row.price) as FillRecord['price'],
-    fee: numeric(row.fee) as FillRecord['fee'],
-    feeCurrency: (text(row.market_code) === 'KR'
-      ? 'KRW'
-      : 'USD') as FillRecord['feeCurrency'],
-    isRecoveryFill: row.is_recovery_fill === true,
-    occurredAt: new Date(String(row.occurred_at)).toISOString(),
-  };
+  // Built through the shared builder, not hand-assembled: the event payload and
+  // this row must describe the same fill the same way, and a second derivation
+  // of `feeCurrency` here is exactly the drift that module exists to prevent.
+  return fillRecord(
+    {
+      id: text(row.id),
+      fillSequence: text(row.fill_sequence),
+      price: numeric(row.price) as FillRecord['price'],
+      quantity: numeric(row.quantity) as FillRecord['quantity'],
+      fee: numeric(row.fee) as FillRecord['fee'],
+    },
+    {
+      orderId: text(row.order_id),
+      market: text(row.market_code) as FillRecord['market'],
+      symbol: text(row.symbol),
+      side: text(row.side) as FillRecord['side'],
+      accountSequence: nullable(row.account_sequence),
+      isRecoveryFill: row.is_recovery_fill === true,
+      // `pg` hands back a Date and no type parser is registered, so
+      // `String(date)` would print a locale string with no milliseconds and
+      // collapse two fills a millisecond apart into one timestamp.
+      occurredAt: (row.occurred_at as Date).toISOString(),
+    },
+  );
 }
 
 export interface PortfolioReadRepository extends PortfolioReadTransaction {}

@@ -78,7 +78,79 @@ async function seedFill(
   return id;
 }
 
+/**
+ * Inserts a fill the way the *previous* release does — no `session_id`, no
+ * `account_sequence` — against the migrated schema. `deploy.sh` runs migrations
+ * while that release is still serving, so this is the shape production writes
+ * during every deploy window.
+ */
+async function insertLikeOldRelease(
+  orderId: string,
+  fill: {
+    readonly price: string;
+    readonly quantity: string;
+    readonly fee: string;
+  },
+): Promise<string> {
+  const id = randomUUID();
+  await sql`
+    insert into fills (id, order_id, price, quantity, fee, slippage)
+    values (${id}::uuid, ${orderId}::uuid, ${fill.price}, ${fill.quantity}, ${fill.fee}, 0)
+  `.execute(db);
+  return id;
+}
+
 describe('fill history', () => {
+  it('lets the release that is still serving during the migration keep writing owned fills', async () => {
+    const session = await seedSession();
+    const order = await seedOrder(session);
+
+    // The old release's statement must still succeed: a failure here is every
+    // fill and trigger order on the running process failing from the migration
+    // commit until the new image has restarted, and a broken rollback.
+    const id = await insertLikeOldRelease(order, {
+      price: '71000',
+      quantity: '1',
+      fee: '10',
+    });
+
+    const row = (
+      await sql<{
+        session_id: string | null;
+        fill_sequence: string | null;
+        account_sequence: string | null;
+      }>`select session_id::text as session_id, fill_sequence::text as fill_sequence, account_sequence::text as account_sequence from fills where id = ${id}::uuid`.execute(
+        db,
+      )
+    ).rows[0];
+    // Owned, not merely tolerated: the trigger derives the session from the
+    // order, so the row is visible to the endpoint and satisfies the composite
+    // foreign key rather than sitting there as an orphan with a null owner.
+    expect(row?.session_id).toBe(session);
+    expect(row?.fill_sequence).toMatch(/^\d+$/);
+    expect(row?.account_sequence).toBeNull();
+
+    const repository = createPortfolioRepository({
+      executor: db,
+    } as unknown as Parameters<typeof createPortfolioRepository>[0]);
+    const page = await repository.listFills(session, { limit: 50 });
+    expect(page.items.map((item) => item.id)).toContain(id);
+  });
+
+  it('rejects a fill whose session does not own its order', async () => {
+    const mine = await seedSession();
+    const theirs = await seedSession();
+    const order = await seedOrder(mine);
+    // The composite foreign key is what stops `listFills` from filtering on one
+    // session while returning another session's symbol and side.
+    await expect(
+      sql`
+        insert into fills (id, order_id, session_id, price, quantity, fee, slippage)
+        values (${randomUUID()}::uuid, ${order}::uuid, ${theirs}::uuid, '1', '1', '0', 0)
+      `.execute(db),
+    ).rejects.toThrow(/fills_order_session_fkey/);
+  });
+
   it('pages one session own fills on a monotonic cursor and hides every other session', async () => {
     const mine = await seedSession();
     const theirs = await seedSession();
@@ -163,11 +235,16 @@ describe('fill history', () => {
   it('keeps money exact and reports an unpublished fill as having no account sequence', async () => {
     const session = await seedSession();
     const order = await seedOrder(session, { market: 'US', symbol: 'AAPL' });
-    await seedFill(session, order, {
-      price: '229.8700',
-      quantity: '1.0000',
-      fee: '0.2299',
-    });
+    const at = '2026-08-30T04:05:06.789Z';
+    await sql`
+      insert into fills (
+        id, order_id, session_id, price, quantity, fee, slippage,
+        is_recovery_fill, occurred_at
+      ) values (
+        ${randomUUID()}::uuid, ${order}::uuid, ${session}::uuid,
+        '229.8700', '1.0000', '0.2299', 0, true, ${at}::timestamptz
+      )
+    `.execute(db);
     const repository = createPortfolioRepository({
       executor: db,
     } as unknown as Parameters<typeof createPortfolioRepository>[0]);
@@ -180,5 +257,11 @@ describe('fill history', () => {
     // Pre-migration fills were never published in an event; the record says so
     // rather than inventing a sequence.
     expect(fill?.accountSequence).toBeNull();
+    // A recovery fill is reported as one — a client reconciling against the
+    // provider needs to know which of its fills were replayed.
+    expect(fill?.isRecoveryFill).toBe(true);
+    // Milliseconds survive. `String(date)` on the pg `Date` would print a
+    // locale string with none, collapsing two fills a millisecond apart.
+    expect(fill?.occurredAt).toBe(at);
   });
 });

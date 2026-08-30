@@ -14,6 +14,9 @@ const MIGRATION_NAMES = [
   '002_audit_partitions',
   '003_leader_release',
   '004_fill_history',
+  '005_fill_history_backfill',
+  '006_fill_history_indexes',
+  '007_fill_history_validate',
 ] as const;
 
 const MIGRATIONS_DIRECTORY = join(

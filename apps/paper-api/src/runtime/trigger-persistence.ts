@@ -103,13 +103,22 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
                 market_data_epoch = ${pricing.recoveryEpoch}, updated_at = now(), version = version + 1
           where id = ${order.id}::uuid
         `.execute(trx);
+        // Allocated before the insert so the row carries its account sequence
+        // from birth, exactly as `fill-persistence` does; the events loop below
+        // reuses this value rather than allocating a second one, which keeps
+        // ORDER_FILLED ahead of any OCO_RESOLVED that follows it.
+        const filledSequence = await allocateAccountSequence(
+          trx,
+          order.sessionId,
+          'ORDER_FILLED',
+        );
         const insertedFill = await sql<{ id: string; fill_sequence: string }>`
           insert into fills (
-            id, order_id, session_id, price, quantity, fee, slippage, reference_trade_price,
+            id, order_id, session_id, account_sequence, price, quantity, fee, slippage, reference_trade_price,
             recovery_epoch, market_data_version, leader_fencing_token, is_recovery_fill,
             fee_model_version_id
           ) values (
-            ${randomUUID()}::uuid, ${order.id}::uuid, ${order.sessionId}::uuid, ${price}, ${quantity}, ${fee}, 0, ${price},
+            ${randomUUID()}::uuid, ${order.id}::uuid, ${order.sessionId}::uuid, ${filledSequence}, ${price}, ${quantity}, ${fee}, 0, ${price},
             ${pricing.recoveryEpoch}, ${pricing.marketDataVersion}, ${pricing.leaderFencingToken}, ${pricing.recoveryFill === true},
             ${deps.feeModelVersionId?.() ?? null}::uuid
           )
@@ -180,11 +189,10 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
           // Allocated before the rows are written so the ORDER_FILLED payload
           // and the fill row can both name the sequence the fill is published
           // under; audit and outbox then carry the identical payload.
-          const sequence = await allocateAccountSequence(
-            trx,
-            order.sessionId,
-            event.type,
-          );
+          const sequence =
+            event.type === 'ORDER_FILLED'
+              ? filledSequence
+              : await allocateAccountSequence(trx, order.sessionId, event.type);
           let payload = event.payload;
           if (event.type === 'ORDER_FILLED') {
             payload = {
@@ -209,9 +217,6 @@ export function createTriggerPersistence(deps: TriggerPersistenceDeps) {
                 ),
               ],
             };
-            await sql`
-              update fills set account_sequence = ${sequence} where id = ${fillRow.id}::uuid
-            `.execute(trx);
           }
           await sql`
             insert into audit_events (id, session_reference, order_id, event_type, payload, occurred_at)

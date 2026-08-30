@@ -193,6 +193,10 @@ export const LEDGER_UNIQUE_INDEXES: Readonly<
   // never compute the same one; like `fills_pkey` it is UNWRITTEN because no
   // repository statement inserts a fill — the runtime's raw-SQL fill path does.
   fills_sequence_idx: { table: 'fills', arbiter: 'UNWRITTEN' },
+  // Pairs (id, session_id) so `fills` can carry a foreign key to both and the
+  // denormalised owner cannot diverge from the order's. Orders are inserted
+  // with a fresh uuid, so this key collides only if a caller reuses an id.
+  orders_id_session_key: { table: 'orders', arbiter: 'FRESH_IDENTITY' },
   markets_pkey: { table: 'markets', arbiter: 'UNWRITTEN' },
   account_sequences_pkey: {
     table: 'account_sequences',

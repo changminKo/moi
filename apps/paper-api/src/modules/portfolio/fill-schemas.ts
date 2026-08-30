@@ -1,11 +1,9 @@
 import type { Currency, DecimalString, Market, Side } from '@moi/trading-core';
 import { z } from 'zod';
 
-/** Fee is charged in the market's settlement currency (`currencyFor`). */
-const CURRENCY_FOR: Readonly<Record<Market, Currency>> = {
-  KR: 'KRW',
-  US: 'USD',
-};
+/** Fee is charged in the market's settlement currency. */
+export const currencyFor = (market: Market): Currency =>
+  market === 'KR' ? 'KRW' : 'USD';
 
 /**
  * One executed fill, in the shape both the `ORDER_FILLED` event payload and
@@ -63,7 +61,7 @@ export function fillRecord(fill: FillFacts, context: FillContext): FillRecord {
     quantity: fill.quantity,
     price: fill.price,
     fee: fill.fee,
-    feeCurrency: CURRENCY_FOR[context.market],
+    feeCurrency: currencyFor(context.market),
     isRecoveryFill: context.isRecoveryFill,
     occurredAt: context.occurredAt ?? new Date().toISOString(),
   };
@@ -76,9 +74,20 @@ export function fillRecord(fill: FillFacts, context: FillContext): FillRecord {
  */
 export const fillsQuerySchema = z
   .object({
+    // Bounded, not merely numeric: an unbounded digit string reaches
+    // `::bigint` and returns 22003, which the error handler reports as a 500.
+    // A malformed cursor is the caller's mistake and must read as one.
     after: z
       .string()
-      .regex(/^\d+$/, 'after must be a fill sequence')
+      .regex(/^\d{1,19}$/, 'after must be a fill sequence')
+      // Guarded: zod runs every check, so this refinement also sees inputs the
+      // regex rejected, and an unguarded `BigInt('abc')` would throw out of the
+      // parse and surface as a 500 — the very failure this bound exists to stop.
+      .refine(
+        (value) =>
+          /^\d{1,19}$/.test(value) && BigInt(value) <= 9223372036854775807n,
+        'after must be a fill sequence',
+      )
       .optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
   })
