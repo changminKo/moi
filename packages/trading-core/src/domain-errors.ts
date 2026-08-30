@@ -5,6 +5,12 @@ export type DomainErrorCode =
   | 'RECOVERY_IN_PROGRESS'
   | 'CANCEL_ONLY'
   | 'ACCOUNT_READ_ONLY'
+  // The session, not the account: a client that cannot tell this from
+  // ACCOUNT_READ_ONLY either retries a write that will never be accepted or
+  // gives up on an account that is fine. `docs/api/error-contract.md` has
+  // published it (401) since the contract was written; it was missing here, so
+  // every client normalised it into ACCOUNT_READ_ONLY.
+  | 'SESSION_EXPIRED'
   | 'SERVICE_UNAVAILABLE'
   | 'INSUFFICIENT_AVAILABLE_CASH'
   | 'INSUFFICIENT_AVAILABLE_POSITION'
@@ -25,6 +31,7 @@ const retryabilityByCode: Record<DomainErrorCode, boolean> = {
   RECOVERY_IN_PROGRESS: true,
   CANCEL_ONLY: false,
   ACCOUNT_READ_ONLY: false,
+  SESSION_EXPIRED: false,
   SERVICE_UNAVAILABLE: true,
   INSUFFICIENT_AVAILABLE_CASH: false,
   INSUFFICIENT_AVAILABLE_POSITION: false,
