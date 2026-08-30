@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { InstrumentSearch } from '../features/instruments/instrument-search';
@@ -33,6 +33,13 @@ export function TradePage({
   );
   const [wallets, setWallets] = useState<readonly Wallet[]>([]);
   const { availability } = useTradingStatus();
+  // The symbol the page was opened with, if any: it is revealed and focused in
+  // the list once, then forgotten. Captured at mount so later URL writes — the
+  // toggle, back/forward — cannot re-trigger it.
+  const [focusSymbol, setFocusSymbol] = useState<string | null>(() =>
+    params.get('symbol'),
+  );
+  const forgetDeepLink = useCallback(() => setFocusSymbol(null), []);
   // `?symbol=` is the source of truth for the selection: the effect reconciles
   // state with the URL on every change, so deep links, the toggle and browser
   // back/forward all land on the same code path.
@@ -81,7 +88,10 @@ export function TradePage({
       current.delete('symbol');
       return current;
     });
+  // Any deliberate action retires the pending deep link: from here on the user
+  // is driving, and focus belongs wherever they put it.
   const select = (instrument: Instrument) => {
+    forgetDeepLink();
     const isToggleOff =
       selected?.market === instrument.market &&
       selected.symbol === instrument.symbol;
@@ -95,8 +105,13 @@ export function TradePage({
     });
   };
   const reset = () => {
+    forgetDeepLink();
     setQuery('');
     deselect();
+  };
+  const search = (value: string) => {
+    forgetDeepLink();
+    setQuery(value);
   };
   return (
     <QueryClientProvider client={queryClient}>
@@ -104,12 +119,14 @@ export function TradePage({
         <div className="trade-col trade-col-side">
           <InstrumentSearch
             query={query}
-            onQuery={setQuery}
+            onQuery={search}
             instruments={instruments}
             onSelect={select}
             selected={selected}
             onReset={reset}
             canReset={Boolean(selected) || query !== ''}
+            focusSymbol={focusSymbol}
+            onFocusHandled={forgetDeepLink}
           />
         </div>
         <div className="trade-col trade-col-main">
