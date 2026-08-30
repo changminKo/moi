@@ -2,7 +2,7 @@
 
 Issue: [#45](https://github.com/changminKo/moi/issues/45)
 분류: bounded — 바꿀 흐름이 모두 저장소에 있고 `Instrument.name` 필드도 이미 존재한다.
-상태: **설계 승인 대기.** 구현은 시작하지 않았다.
+상태: **구현 및 검증 완료.**
 
 ## 문제
 
@@ -65,23 +65,29 @@ loadInstrumentNames({ source, symbols, snapshot, signal, log })
   → ReadonlyMap<`${Market}:${string}`, string>
 ```
 
-- 부팅 시 포트의 `searchInstruments('', signal)`를 한 번 호출하고 설정된
-  심볼만 남긴다.
+- HTTP 라우트는 커밋된 스냅샷 이름으로 먼저 구성한다. 양 시장의 리더 임대를
+  모두 획득한 직후 포트의 `searchInstruments('', signal)`를 한 번 호출하고
+  설정된 심볼만 남겨 카탈로그를 원자 교체한다. 이 순서는 임대 전 OAuth 토큰
+  발급과 프로바이더 접촉을 금지하는 런타임 계약을 보존한다.
 - 실패·타임아웃이면 커밋된 스냅샷을 쓰고 경고를 남긴다. 로그에 토큰이나
   자격증명은 넣지 않는다 (하드룰 2).
+- 종료를 뜻하는 호출자 `AbortSignal`은 폴백으로 삼키지 않고 전파해 recovery
+  단계가 시작되지 않게 한다.
 - 스냅샷에도 없는 심볼은 `name = symbol`로 떨어진다. 지금 동작이므로
   최악의 경우가 현재 상태와 같다.
 
 스냅샷은 `instrument-names.snapshot.json`에 `{market, symbol, name}`만 담는다.
 Toss 구독 상한이 심볼 40개라 손으로 커밋해도 부담이 없고, 프로바이더에
 접촉하는 갱신 스크립트를 CI에 들이지 않아 하드룰 1과 충돌하지 않는다.
+영문 부분일치 보존용 이름은 별도 `instrument-search-aliases.snapshot.json`에
+두며 검색에만 사용한다. 표시명과 API 응답에는 alias를 노출하지 않는다.
 
 ### 2. 한글 매칭
 
 새 순수 모듈 `apps/paper-api/src/modules/instruments/hangul-match.ts`.
 
 ```
-matchesInstrument(query, { symbol, name }) → boolean
+matchesInstrument(query, { symbol, name, aliases? }) → boolean
 ```
 
 - 질의를 트림·소문자 정규화한다. 빈 질의는 전부 통과.
@@ -106,9 +112,9 @@ TDD로 간다. 실패하는 테스트를 먼저 쓰고, 실패를 확인하고, 
 | 대상 | 내용 |
 |---|---|
 | `hangul-match.test.ts` | 삼성 · 삼서 · ㅅㅅㅈㅈ · 005930 · 소문자 영문명 · 빈 질의 · 자모가 아닌 영문 |
-| `instrument-names.test.ts` | 프로바이더 성공 / 실패→스냅샷 / 스냅샷 결손→심볼 |
+| `instrument-names.test.ts` | 프로바이더 성공 / 실패→스냅샷 / 스냅샷 결손→심볼 / 타임아웃 / 종료 abort 전파 / 운영 심볼 alias 완전성 |
 | 기존 `instrument-service` 테스트 | 매칭 교체 반영 |
-| 통합 | loopback fake-toss 경유. 실제 프로바이더에는 접촉하지 않는다 (하드룰 1) |
+| 통합 | loopback fake-toss 경유, 임대 후 조회 순서, 한글·영문 alias 검색, 조회 중 종료. 실제 프로바이더에는 접촉하지 않는다 (하드룰 1) |
 | web | 괄호 생략 렌더 테스트 |
 
 ## 범위 밖
