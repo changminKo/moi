@@ -25,6 +25,10 @@ export const en = {
   'quote.empty': 'Select an instrument to see its quote.',
   'quote.timestamp': 'Timestamp',
   'quote.bookTitle': 'Order book depth',
+  'quote.asks': 'Asks',
+  'quote.bids': 'Bids',
+  'quote.ask': 'ask',
+  'quote.bid': 'bid',
   'quote.noAsks': 'No asks',
   'quote.noBids': 'No bids',
   'quote.sparklineCollecting': 'Collecting chart data…',
@@ -77,6 +81,7 @@ export const en = {
 
   'portfolio.loading': 'Loading portfolio…',
   'portfolio.title': 'Portfolio',
+  'portfolio.eyebrow': 'ACCOUNT / 02',
   'positions.title': 'Positions',
   'positions.empty': 'No positions yet.',
   'positions.caption':
@@ -102,6 +107,18 @@ export const en = {
   'amend.title': 'Amend order',
   'amend.save': 'Save changes',
   'amend.unavailable': 'Amendment unavailable.',
+
+  // Trading reason codes. Both catalogues are typed against the same key
+  // set, so a code translated in one language and not the other is a
+  // compile error rather than a blank panel at runtime.
+  'reason.MARKET_DATA_DEGRADED': 'Market data delayed',
+  'reason.RECOVERY_IN_PROGRESS': 'Recovery in progress',
+  'reason.CANCEL_ONLY': 'Safety mode: cancellations only',
+  'reason.ACCOUNT_READ_ONLY': 'Account safety lock',
+  'reason.UNAVAILABLE': 'Service unavailable',
+  'reason.SERVICE_UNAVAILABLE': 'Service unavailable',
+  'reason.SESSION_EXPIRED': 'Session expired — start a new session',
+  'reason.SYMBOL_NOT_TRADABLE': 'This instrument is not tradable',
 
   'guard.unavailable': 'Action unavailable',
 } as const;

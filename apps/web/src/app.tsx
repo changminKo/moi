@@ -20,11 +20,19 @@ function LocaleSwitch() {
     </button>
   );
   return (
-    <fieldset className="locale-switch">
-      <legend className="sr-only">{t('app.localeSwitchAria')}</legend>
-      {option('ko', '한국어')}
-      {option('en', 'EN')}
-    </fieldset>
+    <>
+      {/* biome-ignore lint/a11y/useSemanticElements: fieldset/legend is for
+          grouped form controls; this is a two-button toggle, so the group
+          role carries the accessible name instead. */}
+      <div
+        className="locale-switch"
+        role="group"
+        aria-label={t('app.localeSwitchAria')}
+      >
+        {option('ko', '한국어')}
+        {option('en', 'EN')}
+      </div>
+    </>
   );
 }
 

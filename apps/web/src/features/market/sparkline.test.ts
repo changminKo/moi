@@ -55,7 +55,8 @@ describe('sparklineGeometry', () => {
   it('reports a downward direction from first to last', () => {
     const geometry = sparklineGeometry(['20.50', '20.10'], 104, 54, 2);
     expect(geometry?.direction).toBe('down');
-    expect(geometry?.high).toBe('20.5');
-    expect(geometry?.low).toBe('20.1');
+    // Reported verbatim (and grouped), so the summary matches the panel.
+    expect(geometry?.high).toBe('20.50');
+    expect(geometry?.low).toBe('20.10');
   });
 });

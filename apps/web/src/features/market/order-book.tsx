@@ -19,7 +19,10 @@ function BookSide({
 }) {
   const { t } = useTranslation();
   return (
-    <ul className={`book-side book-side-${side}`} aria-label={`${side}s`}>
+    <ul
+      className={`book-side book-side-${side}`}
+      aria-label={side === 'ask' ? t('quote.asks') : t('quote.bids')}
+    >
       {levels.length === 0 && (
         <li className="book-empty">
           {side === 'ask' ? t('quote.noAsks') : t('quote.noBids')}
@@ -27,7 +30,9 @@ function BookSide({
       )}
       {levels.map((level) => (
         <li key={`${side}-${level.price}-${level.size}`} className="book-level">
-          <span className="sr-only">{side}</span>
+          <span className="sr-only">
+            {side === 'ask' ? t('quote.ask') : t('quote.bid')}
+          </span>
           <span className="book-price">{formatDecimal(level.price)}</span>
           <span className="book-size">{formatDecimal(level.size)}</span>
           <span

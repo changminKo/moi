@@ -27,6 +27,10 @@ export const ko: Record<MessageKey, string> = {
   'quote.empty': '종목을 선택하면 시세가 표시됩니다.',
   'quote.timestamp': '기준 시각',
   'quote.bookTitle': '호가',
+  'quote.asks': '매도 호가',
+  'quote.bids': '매수 호가',
+  'quote.ask': '매도',
+  'quote.bid': '매수',
   'quote.noAsks': '매도 호가 없음',
   'quote.noBids': '매수 호가 없음',
   'quote.sparklineCollecting': '차트 데이터 수집 중…',
@@ -79,6 +83,7 @@ export const ko: Record<MessageKey, string> = {
 
   'portfolio.loading': '포트폴리오를 불러오는 중…',
   'portfolio.title': '포트폴리오',
+  'portfolio.eyebrow': '계좌 / 02',
   'positions.title': '보유 종목',
   'positions.empty': '보유 종목이 없습니다.',
   'positions.caption': '주문 가능·예약 수량과 평균 단가',
@@ -103,6 +108,18 @@ export const ko: Record<MessageKey, string> = {
   'amend.title': '주문 정정',
   'amend.save': '변경 저장',
   'amend.unavailable': '정정할 수 없는 주문입니다.',
+
+  // Trading reason codes. Both catalogues are typed against the same key
+  // set, so a code translated in one language and not the other is a
+  // compile error rather than a blank panel at runtime.
+  'reason.MARKET_DATA_DEGRADED': '시세가 지연되고 있습니다',
+  'reason.RECOVERY_IN_PROGRESS': '복구가 진행 중입니다',
+  'reason.CANCEL_ONLY': '안전 모드: 취소만 가능합니다',
+  'reason.ACCOUNT_READ_ONLY': '계정 보호 잠금',
+  'reason.UNAVAILABLE': '서비스를 이용할 수 없습니다',
+  'reason.SERVICE_UNAVAILABLE': '서비스를 이용할 수 없습니다',
+  'reason.SESSION_EXPIRED': '세션이 만료되었습니다 — 새 세션을 시작하세요',
+  'reason.SYMBOL_NOT_TRADABLE': '거래할 수 없는 종목입니다',
 
   'guard.unavailable': '지금은 이용할 수 없습니다',
 };

@@ -1,12 +1,14 @@
 import Decimal from 'decimal.js';
+import { formatDecimal, isDecimal } from '../../lib/format-number';
 
 export type TickPoint = Readonly<{ asOf: string; price: string }>;
 
 export const SPARKLINE_CAP = 120;
 
 /**
- * Appends a tick to the ring of collected points. Consecutive duplicates
- * (same `asOf`) are ignored — the poller can observe the same snapshot twice.
+ * Appends a tick to the ring of collected points. A repeat of the previous
+ * `asOf` *and* price is ignored — a reconnect can replay the last snapshot —
+ * while a genuinely new price is kept even when it shares a timestamp.
  */
 export function appendTick(
   points: readonly TickPoint[],
@@ -14,7 +16,8 @@ export function appendTick(
   cap: number = SPARKLINE_CAP,
 ): readonly TickPoint[] {
   const last = points[points.length - 1];
-  if (last && last.asOf === tick.asOf) return points;
+  if (last && last.asOf === tick.asOf && last.price === tick.price)
+    return points;
   const next = [...points, tick];
   return next.length > cap ? next.slice(next.length - cap) : next;
 }
@@ -37,8 +40,13 @@ export function sparklineGeometry(
   height: number,
   pad = 2,
 ): SparklineGeometry | null {
-  if (prices.length < 2) return null;
-  const decimals = prices.map((price) => new Decimal(price));
+  // Prices arrive as strings from the API; anything unparseable ('—', '')
+  // is dropped rather than thrown at render time.
+  const parsed = prices
+    .filter(isDecimal)
+    .map((raw) => ({ raw, value: new Decimal(raw) }));
+  if (parsed.length < 2) return null;
+  const decimals = parsed.map((point) => point.value);
   const high = Decimal.max(...decimals);
   const low = Decimal.min(...decimals);
   const range = high.sub(low);
@@ -55,10 +63,14 @@ export function sparklineGeometry(
   const last = decimals[decimals.length - 1];
   if (first === undefined || last === undefined) return null;
   const direction = last.gt(first) ? 'up' : last.lt(first) ? 'down' : 'flat';
+  // The raw strings are reported, not Decimal's normalised form, so the
+  // summary reads exactly like the price the panel shows ('20.50', not '20.5').
+  const highest = parsed.reduce((a, b) => (b.value.gt(a.value) ? b : a));
+  const lowest = parsed.reduce((a, b) => (b.value.lt(a.value) ? b : a));
   return {
     points: coordinates.join(' '),
     direction,
-    high: high.toString(),
-    low: low.toString(),
+    high: formatDecimal(highest.raw),
+    low: formatDecimal(lowest.raw),
   };
 }

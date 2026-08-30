@@ -1,5 +1,4 @@
 import { useTranslation } from 'react-i18next';
-import { formatDecimal } from '../../lib/format-number';
 import { sparklineGeometry, type TickPoint } from './sparkline';
 
 const WIDTH = 240;
@@ -27,16 +26,15 @@ export function QuoteSparkline({ ticks }: { ticks: readonly TickPoint[] }) {
   }
   const summary = t('quote.sparklineSummary', {
     count: ticks.length,
-    high: formatDecimal(geometry.high),
-    low: formatDecimal(geometry.low),
+    high: geometry.high,
+    low: geometry.low,
   });
   return (
-    <div className={`quote-sparkline is-${geometry.direction}`}>
+    <div className="quote-sparkline">
       <svg
         aria-hidden="true"
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         preserveAspectRatio="none"
-        role="presentation"
       >
         <polyline
           points={geometry.points}

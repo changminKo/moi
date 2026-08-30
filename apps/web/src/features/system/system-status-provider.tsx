@@ -7,6 +7,8 @@ import {
 } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
+import { en } from '../../lib/i18n/messages.en';
+import { ko } from '../../lib/i18n/messages.ko';
 
 export type TradingAvailability = Readonly<{
   place: { enabled: boolean; reasons: readonly string[] };
@@ -25,35 +27,27 @@ export type TradingHealth = Readonly<{
   reasons?: readonly string[];
 }>;
 
-const reasonText: Record<string, string> = {
-  MARKET_DATA_DEGRADED: 'Market data delayed',
-  RECOVERY_IN_PROGRESS: 'Recovery in progress',
-  CANCEL_ONLY: 'Safety mode: cancellations only',
-  ACCOUNT_READ_ONLY: 'Account safety lock',
-  UNAVAILABLE: 'Service unavailable',
-  SERVICE_UNAVAILABLE: 'Service unavailable',
-  SESSION_EXPIRED: 'Session expired — start a new session',
-  SYMBOL_NOT_TRADABLE: 'This instrument is not tradable',
-};
+type ReasonKey = Extract<keyof typeof en, `reason.${string}`>;
+const reasonKey = (reason: string) => `reason.${reason}` as ReasonKey;
 
-const reasonTextKo: Record<string, string> = {
-  MARKET_DATA_DEGRADED: '시세가 지연되고 있습니다',
-  RECOVERY_IN_PROGRESS: '복구가 진행 중입니다',
-  CANCEL_ONLY: '안전 모드: 취소만 가능합니다',
-  ACCOUNT_READ_ONLY: '계정 보호 잠금',
-  UNAVAILABLE: '서비스를 이용할 수 없습니다',
-  SERVICE_UNAVAILABLE: '서비스를 이용할 수 없습니다',
-  SESSION_EXPIRED: '세션이 만료되었습니다 — 새 세션을 시작하세요',
-  SYMBOL_NOT_TRADABLE: '거래할 수 없는 종목입니다',
-};
-
+/**
+ * Render-safe: an unrecognised code degrades to the raw code instead of
+ * throwing. A newly emitted server code must never blank the app while
+ * trading is already degraded.
+ */
 export function presentationForReason(
   reason: string,
   locale: 'ko' | 'en' = 'en',
 ): string {
-  const text = locale === 'ko' ? reasonTextKo[reason] : reasonText[reason];
-  if (!text) throw new Error(`Unknown trading reason code: ${reason}`);
-  return text;
+  const bundle = locale === 'ko' ? ko : en;
+  return bundle[reasonKey(reason)] ?? reason;
+}
+
+/** Fail-fast validation for codes arriving from the API (both catalogues). */
+export function assertKnownReason(reason: string): void {
+  const key = reasonKey(reason);
+  if (!(key in en) || !(key in ko))
+    throw new Error(`Unknown trading reason code: ${reason}`);
 }
 
 export function composeTradingAvailability(
@@ -136,7 +130,7 @@ export function SystemStatusProvider({
       .then((health) => {
         const reasons = [...(health.reasonCodes ?? health.reasons ?? [])];
         for (const reason of reasons) {
-          presentationForReason(reason);
+          assertKnownReason(reason);
         }
         setState({
           availability: composeTradingAvailability(health),

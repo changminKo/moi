@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TradePage } from './trade-page';
 
@@ -41,6 +41,23 @@ const api = {
   }),
   post: vi.fn(),
 };
+
+// MemoryRouter keeps a real history stack; this exposes it to the test the
+// way a browser's back/forward buttons would.
+function WithHistoryControls({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" onClick={() => navigate(-1)}>
+        history back
+      </button>
+      <button type="button" onClick={() => navigate(1)}>
+        history forward
+      </button>
+      {children}
+    </>
+  );
+}
 
 describe('TradePage', () => {
   it('renders search results, quote depth, and separate wallet amounts', async () => {
@@ -91,6 +108,39 @@ describe('TradePage', () => {
     fireEvent.click(reset);
     expect(screen.getByLabelText('Search')).toHaveValue('');
     expect(reset).toBeDisabled();
+
+    // Keyboard fast path: tabbing out of the search box must reach the first
+    // result, so the reset control has to follow the list in the DOM.
+    const list = screen.getByRole('list');
+    expect(
+      list.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('follows browser back and forward through the selection', async () => {
+    render(
+      <WithHistoryControls>
+        <TradePage apiClient={api as never} />
+      </WithHistoryControls>,
+      {
+        wrapper: ({ children }) => (
+          <MemoryRouter initialEntries={['/trade']}>{children}</MemoryRouter>
+        ),
+      },
+    );
+    // Select AAPL, which pushes ?symbol=AAPL.
+    fireEvent.click(await screen.findByRole('button', { name: /Apple/ }));
+    expect(await screen.findByText('189.10')).toBeVisible();
+
+    // Back returns to the unselected URL and clears the quote.
+    fireEvent.click(screen.getByRole('button', { name: 'history back' }));
+    expect(
+      await screen.findByText('Select an instrument to see its quote.'),
+    ).toBeVisible();
+
+    // Forward restores the selection from the URL alone.
+    fireEvent.click(screen.getByRole('button', { name: 'history forward' }));
+    expect(await screen.findByText('189.10')).toBeVisible();
   });
 
   it('marks non-tradable selections and disables the order ticket', async () => {
@@ -101,7 +151,9 @@ describe('TradePage', () => {
         </MemoryRouter>
       ),
     });
-    expect(await screen.findByText('SYMBOL_NOT_TRADABLE')).toBeVisible();
+    expect(
+      await screen.findByText('This instrument is not tradable'),
+    ).toBeVisible();
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /order/i })).toBeDisabled(),
     );

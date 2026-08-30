@@ -36,22 +36,15 @@ export function InstrumentSearch({
         onChange={(e) => onQuery(e.target.value)}
         placeholder={t('instruments.searchPlaceholder')}
       />
-      {onReset && (
-        <button
-          type="button"
-          className="instrument-reset"
-          onClick={onReset}
-          disabled={!canReset}
-        >
-          {t('instruments.showAll')}
-        </button>
-      )}
       <ul className="instrument-list">
         {instruments.map((instrument) => (
           <li key={`${instrument.market}-${instrument.symbol}`}>
             <button
               type="button"
               className={isSame(selected, instrument) ? 'is-selected' : ''}
+              // Pressed conveys "selected, activate again to deselect" to
+              // assistive tech, which the CSS class alone cannot.
+              aria-pressed={isSame(selected, instrument)}
               onClick={() => onSelect(instrument)}
             >
               <span className="instrument-market" aria-hidden="true">
@@ -69,6 +62,23 @@ export function InstrumentSearch({
           </li>
         ))}
       </ul>
+      {/*
+        The reset sits after the list on purpose: a keyboard user tabbing out
+        of the search box lands on the first result — the trading fast path —
+        instead of an intercepting control, and the DOM order matches the
+        visual one (WCAG 1.3.2). It is disabled, hence not a tab stop, while
+        there is nothing to clear.
+      */}
+      {onReset && (
+        <button
+          type="button"
+          className="instrument-reset"
+          onClick={onReset}
+          disabled={!canReset}
+        >
+          {t('instruments.showAll')}
+        </button>
+      )}
     </section>
   );
 }

@@ -13,7 +13,13 @@ export function useQuoteTicks(
   const [ticks, setTicks] = useState<readonly TickPoint[]>([]);
   const instrumentRef = useRef<string>('');
   useEffect(() => {
-    if (!quote) return;
+    if (!quote) {
+      // Deselect: drop the ring so a later reselect never draws one line
+      // across the gap (the x axis is index-spaced, not time-spaced).
+      instrumentRef.current = '';
+      setTicks([]);
+      return;
+    }
     const instrument = `${quote.market}:${quote.symbol}`;
     if (instrumentRef.current !== instrument) {
       instrumentRef.current = instrument;

@@ -20,7 +20,7 @@ export function PortfolioPage() {
   return (
     <div className="portfolio-page">
       <header>
-        <p className="eyebrow">ACCOUNT / 02</p>
+        <p className="eyebrow">{t('portfolio.eyebrow')}</p>
         <h1>{t('portfolio.title')}</h1>
       </header>
       <PositionsTable positions={snapshot.positions} />

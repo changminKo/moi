@@ -7,6 +7,11 @@
 const DECIMAL = /^(-?)(\d+)(?:\.(\d+))?$/;
 const GROUP = /\B(?=(\d{3})+(?!\d))/g;
 
+/** True when the string is a plain decimal this module can format. */
+export function isDecimal(value: string): boolean {
+  return DECIMAL.test(value);
+}
+
 export function formatDecimal(value: string): string {
   const match = DECIMAL.exec(value);
   if (!match) return value;
