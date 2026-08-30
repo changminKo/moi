@@ -72,13 +72,15 @@ export function TradePage({
       .then((x) => setWallets(x.wallets ?? []))
       .catch(() => setWallets([]));
   }, [apiClient]);
-  const deselect = () => {
-    setSelected(null);
+  // Only the URL is written here. `selected` is derived from it by the effect
+  // above, so there is no window in which local state and the query string
+  // disagree — writing both raced when React committed them separately and
+  // unmounted the order ticket mid-interaction.
+  const deselect = () =>
     setParams((current) => {
       current.delete('symbol');
       return current;
     });
-  };
   const select = (instrument: Instrument) => {
     const isToggleOff =
       selected?.market === instrument.market &&
@@ -87,7 +89,6 @@ export function TradePage({
       deselect();
       return;
     }
-    setSelected(instrument);
     setParams((current) => {
       current.set('symbol', instrument.symbol);
       return current;
