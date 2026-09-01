@@ -1,3 +1,5 @@
+import Decimal from 'decimal.js';
+
 /**
  * Display-only formatting for decimal strings coming from the API.
  * Never converts to a JS number: the integer part is grouped textually and
@@ -20,6 +22,19 @@ export function formatDecimal(value: string): string {
   return fraction === undefined
     ? `${sign}${grouped}`
     : `${sign}${grouped}.${fraction}`;
+}
+
+/**
+ * Rounds the fraction to at most `maxDigits` places without padding a
+ * shorter fraction out to that length — "233.3" stays "233.3", only
+ * "233.3331" becomes "233.33". This is a render-boundary cap: the value it
+ * returns is for display only, never for what gets submitted or computed
+ * elsewhere. Anything that is not a plain decimal passes through unchanged,
+ * the same contract `formatDecimal` uses.
+ */
+export function capFractionDigits(value: string, maxDigits: number): string {
+  if (!isDecimal(value)) return value;
+  return new Decimal(value).toDecimalPlaces(maxDigits).toString();
 }
 
 /**

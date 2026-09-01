@@ -15,7 +15,7 @@ test('converts KRW to USD and reloads the authoritative totals', async ({
   await page.getByLabel('Amount').fill('1000000');
   await page.getByRole('button', { name: 'Get quote' }).click();
   await expect(
-    page.getByText('Destination: 700', { exact: true }),
+    page.getByText('You receive: $700', { exact: true }),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Convert' }).click();
   await expect(page.getByRole('button', { name: 'Get quote' })).toBeVisible();
