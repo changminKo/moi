@@ -165,8 +165,8 @@ treatment. There is no second accounting to reconcile.
 
 The basis starts at zero at the first fill the runner commits, so realised PnL
 measures **this bot's trading**, not the account's history — the same judgement
-`dailyNotional` makes. When the ledger holds a position the runner never saw
-itself acquire, a sell exceeds the basis; the fill is then recorded realising
+`dailyEntryNotional` makes. When the ledger holds a position the runner never
+saw itself acquire, a sell exceeds the basis; the fill is then recorded realising
 nothing, the basis is re-read from the ledger, and it is reported at `error`,
 because a limit computed over a series with a hole in it should not look
 trustworthy.
@@ -318,9 +318,11 @@ carries that policy: counting exits too would charge a round trip twice against 
 budget only one side of it can spend, locking out re-entry for the rest of the
 day. The `notional` on a decision record stays a fact about the order on both
 sides — record the fact, filter in the query — so phase C's loss limits can read
-the same records instead of needing a second field written a second way. A limit exists to cap exposure, and refusing an exit does not cap
-exposure, it traps it: a bot at its open-order cap that cannot place the closing
-order holds the position until a person notices. §6.3 already words quote
+the same records instead of needing a second field written a second way.
+
+A limit exists to cap exposure, and refusing an exit does not cap exposure, it
+traps it: a bot at its open-order cap that cannot place the closing order holds
+the position until a person notices. §6.3 already words quote
 freshness as refusing an *entry*; this is that reading applied to the rest.
 
 §6.4's two loss limits joined it in phase C. Both are folds over `fills.ndjson`,

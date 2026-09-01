@@ -262,7 +262,7 @@ export class StateStore {
    * Idempotent by `decisionId`, and that is what makes an uncommitted fill step
    * safe to replay (§6.4). A decision derived from an account event takes an id
    * derived from that event, so re-running `onFill` after a crash recomputes the
-   * *same* id; writing the line twice would put one order in `dailyNotional`
+   * *same* id; writing the line twice would put one order in `dailyEntryNotional`
    * twice and leave two log lines an operator has to recognise as one decision.
    *
    * Answers whether it wrote, so a caller can tell a fresh decision from a
