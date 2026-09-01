@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { useTranslation } from 'react-i18next';
 import type { BookLevel } from '../../lib/api-types';
+import type { Currency } from '../../lib/currency';
 import { formatDecimal, isDecimal } from '../../lib/format-number';
 
 /**
@@ -71,15 +72,27 @@ function BookSide({
 export function OrderBook({
   bids = [],
   asks = [],
+  currency,
 }: {
   bids?: readonly BookLevel[];
   asks?: readonly BookLevel[];
+  /**
+   * Named once, here on the heading, rather than on every level. The book is a
+   * dense two-column grid of one instrument's own prices, aligned on
+   * `tabular-nums`; a ₩ or $ repeated down twenty rows costs that alignment
+   * and tells the reader nothing the heading cannot say once.
+   */
+  currency?: Currency | undefined;
 }) {
   const { t } = useTranslation();
   const max = maxVolume([...asks, ...bids]);
   return (
     <section aria-labelledby="order-book-title" className="panel order-book">
-      <h2 id="order-book-title">{t('quote.bookTitle')}</h2>
+      <h2 id="order-book-title">
+        {currency === undefined
+          ? t('quote.bookTitle')
+          : t('quote.bookTitleWithCurrency', { currency })}
+      </h2>
       <div className="book-sides">
         <BookSide side="ask" levels={asks} max={max} />
         <BookSide side="bid" levels={bids} max={max} />

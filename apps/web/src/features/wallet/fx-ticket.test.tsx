@@ -54,6 +54,38 @@ describe('FxTicket', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
     expect(invalidateQueries).toHaveBeenCalled();
+
+    // The conversion is done, so the form that produced it is done too: the
+    // quote block goes and the amount that was converted goes with it.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /convert/i })).toBeNull(),
+    );
+    expect(screen.getByLabelText(/amount/i)).toHaveValue('');
+  });
+
+  it('keeps the amount when the conversion is refused', async () => {
+    const api = {
+      post: vi
+        .fn()
+        .mockResolvedValueOnce({
+          quoteId: 'q5',
+          rate: '0.0007',
+          fee: '1',
+          sourceAmount: '1000',
+          destinationAmount: '0.6993',
+          expiresAt: '2099-01-01T00:00:00Z',
+        })
+        .mockRejectedValueOnce({ code: 'INSUFFICIENT_AVAILABLE_BALANCE' }),
+    };
+    render(<FxTicket apiClient={api as never} />);
+    fireEvent.change(screen.getByLabelText(/amount/i), {
+      target: { value: '1000' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /quote/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /convert/i }));
+
+    expect(await screen.findByText(/insufficient|available/i)).toBeVisible();
+    expect(screen.getByLabelText(/amount/i)).toHaveValue('1,000');
   });
 
   it('groups large amounts and labels a zero fee, matching the reported case', async () => {

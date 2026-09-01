@@ -85,10 +85,83 @@
   height: 3rem;
 }
 
-.sparkline-empty {
-  margin: 0 0 var(--space-4);
+.sparkline-empty,
+.sparkline-summary {
+  margin: var(--space-2) 0 0;
   color: var(--color-muted);
   font-size: var(--type-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Chart window — a pill-sized sibling of the ticket's .side-toggle segmented
+   control (order-ticket.css), deliberately quieter: this picks how much
+   history to look at, it does not place an order. The real radios stay in the
+   DOM and cover their labels for the same reason they do there, so keyboard,
+   assistive tech and automation all operate the input rather than the paint. */
+.chart-window {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  border: 0;
+}
+
+.chart-window legend {
+  float: left;
+  margin: 0;
+  padding: 0;
+  color: var(--color-muted);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chart-window-options {
+  display: flex;
+  gap: var(--space-1);
+  padding: 2px;
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-pill);
+}
+
+.chart-window-options label {
+  position: relative;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  color: var(--color-muted);
+  border-radius: var(--radius-pill);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.chart-window-options label:hover {
+  color: var(--color-ink);
+}
+
+.chart-window-radio {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.chart-window-options label:has(input:checked) {
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+}
+
+.chart-window-options label:has(input:focus-visible) {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 /* Order book */

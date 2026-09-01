@@ -24,6 +24,12 @@ export type Instrument = Readonly<{
   symbol: string;
   name: string;
   tradable: boolean;
+  /**
+   * The currency the instrument is quoted and settled in. Optional because
+   * `InstrumentService` omits the field when its catalog row has none; every
+   * catalog `ProductionRuntime` builds states it.
+   */
+  currency?: 'KRW' | 'USD';
 }>;
 export type Wallet = Readonly<{
   currency: 'KRW' | 'USD';
@@ -46,6 +52,12 @@ export type QuoteSnapshot = Readonly<{
   health?: 'HEALTHY' | 'DEGRADED' | 'RECOVERING';
   recoveryEpoch?: string;
   marketDataVersion?: string;
+  /**
+   * Book-derived, so absent whenever the symbol's slot holds no book — see
+   * `docs/api/quote-contract.md`. `resolveQuoteCurrency` in `lib/currency.ts`
+   * is what decides between this and the instrument's own currency.
+   */
+  currency?: 'KRW' | 'USD';
   bids?: readonly BookLevel[];
   asks?: readonly BookLevel[];
 }>;

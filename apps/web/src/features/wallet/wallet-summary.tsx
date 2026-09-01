@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { Wallet } from '../../lib/api-types';
+import { withCurrency } from '../../lib/currency';
 import { capFractionDigits, formatDecimal } from '../../lib/format-number';
 import './wallet.css';
 
@@ -9,10 +10,12 @@ import './wallet.css';
 const MAX_DISPLAYED_FRACTION_DIGITS = 2;
 
 function displayAmount(currency: Wallet['currency'], value: string): string {
-  const amount = formatDecimal(
-    capFractionDigits(value || '0', MAX_DISPLAYED_FRACTION_DIGITS),
+  return withCurrency(
+    currency,
+    formatDecimal(
+      capFractionDigits(value || '0', MAX_DISPLAYED_FRACTION_DIGITS),
+    ),
   );
-  return currency === 'KRW' ? `₩${amount}` : `$${amount}`;
 }
 
 export function WalletSummary({ wallets }: { wallets: readonly Wallet[] }) {

@@ -3,7 +3,37 @@ import { formatDecimal, isDecimal } from '../../lib/format-number';
 
 export type TickPoint = Readonly<{ asOf: string; price: string }>;
 
-export const SPARKLINE_CAP = 120;
+/**
+ * The chart windows a reader can pick between, in ticks. A short fixed set
+ * rather than a free field: the axis is index-spaced, so only a count means
+ * anything here, and four options fit the panel as a segmented control while a
+ * number box would invite values (3, 100000) the ring can never serve.
+ */
+export const SPARKLINE_WINDOWS = [30, 60, 120, 240] as const;
+export type SparklineWindowSize = (typeof SPARKLINE_WINDOWS)[number];
+
+/** What the panel shipped with, and so what an untouched panel still shows. */
+export const DEFAULT_SPARKLINE_WINDOW: SparklineWindowSize = 120;
+
+/**
+ * The ring holds the widest window; every narrower one is a slice of it
+ * (`takeWindow`). Collecting only the default would make the widest option a
+ * lie — the older ticks would already have been dropped by the time the
+ * reader asked for them.
+ */
+export const SPARKLINE_CAP: number = Math.max(...SPARKLINE_WINDOWS);
+
+/**
+ * The newest `size` points of the ring. Returns the ring itself when it holds
+ * fewer, which is the honest case a wide window starts in: the panel says how
+ * many of the requested ticks it actually has rather than padding the chart.
+ */
+export function takeWindow(
+  points: readonly TickPoint[],
+  size: number,
+): readonly TickPoint[] {
+  return points.length <= size ? points : points.slice(points.length - size);
+}
 
 /**
  * Appends a tick to the ring of collected points. A repeat of the previous

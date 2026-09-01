@@ -109,7 +109,11 @@ export function FxTicket({
         { quoteId: quote.quoteId },
         { idempotencyKey: newIdempotencyKey() },
       );
+      // The quote is spent and the amount with it: leaving either on screen
+      // reads as a conversion still waiting to be made. A failure below keeps
+      // both, because then there is something left to retry or correct.
       setQuote(null);
+      setAmount('');
       invalidateQueries();
     } catch (e) {
       const code = e as { code?: string };

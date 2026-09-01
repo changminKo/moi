@@ -1,4 +1,8 @@
-import { QueryClientProvider } from '@tanstack/react-query';
+import {
+  QueryClientProvider,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
@@ -7,20 +11,38 @@ import { useInstruments } from '../features/instruments/use-instruments';
 import { QuotePanel } from '../features/market/quote-panel';
 import { useQuoteStream } from '../features/market/use-quote-stream';
 import { OrderTicket } from '../features/orders/order-ticket';
+import { PORTFOLIO_QUERY_KEY } from '../features/portfolio/use-portfolio-stream';
 import { useTradingStatus } from '../features/system/system-status-provider';
 import { FxTicket } from '../features/wallet/fx-ticket';
 import { WalletSummary } from '../features/wallet/wallet-summary';
 import type { ApiClient } from '../lib/api-client';
 import { apiClient as defaultApiClient } from '../lib/api-client';
 import type { Instrument, Wallet } from '../lib/api-types';
+import { resolveQuoteCurrency } from '../lib/currency';
 import { queryClient } from '../lib/query-client';
 import './trade-page.css';
 
+/** Stable identity: a fresh literal here would re-render the wallet panel. */
+const NO_WALLETS: readonly Wallet[] = [];
+
+/**
+ * The provider shell. The screen below reads the shared query cache, so it has
+ * to sit inside a provider — and this page is still rendered standalone in
+ * tests, where `main.tsx`'s provider is not above it.
+ */
 export function TradePage({
   apiClient = defaultApiClient,
 }: {
   apiClient?: ApiClient;
 }) {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TradeScreen apiClient={apiClient} />
+    </QueryClientProvider>
+  );
+}
+
+function TradeScreen({ apiClient }: { apiClient: ApiClient }) {
   const { t } = useTranslation();
   const [params, setParams] = useSearchParams();
   const [query, setQuery] = useState('');
@@ -31,7 +53,21 @@ export function TradePage({
     selected?.tradable ? selected.symbol : undefined,
     apiClient,
   );
-  const [wallets, setWallets] = useState<readonly Wallet[]>([]);
+  const client = useQueryClient();
+  // The wallets read from the same cache entry `useOrderMutations` and the FX
+  // ticket invalidate, rather than from a private copy of the portfolio this
+  // page fetched once. Before, an effect read `/api/v1/portfolio` into local
+  // state and the FX ticket's `invalidateQueries` fired a request whose answer
+  // was thrown away, so a conversion could never move the balances on screen.
+  const portfolio = useQuery({
+    queryKey: PORTFOLIO_QUERY_KEY,
+    queryFn: () =>
+      apiClient.get<{ wallets?: readonly Wallet[] }>('/api/v1/portfolio'),
+  });
+  const wallets = portfolio.data?.wallets ?? NO_WALLETS;
+  const refreshPortfolio = useCallback(() => {
+    void client.invalidateQueries({ queryKey: PORTFOLIO_QUERY_KEY });
+  }, [client]);
   const { availability } = useTradingStatus();
   // The symbol the page was opened with, if any: it is revealed and focused in
   // the list once, then forgotten. Captured at mount so later URL writes — the
@@ -73,12 +109,6 @@ export function TradePage({
       active = false;
     };
   }, [apiClient, instruments, symbolParam, selected]);
-  useEffect(() => {
-    apiClient
-      .get<{ wallets: readonly Wallet[] }>('/api/v1/portfolio')
-      .then((x) => setWallets(x.wallets ?? []))
-      .catch(() => setWallets([]));
-  }, [apiClient]);
   // Only the URL is written here. `selected` is derived from it by the effect
   // above, so there is no window in which local state and the query string
   // disagree — writing both raced when React committed them separately and
@@ -113,53 +143,52 @@ export function TradePage({
     forgetDeepLink();
     setQuery(value);
   };
+  const currency = resolveQuoteCurrency(selected, quote);
   return (
-    <QueryClientProvider client={queryClient}>
-      <div className="trade-page">
-        <div className="trade-col trade-col-side">
-          <InstrumentSearch
-            query={query}
-            onQuery={search}
-            instruments={instruments}
-            onSelect={select}
-            selected={selected}
-            onReset={reset}
-            canReset={Boolean(selected) || query !== ''}
-            focusSymbol={focusSymbol}
-            onFocusHandled={forgetDeepLink}
-          />
-        </div>
-        <div className="trade-col trade-col-main">
-          {selected && !selected.tradable && (
-            <p role="alert">{t('reason.SYMBOL_NOT_TRADABLE')}</p>
-          )}
-          <QuotePanel quote={quote} instrument={selected} />
-        </div>
-        <div className="trade-col trade-col-ticket">
-          {selected && (
-            <OrderTicket
-              market={selected.market}
-              symbol={selected.symbol}
-              apiClient={apiClient}
-              capability={{
-                canPlace: selected.tradable && availability.place.enabled,
-                reasonCodes: availability.place.reasons,
-              }}
-            />
-          )}
-          <WalletSummary wallets={wallets} />
-          <FxTicket
-            apiClient={apiClient}
-            invalidateQueries={() => {
-              void apiClient.get('/api/v1/portfolio');
-            }}
-            capability={{
-              canFx: availability.fx.enabled,
-              reasonCodes: availability.fx.reasons,
-            }}
-          />
-        </div>
+    <div className="trade-page">
+      <div className="trade-col trade-col-side">
+        <InstrumentSearch
+          query={query}
+          onQuery={search}
+          instruments={instruments}
+          onSelect={select}
+          selected={selected}
+          onReset={reset}
+          canReset={Boolean(selected) || query !== ''}
+          focusSymbol={focusSymbol}
+          onFocusHandled={forgetDeepLink}
+        />
       </div>
-    </QueryClientProvider>
+      <div className="trade-col trade-col-main">
+        {selected && !selected.tradable && (
+          <p role="alert">{t('reason.SYMBOL_NOT_TRADABLE')}</p>
+        )}
+        <QuotePanel quote={quote} instrument={selected} />
+      </div>
+      <div className="trade-col trade-col-ticket">
+        {selected && (
+          <OrderTicket
+            market={selected.market}
+            symbol={selected.symbol}
+            apiClient={apiClient}
+            quote={quote}
+            {...(currency === undefined ? {} : { currency })}
+            capability={{
+              canPlace: selected.tradable && availability.place.enabled,
+              reasonCodes: availability.place.reasons,
+            }}
+          />
+        )}
+        <WalletSummary wallets={wallets} />
+        <FxTicket
+          apiClient={apiClient}
+          invalidateQueries={refreshPortfolio}
+          capability={{
+            canFx: availability.fx.enabled,
+            reasonCodes: availability.fx.reasons,
+          }}
+        />
+      </div>
+    </div>
   );
 }

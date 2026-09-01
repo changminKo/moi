@@ -18,6 +18,18 @@ type Health = (typeof HEALTH)[number];
 const isHealth = (value: unknown): value is Health =>
   typeof value === 'string' && HEALTH.includes(value as Health);
 
+const CURRENCIES = ['KRW', 'USD'] as const;
+type FrameCurrency = (typeof CURRENCIES)[number];
+
+/**
+ * The frame's `currency` is book-derived and, like the book, absent whenever
+ * the slot holds none. It is narrowed rather than trusted: a value outside the
+ * two currencies this product prices in becomes "unknown", which the panel
+ * renders as a bare number, instead of a symbol nobody can read.
+ */
+const isCurrency = (value: unknown): value is FrameCurrency =>
+  typeof value === 'string' && CURRENCIES.includes(value as FrameCurrency);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -78,6 +90,9 @@ export function applyQuoteFrame(
   if (asOf === undefined) return null;
 
   const health = isHealth(payload.health) ? payload.health : base?.health;
+  const currency = isCurrency(payload.currency)
+    ? payload.currency
+    : base?.currency;
   const bids = parseLevels(payload.bids) ?? base?.bids;
   const asks = parseLevels(payload.asks) ?? base?.asks;
 
@@ -89,6 +104,7 @@ export function applyQuoteFrame(
     recoveryEpoch: frame.recoveryEpoch,
     marketDataVersion: frame.marketDataVersion,
     ...(health === undefined ? {} : { health }),
+    ...(currency === undefined ? {} : { currency }),
     ...(bids === undefined ? {} : { bids }),
     ...(asks === undefined ? {} : { asks }),
   };
