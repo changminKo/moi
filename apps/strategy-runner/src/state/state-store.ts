@@ -74,9 +74,20 @@ export interface DecisionRecord {
   /** Present on `cancel`. */
   readonly orderId?: string;
   /**
-   * The tick price the decision was taken at, and the notional the risk gate
-   * measured. Recorded so the daily total can be rebuilt from the log alone,
-   * without re-reading a market that has since moved.
+   * What the order was worth when the decision was taken, in exact money.
+   *
+   * Recorded on **both** sides. It is a fact about the order — an operator
+   * reviewing an exit wants to know what it was worth just as much as an
+   * entry — and recording it here means any daily total can be rebuilt from the
+   * log alone, without re-reading a market that has since moved.
+   *
+   * It is deliberately *not* "the amount charged against the daily limit".
+   * Which decisions a limit governs is policy, and policy belongs in the query
+   * that applies it (`dailyEntryNotional`) rather than in the field, so that a
+   * second limit measuring something else can read the same records instead of
+   * needing a second field written a second way. Phase C's realised-PnL and
+   * loss limits are exactly that second reader: **record the fact, filter in
+   * the query.**
    */
   readonly notional?: DecimalString;
 }
@@ -186,7 +197,7 @@ function readMoney(value: unknown, description: string): DecimalString {
   return value;
 }
 
-/** The UTC calendar day a recorded instant falls in. See `dailyNotional`. */
+/** The UTC calendar day a recorded instant falls in. See `dailyEntryNotional`. */
 export const utcDay = (instant: string): string => instant.slice(0, 10);
 
 export interface StateStoreOptions {
@@ -285,28 +296,40 @@ export class StateStore {
   }
 
   /**
-   * How much notional has been committed on a UTC day, over every decision that
-   * recorded one — pending included, because a decision that has been written
-   * down is a decision the runner is going to submit.
+   * How much **entry** notional has been committed on a UTC day, over every
+   * decision that recorded one — pending included, because a decision that has
+   * been written down is a decision the runner is going to submit.
+   *
+   * Entries only, and the name says so rather than leaving it to be discovered.
+   * `RiskGate` applies the daily limit to a `BUY` and never to a `SELL`, because
+   * a limit that refuses an exit does not cap exposure, it traps it. Counting
+   * both sides charged a round trip twice against a budget only one side can
+   * spend: enter at the limit, exit the whole position, and the day's remaining
+   * re-entries are refused on a budget that was never used. It failed in the
+   * safe direction and it still locked the bot out for the rest of the day.
    *
    * UTC rather than market-local: a market-local day needs a calendar the runner
    * does not own, and a bot trading two markets would have two days at once. The
-   * limit it enforces is a rate limit on the runner's own activity, so the
-   * runner's own clock is the honest boundary. Stated here because phase C's
-   * realised-PnL accounting will have to answer the same question and should
-   * answer it the same way.
+   * limit is a rate limit on the runner's own activity, so the runner's own
+   * clock is the honest boundary. Stated here because phase C's realised-PnL
+   * accounting will have to answer the same question and should answer it the
+   * same way.
    */
-  dailyNotional(day: string): DecimalString {
+  dailyEntryNotional(day: string): DecimalString {
     const total = this.#decided
       .filter(
-        (record) => record.notional !== undefined && utcDay(record.at) === day,
+        (record) =>
+          record.notional !== undefined &&
+          // A cancel carries no intent and commits nothing; a sell is an exit.
+          record.intent?.side === 'BUY' &&
+          utcDay(record.at) === day,
       )
       .reduce(
         (sum, record) => sum.plus(record.notional as DecimalString),
         moneyDecimal(0),
       );
 
-    return assertExactMoney(total, 'daily notional').toString();
+    return assertExactMoney(total, 'daily entry notional').toString();
   }
 
   close(): void {

@@ -195,7 +195,7 @@ describe('StateStore decisions', () => {
     expect(
       reopened.pendingDecisions().map((each) => each.decisionId),
     ).toStrictEqual(['d-1']);
-    expect(reopened.dailyNotional('2026-09-02')).toBe('70000');
+    expect(reopened.dailyEntryNotional('2026-09-02')).toBe('70000');
   });
 
   it('reopens a log that holds risk refusals', () => {
@@ -257,9 +257,9 @@ describe('StateStore decisions', () => {
   });
 });
 
-describe('StateStore daily notional', () => {
+describe('StateStore daily entry notional', () => {
   it('is zero on a day with nothing recorded', () => {
-    expect(store(scratch()).dailyNotional('2026-09-02')).toBe('0');
+    expect(store(scratch()).dailyEntryNotional('2026-09-02')).toBe('0');
   });
 
   it('sums exactly, over pending and settled decisions alike', () => {
@@ -273,7 +273,7 @@ describe('StateStore daily notional', () => {
       outcome: 'accepted',
     });
 
-    expect(state.dailyNotional('2026-09-02')).toBe('70000.75');
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('70000.75');
   });
 
   it('counts only the day asked for', () => {
@@ -284,8 +284,8 @@ describe('StateStore daily notional', () => {
       decision('d-2', { at: '2026-09-03T01:00:00.000Z', notional: '200' }),
     );
 
-    expect(state.dailyNotional('2026-09-02')).toBe('100');
-    expect(state.dailyNotional('2026-09-03')).toBe('200');
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('100');
+    expect(state.dailyEntryNotional('2026-09-03')).toBe('200');
   });
 
   it('survives a restart, which is the whole reason it is on disk', () => {
@@ -295,7 +295,45 @@ describe('StateStore daily notional', () => {
     first.appendDecision(decision('d-1', { notional: '70000' }));
     first.close();
 
-    expect(store(directory).dailyNotional('2026-09-02')).toBe('70000');
+    expect(store(directory).dailyEntryNotional('2026-09-02')).toBe('70000');
+  });
+
+  /**
+   * The limit this feeds governs *entries* — `risk-gate.ts` checks it only for a
+   * `BUY`, because a limit that refuses an exit does not cap exposure, it traps
+   * it. Summing both sides therefore charged a round trip twice against a budget
+   * only one side of it can ever spend: enter at the limit, exit the whole
+   * position, and every legitimate re-entry for the rest of the day is refused
+   * on a budget that was never actually used.
+   */
+  it('counts entries only, not the exits that close them', () => {
+    const state = store(scratch());
+
+    state.appendDecision(decision('d-1', { notional: '1000000' }));
+    state.appendDecision(
+      decision('d-2', {
+        notional: '1000000',
+        intent: { ...INTENT, side: 'SELL' },
+      }),
+    );
+
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('1000000');
+  });
+
+  it('counts entries only after a restart too', () => {
+    const directory = scratch();
+    const first = store(directory);
+
+    first.appendDecision(decision('d-1', { notional: '1000000' }));
+    first.appendDecision(
+      decision('d-2', {
+        notional: '1000000',
+        intent: { ...INTENT, side: 'SELL' },
+      }),
+    );
+    first.close();
+
+    expect(store(directory).dailyEntryNotional('2026-09-02')).toBe('1000000');
   });
 
   it('ignores a cancel, which commits no notional', () => {
@@ -310,7 +348,7 @@ describe('StateStore daily notional', () => {
       orderId: 'o-1',
     });
 
-    expect(state.dailyNotional('2026-09-02')).toBe('0');
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('0');
   });
 
   it('reads the UTC day out of a recorded instant', () => {

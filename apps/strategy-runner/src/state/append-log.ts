@@ -1,11 +1,6 @@
-import {
-  closeSync,
-  fsyncSync,
-  openSync,
-  readFileSync,
-  writeSync,
-} from 'node:fs';
+import { closeSync, fsyncSync, openSync, readFileSync } from 'node:fs';
 import { DomainError } from '@moi/trading-core';
+import { writeAll } from './write-all.js';
 
 /**
  * The append-only half of the state store (design §3, §8.1).
@@ -29,6 +24,18 @@ import { DomainError } from '@moi/trading-core';
  * losing the tail of "why the strategy stood still" across a power cut costs
  * audit detail and no correctness — and paying an fsync per tick to keep it
  * would put the cost somewhere the argument does not need it.
+ *
+ * **Completeness.** Both properties above assume a record reaches the file whole,
+ * and `fs.writeSync` does not promise that — see `writeAll`. Every record is
+ * therefore written to completion, and a record that *cannot* be completed
+ * closes the log to further appends. That last part matters as much as the
+ * loop: `O_APPEND` puts the next write straight after whatever landed, so
+ * appending onto a fragment would splice two records into one unparseable line.
+ * Where that line falls decides how badly it ends — in the middle of the file
+ * it fails closed on the next read, but as the final line it is
+ * indistinguishable from an ordinary torn tail and is discarded, taking a
+ * durable decision with it. Refusing to append is how that is kept impossible
+ * rather than merely unlikely.
  */
 
 /** A parsed record. The reader guarantees an object; the shape is the caller's. */
@@ -69,6 +76,8 @@ function encode(record: unknown): string {
 export class AppendLog {
   readonly #fd: number;
   #closed = false;
+  /** Set when a record was left half-written. No further append is allowed. */
+  #incomplete = false;
 
   private constructor(fd: number) {
     this.#fd = fd;
@@ -84,11 +93,29 @@ export class AppendLog {
       invalid('an append-log record cannot be written after close');
     }
 
+    if (this.#incomplete) {
+      invalid(
+        'this append log ends in an incomplete record and cannot be appended to; the next write would splice two records into one line',
+      );
+    }
+
     // Encoded before the write so a record that cannot be represented fails
     // without having put half of itself in the file.
-    const line = encode(record);
+    const bytes = Buffer.from(encode(record), 'utf8');
+    let landed = 0;
 
-    writeSync(this.#fd, line);
+    try {
+      writeAll(this.#fd, bytes, (written) => {
+        landed = written;
+      });
+    } catch (error) {
+      // Nothing landed: the file is exactly as it was, so the log is still
+      // consistent and a transient failure does not have to end the run. A
+      // fragment landed: it does not, and nothing may be appended after it.
+      this.#incomplete = landed > 0;
+
+      throw error;
+    }
 
     if (options.durable === true) {
       fsyncSync(this.#fd);

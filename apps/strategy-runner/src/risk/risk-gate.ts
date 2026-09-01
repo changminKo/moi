@@ -164,12 +164,12 @@ export class RiskGate {
       );
     }
 
-    const spent = this.#state.dailyNotional(
+    const spent = this.#state.dailyEntryNotional(
       utcDay(new Date(this.#now()).toISOString()),
     );
     const wouldSpend = assertExactMoney(
       moneyDecimal(spent).plus(notional),
-      'daily notional',
+      'daily entry notional',
     );
 
     if (wouldSpend.gt(this.#limits.maxDailyNotional)) {

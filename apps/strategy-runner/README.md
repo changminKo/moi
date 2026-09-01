@@ -107,6 +107,13 @@ the order is submitted, and a `noop` is not. Losing the tail of "why the strateg
 stood still" across a power cut costs audit detail and no correctness, and paying
 an fsync per tick would put the cost where the argument does not need it.
 
+Both of those assume a record reaches the file whole, and `fs.writeSync` does not
+promise that — it returns a short count on a full disk rather than throwing. So
+every record is written to completion (`write-all.ts`), and a record that cannot
+be completed closes the log to further appends: `O_APPEND` would put the next
+write straight after the fragment and splice two records into one line, and a
+spliced line that lands last is indistinguishable from an ordinary torn tail.
+
 The index is in memory, rebuilt from the logs at startup — which is what §8.1
 already asks for. An on-disk index would be a second copy of a fact the log
 already holds, and a second copy is a thing that can disagree after a crash.
@@ -172,7 +179,12 @@ out of a transient fault without someone deleting a file.
 
 Two rules apply to every order — the instrument must be allow-listed, and the
 market must be open if `tradingHoursOnly` is set. Every *limit* applies to a
-`BUY` only. A limit exists to cap exposure, and refusing an exit does not cap
+`BUY` only, and the daily budget is read through `dailyEntryNotional`, whose name
+carries that policy: counting exits too would charge a round trip twice against a
+budget only one side of it can spend, locking out re-entry for the rest of the
+day. The `notional` on a decision record stays a fact about the order on both
+sides — record the fact, filter in the query — so phase C's loss limits can read
+the same records instead of needing a second field written a second way. A limit exists to cap exposure, and refusing an exit does not cap
 exposure, it traps it: a bot at its open-order cap that cannot place the closing
 order holds the position until a person notices. §6.3 already words quote
 freshness as refusing an *entry*; this is that reading applied to the rest.
