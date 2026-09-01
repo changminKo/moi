@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { MarketEvent } from '../types.js';
+import { MarketDataError, type MarketEvent } from '../types.js';
 import { type TossSocket, TossWebSocketMarketData } from './toss-websocket.js';
 
 const TRADE_FRAME = (price: string) => ({
@@ -56,7 +56,8 @@ class FakeSocket implements TossSocket {
   }
 }
 
-function build() {
+/** `autoOpen: false` leaves the handshake pending so it can be superseded. */
+function build({ autoOpen = true }: { autoOpen?: boolean } = {}) {
   const sockets: FakeSocket[] = [];
   const stream = new TossWebSocketMarketData({
     url: new URL('ws://127.0.0.1:1/socket'),
@@ -68,7 +69,7 @@ function build() {
       sockets.push(socket);
       // The handshake installs its handlers synchronously after the factory
       // returns, so the open lands on the next microtask.
-      queueMicrotask(() => socket.onopen?.());
+      if (autoOpen) queueMicrotask(() => socket.onopen?.());
       return socket;
     },
   });
@@ -140,6 +141,34 @@ describe('reconnecting over a socket that is still open', () => {
 
     await stream.close();
     await drain;
+  });
+
+  it('rejects a handshake whose socket the next handshake takes away', async () => {
+    // `MarketRuntime.#recoverOnce` serialises its own connects, but this
+    // adapter is general and must not depend on a caller's discipline: a
+    // superseded handshake has to settle, not hang forever.
+    const { stream, sockets } = build({ autoOpen: false });
+    const signal = new AbortController().signal;
+    const first = stream.connect(signal);
+    const firstOutcome = first.catch((error: unknown) => error);
+    await flush();
+    expect(sockets).toHaveLength(1);
+
+    const second = stream.connect(signal);
+    await flush();
+    expect(sockets).toHaveLength(2);
+    expect((sockets[0] as FakeSocket).closeCalls).toHaveLength(1);
+
+    const error = await firstOutcome;
+    expect(error).toBeInstanceOf(MarketDataError);
+    expect(error).toMatchObject({ code: 'TRANSPORT_CLOSED' });
+    expect((error as Error).message).toContain('superseded');
+
+    // The handshake that took the socket is untouched and still completes.
+    (sockets[1] as FakeSocket).onopen?.();
+    await expect(second).resolves.toBeUndefined();
+    expect(stream.isConnected).toBe(true);
+    await stream.close();
   });
 
   it('closes and detaches the live socket on close()', async () => {

@@ -39,7 +39,6 @@ function build(
       input,
     })),
     resolveCas: vi.fn(async () => true),
-    resolveRetryExhausted: vi.fn(async () => undefined),
   };
   const health = new MarketHealthMachine({ market: 'US', incidents });
   const stateStore = new MarketStateStore();
@@ -277,7 +276,11 @@ describe('MarketRuntime', () => {
       timeout: 3_000,
     });
     expect(runtime.supervisor.exhausted).toBe(false);
-    expect(incidents.resolveRetryExhausted).toHaveBeenCalledWith('US');
+    // The incident row itself is cleared on the recovery path by
+    // `resolveMarketIncidents` (§16.34), not from here.
+    expect(
+      logs.filter((l) => l.event === 'recovery.hold_cleared'),
+    ).toHaveLength(1);
     await runtime.close();
   });
 

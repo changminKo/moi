@@ -834,20 +834,6 @@ export class ProductionRuntime {
           });
           await this.#refreshIncidents();
         },
-        resolveRetryExhausted: async () => {
-          const active = await this.#incidents.active({
-            type: 'MARKET',
-            id: market,
-          });
-          for (const incident of active)
-            if (incident.causeCode === 'RECOVERY_RETRY_EXHAUSTED')
-              await this.#incidents.resolveCas({
-                incidentId: incident.incidentId,
-                version: incident.version,
-                recoveryEpoch: incident.recoveryEpoch,
-              });
-          await this.#refreshIncidents();
-        },
       },
       leases: this.leases,
       symbols,

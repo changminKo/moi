@@ -198,6 +198,16 @@ export class TossWebSocketMarketData implements MarketDataStream {
     this.controlQueue = [];
     // Whatever the previous connection left unread belongs to a recovery epoch
     // that is over; a queued `transportClosed` would degrade the new one.
+    //
+    // This drops unread *data* frames too, and is only safe under an invariant
+    // this class cannot enforce: `events()` has exactly one consumer, it
+    // drains in order, and `finish()` has already pushed the terminal
+    // `transportClosed` that makes that consumer return — so by the time a new
+    // handshake runs the queue holds nothing but that spent marker.
+    // `MarketRuntime.#startLoop` is that single consumer today. A caller that
+    // runs two consumers, or reconnects before its consumer has drained, loses
+    // market data here silently. Recovery re-baselines every symbol from REST
+    // (`RecoveryCoordinator`), which is what makes the trade worth taking.
     this.queue = [];
     this.generation += 1;
     const generation = this.generation;
