@@ -54,8 +54,24 @@ crash — the position `infra/oracle/notify.sh` takes for deploys.
 window onto one message carrying `+N suppressed`; a 5-token bucket refilling
 one token per 12 s paces the rest; the last 2 tokens are reserved for `warn`
 and `fail`, so routine traffic can never starve a kill-switch report. Routine
-messages past the reserve are dropped and counted, alerts are queued until a
-token exists, and both counts ride on the next posted embed.
+messages past the reserve are dropped and counted; alerts are queued until a
+token exists.
+
+The delivery queue is bounded at `MAX_QUEUED` (100), because an unbounded
+queue during a long outage is a memory leak in a process that has to outlive
+the outage. **An incident can therefore lose alerts, and the reporter says so
+rather than pretending otherwise.** At the bound, in order: a queued routine
+message is evicted first (and an incoming routine message is dropped outright
+rather than displacing a queued alert); a repeat of an alert already waiting is
+counted as suppressed, since the queued entry carries that message; and only
+when the queue is 100 *distinct* alerts is the **oldest** evicted — in a
+sustained incident the newest alert describes the state an operator is acting
+on, while the oldest is most likely superseded.
+
+That last case is a real loss and is accounted for as one: `stats().alertsLost`
+counts it separately from routine `dropped`, each loss emits its own
+diagnostic, and the next posted embed carries `N alerts lost` in its footer.
+If the channel is losing alerts, the channel says so.
 
 ## Channel separation
 

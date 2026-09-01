@@ -65,7 +65,12 @@ export interface RateLimiter {
   admit(request: RateLimitRequest, now: number): RateLimitVerdict;
 }
 
-const ALERT_LEVELS: ReadonlySet<ReportLevel> = new Set(['warn', 'fail']);
+/**
+ * The levels that get the reserved tokens and are never dropped to make room
+ * for routine traffic. Exported so the reporter's queue policy asks the same
+ * question this one does, rather than restating the answer.
+ */
+export const ALERT_LEVELS: ReadonlySet<ReportLevel> = new Set(['warn', 'fail']);
 
 export function createRateLimiter(
   options: Partial<RateLimitOptions> = {},

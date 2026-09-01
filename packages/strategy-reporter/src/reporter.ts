@@ -14,9 +14,12 @@
  *     webhook or an empty `DISCORD_WEBHOOK_TRADE_URL` costs a counter, never a
  *     trading decision. This is the position `infra/oracle/notify.sh` takes
  *     for deploys, held for the same reason.
- *   - **Bounded.** Every message is admitted by the token bucket and
- *     aggregation policy in `rate-limit.ts`, so a strategy deciding every tick
- *     costs one message a minute with a count, not one message a tick.
+ *   - **Bounded, and honest about it.** Every message is admitted by the token
+ *     bucket and aggregation policy in `rate-limit.ts`, so a strategy deciding
+ *     every tick costs one message a minute with a count, not one message a
+ *     tick. The delivery queue is bounded too, and a queue that fills with
+ *     distinct alerts does lose the oldest — see `MAX_QUEUED` for the policy
+ *     and for how that loss is counted, diagnosed and reported.
  *
  * The secrets to mask arrive through `secrets()`, read at send time: the
  * session cookie and CSRF token rotate, and a value captured at construction
@@ -30,6 +33,7 @@ import {
 import { LEVEL_COLOURS, type ReportEvent, type ReportField } from './events.js';
 import { containsSecret, maskOutbound } from './masking.js';
 import {
+  ALERT_LEVELS,
   createRateLimiter,
   type RateLimiter,
   type RateLimitOptions,
@@ -46,16 +50,36 @@ const LIMIT = {
 } as const;
 
 /**
- * A bound on the delivery queue. Past this the oldest entry is dropped and
- * counted: an unbounded queue during a long outage is a memory leak in a
- * process that must outlive the outage.
+ * A bound on the delivery queue: an unbounded queue during a long outage is a
+ * memory leak in a process that has to outlive the outage.
+ *
+ * What happens at the bound is a policy, and it is this, in order:
+ *
+ *   1. Evict a queued routine message. Routine traffic yields to alerts, and
+ *      an incoming routine message is dropped outright rather than displacing
+ *      a queued alert.
+ *   2. If the incoming alert's key is already waiting, drop the incoming one
+ *      as a repeat — the queued entry already carries that message — and count
+ *      it as suppressed, which is what it is.
+ *   3. Otherwise the queue is `MAX_QUEUED` distinct alerts and the *oldest* is
+ *      evicted, because in a sustained incident the newest alert describes the
+ *      state an operator is acting on while the oldest is most likely already
+ *      superseded.
+ *
+ * Step 3 is a real loss and is treated as one: it is counted separately from
+ * routine drops in `alertsLost`, it emits its own diagnostic, and the next
+ * posted embed carries `N alerts lost` in its footer. An earlier version of
+ * this file claimed alerts were never dropped while doing exactly this
+ * silently — the claim was the bug, as much as the accounting was.
  */
-const MAX_QUEUED = 100;
+export const MAX_QUEUED = 100;
 
 export interface ReporterStats {
   readonly posted: number;
   readonly suppressed: number;
   readonly dropped: number;
+  /** Distinct alerts evicted from a full queue. Never folded into `dropped`. */
+  readonly alertsLost: number;
   readonly blocked: number;
   readonly failed: number;
   readonly queued: number;
@@ -121,6 +145,8 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
   let posted = 0;
   let suppressed = 0;
   let dropped = 0;
+  let alertsLost = 0;
+  let alertsLostPending = 0;
   let blocked = 0;
   let failed = 0;
   let draining: Promise<void> | undefined;
@@ -205,15 +231,47 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
         dropped += 1;
         continue;
       }
+      const lostNow = alertsLostPending;
+      alertsLostPending = 0;
       const parts = [
         verdict.suppressed > 0 ? `+${verdict.suppressed} suppressed` : '',
         verdict.dropped > 0 ? `+${verdict.dropped} dropped` : '',
+        lostNow > 0 ? `${lostNow} alerts lost` : '',
       ].filter((part) => part.length > 0);
       await deliver(
         head.event,
         parts.length > 0 ? ` · ${parts.join(' · ')}` : '',
       );
     }
+  };
+
+  /**
+   * Makes room for `event` in a full queue, or refuses it. Returns false when
+   * the event itself is the one that goes. See `MAX_QUEUED` for the policy.
+   */
+  const admitToFullQueue = (event: ReportEvent, key: string): boolean => {
+    const routine = queue.findIndex(
+      (entry) => entry.event.level === 'info' || entry.event.level === 'ok',
+    );
+    if (routine >= 0) {
+      queue.splice(routine, 1);
+      dropped += 1;
+      return true;
+    }
+    if (!ALERT_LEVELS.has(event.level)) {
+      dropped += 1;
+      return false;
+    }
+    if (queue.some((entry) => entry.key === key)) {
+      suppressed += 1;
+      return false;
+    }
+    const [lost] = queue.splice(0, 1);
+    alertsLost += 1;
+    alertsLostPending += 1;
+    if (lost !== undefined)
+      diagnose(lost.event, 'was lost: the alert queue is full of alerts');
+    return true;
   };
 
   const kick = (): void => {
@@ -236,14 +294,9 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
         dropped += 1;
         return;
       }
-      if (queue.length >= MAX_QUEUED) {
-        const victim = queue.findIndex(
-          (entry) => entry.event.level === 'info' || entry.event.level === 'ok',
-        );
-        queue.splice(victim >= 0 ? victim : 0, 1);
-        dropped += 1;
-      }
-      queue.push({ event, key: event.dedupeKey ?? event.kind });
+      const key = event.dedupeKey ?? event.kind;
+      if (queue.length >= MAX_QUEUED && !admitToFullQueue(event, key)) return;
+      queue.push({ event, key });
       kick();
     },
     async flush() {
@@ -264,6 +317,7 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
       posted,
       suppressed,
       dropped,
+      alertsLost,
       blocked,
       failed,
       queued: queue.length,

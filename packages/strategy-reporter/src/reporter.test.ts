@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { sessionSwapped } from './events.js';
 import { DEFAULT_RATE_LIMIT } from './rate-limit.js';
-import { createReporter, type Reporter } from './reporter.js';
+import { createReporter, MAX_QUEUED, type Reporter } from './reporter.js';
 import {
   type FakeDiscordServer,
   startFakeDiscord,
@@ -193,6 +193,79 @@ describe('createReporter', () => {
 
     expect(discord.requests()).toHaveLength(DEFAULT_RATE_LIMIT.capacity + 1);
     expect(reporter.stats().queued).toBe(0);
+  });
+
+  /**
+   * The queue overflow path, which the deferral test above never reaches. An
+   * incident produces alerts on many keys at once — a strategy failing on
+   * several instruments — far faster than one token per 12 s, so the queue
+   * fills with nothing but alerts. What must never happen is an alert
+   * disappearing into the general `dropped` count with no distinct trace.
+   */
+  it('accounts for every alert when the queue fills with nothing but alerts', async () => {
+    await reporter.close();
+    const diagnostics: string[] = [];
+    reporter = build({
+      onDiagnostic: (line: string) => diagnostics.push(line),
+    });
+
+    const total = MAX_QUEUED + 55;
+    for (let i = 0; i < total; i += 1)
+      reporter.report({ level: 'fail', kind: `f${i}`, title: 'boom' });
+    await reporter.flush();
+
+    const stats = reporter.stats();
+    expect(stats.alertsLost).toBeGreaterThan(0);
+    // Routine throttling and alert loss are different facts about the run.
+    expect(stats.dropped).toBe(0);
+    // Nothing vanishes unaccounted for.
+    expect(stats.posted + stats.queued + stats.alertsLost).toBe(total);
+    expect(
+      diagnostics.filter((line) => line.includes('alert queue is full')),
+    ).toHaveLength(stats.alertsLost);
+  });
+
+  it('says on the next embed how many alerts were lost', async () => {
+    for (let i = 0; i < MAX_QUEUED + 20; i += 1)
+      reporter.report({ level: 'fail', kind: `f${i}`, title: 'boom' });
+    await reporter.flush();
+    const lost = reporter.stats().alertsLost;
+
+    now += DEFAULT_RATE_LIMIT.refillIntervalMs;
+    await reporter.flush();
+
+    const footers = discord
+      .bodies()
+      .map((body) => JSON.parse(body).embeds[0].footer.text);
+    expect(
+      footers.some((text: string) => text.includes(`${lost} alerts lost`)),
+    ).toBe(true);
+  });
+
+  it('loses nothing when the same alert repeats: the queued one carries it', async () => {
+    for (let i = 0; i < MAX_QUEUED * 2; i += 1)
+      reporter.report({
+        level: 'fail',
+        kind: 'residual',
+        title: 'orders remain',
+      });
+    await reporter.flush();
+
+    expect(reporter.stats().alertsLost).toBe(0);
+  });
+
+  it('never evicts a queued alert to make room for routine traffic', async () => {
+    // Past the bound, so the queue is certainly full when the routine burst
+    // arrives and every one of them meets the overflow path.
+    for (let i = 0; i < MAX_QUEUED + 10; i += 1)
+      reporter.report({ level: 'fail', kind: `f${i}`, title: 'boom' });
+    const before = reporter.stats().alertsLost;
+    for (let i = 0; i < 20; i += 1)
+      reporter.report({ level: 'info', kind: `i${i}`, title: 'routine' });
+
+    expect(reporter.stats().alertsLost).toBe(before);
+    expect(reporter.stats().dropped).toBe(20);
+    await reporter.flush();
   });
 
   it('lets routine traffic be dropped before an alert is starved', async () => {
