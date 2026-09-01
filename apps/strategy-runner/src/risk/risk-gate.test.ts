@@ -22,6 +22,8 @@ const LIMITS: RiskLimits = {
   maxPositionQuantity: '10',
   maxOpenOrders: 3,
   tradingHoursOnly: true,
+  maxConsecutiveLosses: 3,
+  maxDailyLoss: '1000000',
   maxQuoteAgeMs: 5_000,
 };
 
@@ -70,6 +72,11 @@ const order = (status: string) =>
   }) as unknown as BrokerPortfolio['activeOrders'][number];
 
 const stores: StateStore[] = [];
+const directories = new WeakMap<StateStore, string>();
+
+/** The directory a store was opened over, so a test can reopen it. */
+const directoryOf = (store: StateStore): string =>
+  directories.get(store) as string;
 
 afterEach(() => {
   for (const store of stores.splice(0)) {
@@ -98,10 +105,10 @@ function gateWith(
     credentials: () => null,
     fetch,
   });
-  const state = StateStore.open({
-    directory: mkdtempSync(join(tmpdir(), 'moi-risk-')),
-  });
+  const directory = mkdtempSync(join(tmpdir(), 'moi-risk-'));
+  const state = StateStore.open({ directory });
 
+  directories.set(state, directory);
   stores.push(state);
 
   const now = () => options.nowMs ?? NOW_MS;
@@ -492,5 +499,169 @@ describe('notionalOf', () => {
     expect(
       notionalOf({ ...BUY, quantity: '3' }, { ...TICK, price: '0.1' }),
     ).toBe('0.3');
+  });
+});
+
+/**
+ * §6.4's two limits, now that phase C's cursor makes realised PnL trustworthy.
+ * Both read the fill journal, which is to say the same durable records that
+ * hold the cursor — so unlike design §1 row 7's memory counter, there is
+ * nothing for a restart to reset.
+ */
+describe('RiskGate loss limits', () => {
+  const losing = (
+    state: StateStore,
+    sequence: number,
+    realizedDelta: string,
+    at = '2026-09-02T01:00:00.000Z',
+  ): void => {
+    state.fills.commit({
+      accountSequence: String(sequence),
+      at,
+      eventId: `event-${sequence}`,
+      eventType: 'ORDER_FILLED',
+      fills: [
+        {
+          fillId: `f-${sequence}`,
+          orderId: `o-${sequence}`,
+          market: 'KR',
+          symbol: '005930',
+          side: 'SELL',
+          quantity: '1',
+          price: '70000',
+          fee: '0',
+          realizedDelta,
+        },
+      ],
+      positions: {},
+      decisions: [],
+    });
+  };
+
+  it('allows an entry while the run of losses is short of the limit', async () => {
+    const { gate, state } = gateWith({ limits: { maxConsecutiveLosses: 3 } });
+
+    losing(state, 1, '-100');
+    losing(state, 2, '-100');
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({ allowed: true });
+  });
+
+  it('refuses an entry once enough closing fills have lost in a row', async () => {
+    const { gate, state } = gateWith({ limits: { maxConsecutiveLosses: 3 } });
+
+    losing(state, 1, '-100');
+    losing(state, 2, '-100');
+    losing(state, 3, '-100');
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({
+      allowed: false,
+      reason: '3 closing fills in a row lost, at the limit of 3',
+    });
+  });
+
+  it('refuses an entry once the day has realised the daily loss limit', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxConsecutiveLosses: 100, maxDailyLoss: '500' },
+    });
+
+    losing(state, 1, '-300', '2026-09-02T01:00:00.000Z');
+    losing(state, 2, '-200', '2026-09-02T01:30:00.000Z');
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: 'today has realised -500, at the daily loss limit of 500',
+    });
+  });
+
+  /** Yesterday's loss is yesterday's. The limit is a per-day budget. */
+  it('does not count another UTC day towards today', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxConsecutiveLosses: 100, maxDailyLoss: '500' },
+    });
+
+    losing(state, 1, '-900', '2026-09-01T23:00:00.000Z');
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({ allowed: true });
+  });
+
+  /**
+   * A profitable day is not a day to stop trading. Comparing a signed PnL
+   * against a positive limit without checking the sign would refuse every entry
+   * as soon as the bot made money.
+   */
+  it('does not read a profitable day as a loss', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxConsecutiveLosses: 100, maxDailyLoss: '500' },
+    });
+
+    state.fills.commit({
+      accountSequence: '1',
+      at: '2026-09-02T01:00:00.000Z',
+      eventId: 'event-1',
+      eventType: 'ORDER_FILLED',
+      fills: [
+        {
+          fillId: 'f-1',
+          orderId: 'o-1',
+          market: 'KR',
+          symbol: '005930',
+          side: 'SELL',
+          quantity: '1',
+          price: '70000',
+          fee: '0',
+          realizedDelta: '9000',
+        },
+      ],
+      positions: {},
+      decisions: [],
+    });
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({ allowed: true });
+  });
+
+  /**
+   * The same reading phase B applied to every other limit: refusing an exit
+   * does not cap exposure, it traps it. A bot stopped by a loss limit that
+   * could not then close its position would sit in the trade the limit fired
+   * over.
+   */
+  it('still allows the exit that a tripped limit exists to protect', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxConsecutiveLosses: 1, maxDailyLoss: '1' },
+    });
+
+    losing(state, 1, '-9000');
+
+    await expect(
+      gate.evaluate({ intent: SELL, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({ allowed: true });
+  });
+
+  it('survives a restart, because it is a fold over a file', async () => {
+    const { gate, state } = gateWith({ limits: { maxConsecutiveLosses: 2 } });
+
+    losing(state, 1, '-100');
+    losing(state, 2, '-100');
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toMatchObject({ allowed: false });
+
+    const reopened = StateStore.open({ directory: directoryOf(state) });
+
+    stores.push(reopened);
+
+    expect(reopened.fills.consecutiveLosses()).toBe(2);
   });
 });

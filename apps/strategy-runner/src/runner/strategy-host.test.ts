@@ -134,7 +134,7 @@ describe('StrategyHost containment', () => {
 
     expect(host.quarantined).toBe(true);
     expect(reporter.lines.at(-1)).toMatch(
-      /\[error\] a strategy threw on 3 consecutive ticks and is quarantined/u,
+      /\[error\] a strategy threw on 3 consecutive calls and is quarantined/u,
     );
   });
 

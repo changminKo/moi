@@ -99,11 +99,20 @@ export class OrderGateway {
    * Step 1 alone: records the decision and hands back what was recorded. It is
    * separate from `submit` so a test can stop between them, which is precisely
    * the crash the restart criterion is about.
+   *
+   * `decisionId` is normally minted fresh, because a tick is a one-off and
+   * nothing else could recompute an id for it. A decision derived from an
+   * *account event* passes its own, derived from `(accountSequence, strategy,
+   * index)`: that is what lets an uncommitted fill step be replayed after a
+   * crash without placing a second order, since the idempotency key is a pure
+   * function of the id. `appendDecision` is idempotent by the same id, so the
+   * replay writes no second line either.
    */
   record(
     strategy: string,
     decision: StrategyDecision,
     tick: Tick,
+    options: { readonly decisionId?: string } = {},
   ): DecisionRecord | null {
     const at = new Date(this.#now()).toISOString();
 
@@ -118,7 +127,7 @@ export class OrderGateway {
     }
 
     const base = {
-      decisionId: this.#newDecisionId(),
+      decisionId: options.decisionId ?? this.#newDecisionId(),
       at,
       strategy,
       reason: decision.reason,

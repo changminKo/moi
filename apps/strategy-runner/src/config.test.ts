@@ -32,6 +32,8 @@ const FILE = {
     maxOpenOrders: 4,
     tradingHoursOnly: true,
     maxQuoteAgeMs: 5_000,
+    maxConsecutiveLosses: 3,
+    maxDailyLoss: '200000',
   },
   strategies: [
     { name: 'samsung', strategyId: SMA_CROSSOVER_ID, params: params('005930') },
@@ -226,7 +228,27 @@ describe('loadRunnerConfig risk limits', () => {
       maxOpenOrders: 4,
       tradingHoursOnly: true,
       maxQuoteAgeMs: 5_000,
+      maxConsecutiveLosses: 3,
+      maxDailyLoss: '200000',
     });
+  });
+
+  /**
+   * §6.4's two limits. Both are folds over the fill journal at evaluation time,
+   * so what configuration owns is only the threshold — and a threshold of zero
+   * losses would refuse every entry from the first cycle, which reads as a
+   * broken runner rather than a disabled one.
+   */
+  it('refuses a loss limit that would stop trading before it started', () => {
+    for (const bad of [0, -1, 1.5, '3', null]) {
+      expect(() => withRisk({ maxConsecutiveLosses: bad })).toThrow(
+        DomainError,
+      );
+    }
+
+    for (const bad of [200_000, '0', '-1', 'abc', null]) {
+      expect(() => withRisk({ maxDailyLoss: bad })).toThrow(DomainError);
+    }
   });
 
   /** AGENTS.md rule 5: a money limit is exact decimal, never a JS number. */
@@ -264,6 +286,8 @@ describe('loadRunnerConfig risk limits', () => {
       'maxOpenOrders',
       'tradingHoursOnly',
       'maxQuoteAgeMs',
+      'maxConsecutiveLosses',
+      'maxDailyLoss',
     ]) {
       const risk: Record<string, unknown> = { ...FILE.risk };
 
