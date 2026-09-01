@@ -22,6 +22,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@moi/strategy-runner": "workspace:*",
     "@moi/strategy-sdk": "workspace:*",
     "@testcontainers/postgresql": "12.1.0",
     "@types/pg": "8.23.1",

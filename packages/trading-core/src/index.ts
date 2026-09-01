@@ -4,6 +4,11 @@ export {
   canonicalDecimal,
   decimal,
   moneyDecimal,
+  // Already the one reader that turns an untrusted string into money inside the
+  // exact domain; it was simply never published. The strategy runner validates
+  // operator-written risk limits with it rather than growing a third copy of the
+  // rule beside trading-core's own and the SDK's boundary predicates.
+  readExactMoney,
 } from './decimal.js';
 export {
   DomainError,
