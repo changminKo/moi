@@ -63,10 +63,9 @@ export const ko: Record<MessageKey, string> = {
   'ticket.placeAria': '주문 — 주문하기',
   'ticket.invalidOrder': '잘못된 주문입니다',
   'ticket.rejected': '주문이 거부되었습니다',
-  'ticket.placedOpen':
-    '주문이 접수되었습니다 — 체결되는 대로 포트폴리오에 반영됩니다',
+  'ticket.placedOpen': '주문이 접수되었습니다.',
   'ticket.placedPendingTrigger':
-    '주문이 접수되었습니다 — 트리거 가격에 도달하면 실행됩니다',
+    '주문이 접수되었습니다. 트리거 가격에 도달하면 실행됩니다.',
   'ticket.rejectedWithCode': '주문이 거부되었습니다 (코드: {{code}})',
   'ticket.requestId': '요청 ID: {{requestId}}',
 
@@ -171,6 +170,20 @@ export const ko: Record<MessageKey, string> = {
   'reason.SERVICE_UNAVAILABLE': '서비스를 이용할 수 없습니다',
   'reason.SESSION_EXPIRED': '세션이 만료되었습니다 — 새 세션을 시작하세요',
   'reason.SYMBOL_NOT_TRADABLE': '거래할 수 없는 종목입니다',
+
+  'holding.available': '주문 가능 {{available}}주',
+  'holding.availableReserved':
+    '주문 가능 {{available}}주 · 예약 중 {{reserved}}주',
+  'holding.none': '보유 없음',
+
+  'fillToast.regionAria': '체결 알림',
+  'fillToast.complete':
+    '{{symbol}} {{side}} {{quantity}}주 체결 · {{price}} · 주문 완료',
+  'fillToast.partial':
+    '{{symbol}} {{side}} {{quantity}}주 체결 · {{price}} · {{filled}}/{{total}}',
+  'fillToast.completeCumulative': '{{symbol}} {{side}} {{total}}주 전량 체결',
+  'fillToast.partialCumulative':
+    '{{symbol}} {{side}} {{filled}}/{{total}}주 체결',
 
   'guard.unavailable': '지금은 이용할 수 없습니다',
 };

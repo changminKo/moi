@@ -38,6 +38,16 @@ export function capFractionDigits(value: string, maxDigits: number): string {
 }
 
 /**
+ * True when the string is a plain decimal worth nothing — "0", "0.00" and
+ * "-0" alike. Guarded by `isDecimal` first, so anything the module cannot
+ * parse answers false rather than throwing: a value this cannot read is not
+ * something to claim is zero.
+ */
+export function isZeroDecimal(value: string): boolean {
+  return isDecimal(value) && new Decimal(value).isZero();
+}
+
+/**
  * The same grouping applied to a value that is still being typed: the integer
  * part may be empty and the fraction may be absent right after the point, so
  * `1234.` groups to `1,234.` instead of failing the completed-number pattern.
