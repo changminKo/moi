@@ -250,3 +250,73 @@ transitions:
   property *read*: a presence probe (`Object.hasOwn`, `in`) is not counted, so
   the property binds what reaches your request body rather than every way you
   might inspect the argument.
+
+## The strategy contract
+
+The other half of this package, behind its own subpath. A strategy author never
+touches the broker; the runner imports both.
+
+```ts
+import type { Strategy, Tick } from '@moi/strategy-sdk/strategy';
+import { createSmaCrossover } from '@moi/strategy-sdk/strategies/sma-crossover';
+```
+
+`Strategy` is the design's §6.1 shape verbatim. `onTick` is synchronous and
+pure: same state, same tick, same context answers, same decisions. The only time
+it may read is `context.now()`, and the only view of the world it gets is
+`StrategyContext` — there is no escape hatch, which is what makes a recorded
+tick series replayable in a backtest. That is enforced rather than requested:
+`biome.json` has an override on `src/strategies/**` that denies `Date`, `Math`,
+`crypto`, `fetch`, `process`, the timer globals, `globalThis`, and the `node:*`,
+`@moi/paper-api` and `@moi/market-data` import groups.
+
+### Decisions carry no session and no key
+
+```ts
+type StrategyDecision =
+  | { kind: 'noop'; reason?: string }
+  | { kind: 'place'; intent: OrderIntent; reason: string }
+  | { kind: 'cancel'; orderId: string; reason: string };
+```
+
+`OrderIntent` is `PlaceOrderCommand` with `sessionId` and `idempotencyKey`
+removed, distributed over the union so the price rules above still hold at
+compile time. The gateway appends the decision to state, derives the key from
+the recorded `decisionId`, and only then promotes the intent to a command — so a
+strategy that chooses its own key has broken the one property the derivation
+exists to provide, that the same key is recomputed after a crash.
+`readOrderIntent` refuses an intent carrying either field, and
+`readStrategyDecisions` validates and snapshots what a strategy returned, on the
+grounds that a registry entry is caller code like any other.
+
+### Parameters
+
+`ParameterSchema` is a value, so the runner can validate every configured
+strategy — and report what each accepts — before any of them runs. It is not a
+schema library: `zod` is in the repository but would be this package's first
+runtime dependency beyond trading-core, and the SDK already owns one validation
+posture in `validation.ts` that every field below delegates to. Unknown keys are
+refused, every declared key is required, and there are no defaults — a risk
+parameter that quietly defaults is one an operator never had to write down.
+
+### `sma-crossover`
+
+The averages are compared, never computed. `sumFast / fastPeriod` against
+`sumSlow / slowPeriod` is the same question as `sumFast · slowPeriod` against
+`sumSlow · fastPeriod`, and the periods are positive integers — so the signal is
+exact addition and multiplication over `moneyDecimal`, with **no division and
+therefore no rounding mode to configure**. A test pins a series where the two
+averages differ by one part in 10^20: float64 calls it a tie and suppresses the
+entry, and the exact comparison sees the cross.
+
+State is the newest `slowPeriod + 1` prices and nothing else. Both relations are
+recomputed from that ring every tick, so nothing derived is stored and
+`snapshot()` → `onStart` restores the window exactly. A tick marked `gapBefore`
+discards the ring rather than averaging across a discontinuity, which makes the
+post-gap hold `slowPeriod + 1` ticks — derived from the parameters instead of
+configured as a number nobody can justify.
+
+`src/strategies/sma-crossover.test.ts` states the whole behaviour as one
+decision table over (previous relation, current relation, position). A cross is
+confirmed only between two strict relations: an exact tie on either side
+suppresses the signal rather than entering a position the averages never made.
