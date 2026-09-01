@@ -30,10 +30,18 @@ command -v curl >/dev/null 2>&1 || soft_fail "curl missing, nothing posted (${le
 # Masking (AGENTS.md rule 2: secrets never reach chat). Applied to every
 # outbound field; the journal tail sent by alert-unit-failed.sh can carry
 # connection strings or environment dumps.
+#
+# The session, CSRF, Set-Cookie, idempotency-key and Bearer rules come from
+# strategy-runner design §7.4, which requires the same four patterns on both
+# sides: here and in the runner's reporter (packages/strategy-reporter,
+# src/masking.ts). infra/oracle/notify.test.mjs holds this half to it.
 mask() {
   printf %s "$1" | sed -E \
     -e 's#(https?://discord(app)?\.com/api/webhooks/)[^[:space:]"]*#<webhook>#g' \
     -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://[^/:@[:space:]]+:)[^@[:space:]]+@#\1***@#g' \
+    -e 's#[Bb]earer[[:space:]]+[^[:space:]]+#Bearer ***#g' \
+    -e 's#(moi_session=)[^;[:space:],"]+#\1***#g' \
+    -e 's#([Ss]et-[Cc]ookie|[Xx]-[Cc][Ss][Rr][Ff]-[Tt]oken|[Cc][Ss][Rr][Ff]-[Tt]oken|[Ii]dempotency-[Kk]ey)([[:space:]]*[:=][[:space:]]*)[^[:space:],;]+#\1\2***#g' \
     -e 's#([A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|WEBHOOK|key|token|secret|password|passwd|webhook)[A-Za-z0-9_]*[[:space:]]*[=:][[:space:]]*)[^[:space:]]+#\1***#g'
 }
 title="$(mask "$title")"
