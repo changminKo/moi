@@ -31,6 +31,42 @@ Keep the incident open until the feed has been stable for at least 10 minutes.
 
 A `403 access_denied` from the provider means the process's egress IP is not on the provider allow list, and a `401` means the client credentials were rejected. Neither is fixed by a restart: correct the allow list (the `paper-api` egress IP must be static, registered in the Toss console, and recorded in `infra/provider-allowlist.yaml`; compare the process's current egress address with `pnpm preflight:deploy --skip-compose`) or rotate `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET` through the secret manager (`infra/secrets.env.tpl`), then let the market-local reconnect supervisor retry (or resolve `RECOVERY_RETRY_EXHAUSTED` if it tripped).
 
+## After a restart
+
+A restart does not clear the incident rows. The health state machine lives in
+memory and comes back `NORMAL`, but placement is derived from the `ACTIVE` rows
+in `safety_incidents`, which the process re-reads on boot. A recovered feed now
+resolves the automatic rows the market owns (and `RECOVERY_RETRY_EXHAUSTED`
+with them) and `/health/market-data` reports `DEGRADED` for any market that
+still has one, so `NORMAL` next to `placement:false` is no longer possible. Do
+not trust that alone — check, and resolve anything left:
+
+```bash
+curl -sS "$API_ORIGIN/api/v1/health/trading" | jq '{placement, reasons}'
+curl -sS "$API_ORIGIN/health/market-data" | jq
+```
+
+```sql
+select id, scope_type, scope_id, source, cause_code, activated_at
+from safety_incidents where status = 'ACTIVE' order by activated_at;
+```
+
+Anything still `ACTIVE` after both markets report `NORMAL` is operator-owned
+(`STARTUP_INVARIANT_OR_AUDIT_FAILURE`, or an incident someone pinned by hand)
+and blocks placement until it is resolved. Resolve one with its current
+`version` as `expectedVersion`:
+
+```bash
+curl -sS -X POST "$API_ORIGIN/admin/incidents/$INCIDENT_ID/resolve" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"expectedVersion":1}'
+```
+
+A `409 VERSION_CONFLICT` means the row changed under you; re-read `version` and
+retry. Do not resolve `STARTUP_INVARIANT_OR_AUDIT_FAILURE` until the ledger
+invariants pass — see `emergency-cancel-only.md`.
+
 ## Read-only diagnosis
 
 ```bash

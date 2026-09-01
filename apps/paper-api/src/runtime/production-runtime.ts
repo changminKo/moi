@@ -73,6 +73,7 @@ import { createFillPersistence } from './fill-persistence.js';
 import { leaseAuditPort } from './lease-audit.js';
 import { LeaseRegistry } from './lease-registry.js';
 import { verifyLedgerInvariants } from './ledger-invariants.js';
+import { marketHealthView } from './market-health-view.js';
 import { MarketRuntime } from './market-runtime.js';
 import { createOrderCancellation } from './order-cancellation.js';
 import { createOutboxEventSource } from './outbox-event-source.js';
@@ -120,15 +121,19 @@ const MARKET_DENIED: readonly Capability[] = [
   'MATCH',
   'TRIGGER',
 ];
+/** Recorded as `source = 'MANUAL'`: an operator should see these happened. */
 const MANUAL_CAUSES = new Set([
   'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
   'RECOVERY_RETRY_EXHAUSTED',
 ]);
-const HEALTH_LABEL: Record<string, string> = {
-  HEALTHY: 'NORMAL',
-  DEGRADED: 'DEGRADED',
-  RECOVERING: 'RECOVERING',
-};
+/**
+ * Causes a healthy feed does not speak to, so a recovery never resolves them
+ * (§16.33). `RECOVERY_RETRY_EXHAUSTED` is deliberately absent: it describes a
+ * retry budget that a completed recovery has just disproved, and leaving it
+ * ACTIVE held placement shut on a market whose transport was demonstrably
+ * back. A failed invariant or audit is not cured by a socket, so it stays.
+ */
+const OPERATOR_ONLY_CAUSES = new Set(['STARTUP_INVARIANT_OR_AUDIT_FAILURE']);
 
 export interface ProductionRuntimeOptions {
   readonly config: AppConfig;
@@ -797,21 +802,47 @@ export class ProductionRuntime {
           await this.#refreshIncidents();
           return { incidentId: incident.incidentId, version: incident.version };
         },
-        resolveCas: async ({ incidentId, version }) => {
-          // The health machine activates with a null epoch and resolves with the
-          // recovered epoch; the service's CAS compares the stored epoch, so the
-          // version check carries the optimistic-lock semantics here.
-          const current = (await this.#incidents.active()).find(
-            (i) => i.incidentId === incidentId,
-          );
-          if (current === undefined) return true;
-          const resolved = await this.#incidents.resolveCas({
-            incidentId,
-            version,
-            recoveryEpoch: current.recoveryEpoch,
-          });
+        // A recovery resolves what this market owns in the ledger, not what
+        // this process remembers opening: the rows gate placement and outlive
+        // the health machine, so a restart must be able to clear them too
+        // (§16.33). The service's CAS compares the stored epoch, so the
+        // version check carries the optimistic-lock semantics here.
+        resolveMarketIncidents: async ({ recoveryEpoch }) => {
+          const resolved: string[] = [];
+          const remaining: string[] = [];
+          for (const incident of await this.#incidents.active()) {
+            if (
+              incident.scope.type !== 'MARKET' ||
+              incident.scope.id !== market
+            )
+              continue;
+            if (OPERATOR_ONLY_CAUSES.has(incident.causeCode)) {
+              remaining.push(incident.causeCode);
+              continue;
+            }
+            const outcome = await this.#incidents.resolveCas({
+              incidentId: incident.incidentId,
+              version: incident.version,
+              recoveryEpoch: incident.recoveryEpoch,
+            });
+            (outcome === undefined ? remaining : resolved).push(
+              incident.causeCode,
+            );
+          }
           await this.#refreshIncidents();
-          return resolved !== undefined;
+          if (resolved.length > 0 || remaining.length > 0)
+            this.#log('incident.recovery_resolved', {
+              market,
+              recoveryEpoch: recoveryEpoch.toString(),
+              resolved,
+              remaining,
+            });
+          // The retry budget this market spent is no longer spent, the same
+          // hold the admin resolve path lifts.
+          const runtime = this.markets.get(market);
+          if (runtime?.supervisor.exhausted === true)
+            runtime.supervisor.resume();
+          return remaining;
         },
       },
     });
@@ -1330,13 +1361,14 @@ export class ProductionRuntime {
         };
         continue;
       }
-      const health = runtime?.health;
-      const reasons = this.#activeIncidents
-        .filter((i) => i.scope.type === 'MARKET' && i.scope.id === market)
-        .map((i) => i.causeCode);
+      const view = marketHealthView({
+        market,
+        feedState: runtime?.health.state,
+        incidents: this.#activeIncidents,
+      });
       body[market] = {
-        state: HEALTH_LABEL[health?.state ?? 'RECOVERING'] ?? 'RECOVERING',
-        reasons,
+        state: view.state,
+        reasons: view.reasons,
         leaderEpoch: epoch,
       };
     }
