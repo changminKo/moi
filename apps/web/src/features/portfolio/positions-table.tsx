@@ -45,7 +45,7 @@ export function PositionsTable({
   const closed = positions.filter(isClosed);
   return (
     <>
-      <section className="panel" aria-labelledby="positions-title">
+      <section className="panel panel-wide" aria-labelledby="positions-title">
         <h2 id="positions-title">{t('positions.title')}</h2>
         {held.length === 0 ? (
           <p>{t('positions.empty')}</p>
@@ -76,7 +76,10 @@ export function PositionsTable({
         )}
       </section>
       {closed.length > 0 && (
-        <section className="panel" aria-labelledby="closed-positions-title">
+        <section
+          className="panel panel-wide"
+          aria-labelledby="closed-positions-title"
+        >
           <h2 id="closed-positions-title">{t('positions.closedTitle')}</h2>
           <table>
             <caption className="sr-only">

@@ -46,8 +46,13 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  /* Matched by class, not by position: the positions area is two sibling
+     sections (holdings and closed) rather than the single one this rule was
+     written against, and `:first-of-type` would reach only the first — leaving
+     the closed table squeezed into half a column and the fill history alone in
+     the other half. */
   .portfolio-page > header,
-  .portfolio-page > section:first-of-type {
+  .portfolio-page > .panel-wide {
     grid-column: 1 / -1;
   }
 }
