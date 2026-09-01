@@ -110,7 +110,8 @@ describe('useQuoteStream', () => {
         quoteFrame({ ...CAPTURED_BOOK, price: '205', asOf: 't1' }),
       );
     });
-    expect(await screen.findByText('205')).toBeVisible();
+    // The frame states its book currency, so the price is now tagged with it.
+    expect(await screen.findByText('$205')).toBeVisible();
   });
 
   it('ignores pushes for another symbol', async () => {
@@ -196,8 +197,9 @@ describe('a live book frame reaches the panel', () => {
     expect(screen.getByText('316.44')).toBeVisible();
     expect(screen.getByText('40')).toBeVisible();
     expect(screen.getByText('80')).toBeVisible();
-    // The book frame restates no price, so the snapshot's price stands.
-    expect(screen.getByText('316.50')).toBeVisible();
+    // The book frame restates no price, so the snapshot's price stands — now
+    // tagged with the currency the same frame brought.
+    expect(screen.getByText('$316.50')).toBeVisible();
     expect(rootChildCount()).toBeGreaterThan(0);
   });
 
@@ -228,7 +230,11 @@ describe('a live book frame reaches the panel', () => {
 
     act(() => FakeSocket.instances[0]?.deliver(quoteFrame(payload)));
 
-    expect(screen.getByText('316.50')).toBeVisible();
+    // A payload that narrows carries `currency: 'USD'` and tags the price;
+    // one that does not is ignored whole, leaving the untagged snapshot.
+    expect(
+      screen.queryByText('$316.50') ?? screen.getByText('316.50'),
+    ).toBeVisible();
     expect(rootChildCount()).toBeGreaterThan(0);
   });
 });
@@ -397,8 +403,19 @@ describe('QuoteSparkline', () => {
   const ticks = (prices: readonly string[]): TickPoint[] =>
     prices.map((price, index) => ({ asOf: `t${index}`, price }));
 
-  it('draws a polyline and summarises the range for screen readers', () => {
-    render(<QuoteSparkline ticks={ticks(['10', '20.50', '15'])} />);
+  // A handful of ticks never fills the narrowest window, so the summary
+  // reports what has actually been collected against what was asked for.
+  // The window control itself is covered in `quote-sparkline.test.tsx`.
+  const chart = (prices: readonly string[]) => (
+    <QuoteSparkline
+      ticks={ticks(prices)}
+      windowSize={30}
+      onWindowSizeChange={() => undefined}
+    />
+  );
+
+  it('draws a polyline and summarises the range beneath it', () => {
+    render(chart(['10', '20.50', '15']));
     const polyline = document.querySelector('polyline');
     expect(polyline).not.toBeNull();
     expect(polyline?.getAttribute('points')?.split(' ')).toHaveLength(3);
@@ -406,18 +423,18 @@ describe('QuoteSparkline', () => {
       'true',
     );
     expect(
-      screen.getByText('Last 3 ticks, high 20.50, low 10'),
+      screen.getByText('3 of 30 ticks so far, high 20.50, low 10'),
     ).toBeInTheDocument();
   });
 
   it('shows the collecting state until a second point arrives', () => {
-    render(<QuoteSparkline ticks={ticks(['10'])} />);
+    render(chart(['10']));
     expect(screen.getByText('Collecting chart data…')).toBeVisible();
     expect(document.querySelector('polyline')).toBeNull();
   });
 
   it('drops unparseable prices instead of throwing', () => {
-    render(<QuoteSparkline ticks={ticks(['—', '10', 'N/A', '12'])} />);
+    render(chart(['—', '10', 'N/A', '12']));
     expect(document.querySelector('polyline')?.getAttribute('points')).toBe(
       '2.00,46.00 238.00,2.00',
     );
@@ -425,7 +442,9 @@ describe('QuoteSparkline', () => {
 
   it('renders the Korean summary, the product default', async () => {
     await act(() => i18n.changeLanguage('ko'));
-    render(<QuoteSparkline ticks={ticks(['10', '12'])} />);
-    expect(screen.getByText('최근 2틱, 최고 12, 최저 10')).toBeInTheDocument();
+    render(chart(['10', '12']));
+    expect(
+      screen.getByText('30틱 중 2틱 수집, 최고 12, 최저 10'),
+    ).toBeInTheDocument();
   });
 });

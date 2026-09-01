@@ -17,19 +17,21 @@ const SNAPSHOT: QuoteSnapshot = {
   marketDataVersion: '87849',
 };
 
+const CAPTURED_PAYLOAD = {
+  symbol: 'AAPL',
+  market: 'US',
+  currency: 'USD',
+  bids: [{ price: '316.44', volume: '80' }],
+  asks: [{ price: '316.65', volume: '40' }],
+};
+
 /** A quote frame captured off the live socket, verbatim. */
 const CAPTURED: QuoteFrame = {
   market: 'US',
   symbol: 'AAPL',
   recoveryEpoch: '17',
   marketDataVersion: '87850',
-  payload: {
-    symbol: 'AAPL',
-    market: 'US',
-    currency: 'USD',
-    bids: [{ price: '316.44', volume: '80' }],
-    asks: [{ price: '316.65', volume: '40' }],
-  },
+  payload: CAPTURED_PAYLOAD,
 };
 
 const frame = (payload: unknown): QuoteFrame => ({ ...CAPTURED, payload });
@@ -47,9 +49,28 @@ describe('applyQuoteFrame on the captured wire frame', () => {
       health: 'HEALTHY',
       recoveryEpoch: '17',
       marketDataVersion: '87850',
+      // Book-derived, and the panel prices in it, so it must survive the merge.
+      currency: 'USD',
       bids: [{ price: '316.44', volume: '80' }],
       asks: [{ price: '316.65', volume: '40' }],
     });
+  });
+
+  test('keeps the currency a later bookless frame no longer states', () => {
+    const withBook = applyQuoteFrame(SNAPSHOT, CAPTURED);
+    const trade = applyQuoteFrame(
+      withBook,
+      frame({ price: '316.70', asOf: '2026-08-31T14:02:05.000Z' }),
+    );
+
+    expect(trade?.currency).toBe('USD');
+  });
+
+  test('drops a currency that is not one the product prices in', () => {
+    expect(
+      applyQuoteFrame(SNAPSHOT, frame({ ...CAPTURED_PAYLOAD, currency: 'JPY' }))
+        ?.currency,
+    ).toBeUndefined();
   });
 
   test('takes the version fields from the envelope, not the payload', () => {
