@@ -70,8 +70,14 @@ on, while the oldest is most likely superseded.
 
 That last case is a real loss and is accounted for as one: `stats().alertsLost`
 counts it separately from routine `dropped`, each loss emits its own
-diagnostic, and the next posted embed carries `N alerts lost` in its footer.
-If the channel is losing alerts, the channel says so.
+diagnostic, and the next posted embed carries `channel: N alerts lost` in its
+footer. If the channel is losing alerts, the channel says so.
+
+Footers distinguish the two kinds of count. `+N suppressed` is about *this*
+message — repeats of its own key folded into it. `channel: N routine dropped`
+and `channel: N alerts lost` are about the reporter: the token bucket and the
+queue are shared, so those counts belong to whichever message happens to carry
+them out, not to its subject.
 
 ## Channel separation
 
