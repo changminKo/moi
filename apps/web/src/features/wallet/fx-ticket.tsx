@@ -5,10 +5,24 @@ import { GroupedNumberInput } from '../../components/grouped-number-input';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
+import { formatDecimal } from '../../lib/format-number';
 import { useAppLocale } from '../../lib/i18n';
 import { newIdempotencyKey } from '../../lib/idempotency';
 import { presentationForReason } from '../system/system-status-provider';
 import './wallet.css';
+
+/**
+ * The wire rate is USD per KRW ("0.0007"): correct for the quoting math, but
+ * unreadable as an exchange rate — a person thinks "about 1,430 won", and at
+ * four decimal places the wire value can't even tell 1,400 from 1,430 apart.
+ * This is a display-only inversion; the exact string the API returned is
+ * still what quoting and conversion use.
+ */
+function formatRate(rate: string): string {
+  const value = new Decimal(rate);
+  if (!value.isFinite() || value.lte(0)) return rate;
+  return `1 USD = ${formatDecimal(new Decimal(1).dividedBy(value).toFixed(2))} KRW`;
+}
 
 export function FxTicket({
   apiClient = defaultApiClient,
@@ -86,16 +100,16 @@ export function FxTicket({
       {quote && (
         <div aria-live="polite" className="fx-quote">
           <p>
-            {t('fx.rate')}: {quote.rate}
+            {t('fx.rate')}: {formatRate(quote.rate)}
           </p>
           <p>
-            {t('fx.fee')}: {quote.fee}
+            {t('fx.fee')}: ₩{formatDecimal(quote.fee)}
           </p>
           <p>
-            {t('fx.source')}: {quote.sourceAmount}
+            {t('fx.source')}: ₩{formatDecimal(quote.sourceAmount)}
           </p>
           <p>
-            {t('fx.destination')}: {quote.destinationAmount}
+            {t('fx.destination')}: ${formatDecimal(quote.destinationAmount)}
           </p>
           <button
             type="button"
