@@ -104,6 +104,16 @@ function abortError(): Error {
  */
 export class TossWebSocketMarketData implements MarketDataStream {
   private socket: TossSocket | null = null;
+  /**
+   * Bumped for every socket this adapter stands up. Every handler closes over
+   * the generation it was installed for, so an event from a socket the adapter
+   * has already replaced is dropped instead of being read as the current
+   * connection's — a late `onclose` used to fail the connection that replaced
+   * it, and a late frame used to enter its stream.
+   */
+  private generation = 0;
+  /** Settles a handshake whose socket is being replaced under it. */
+  private abandonHandshake: (() => void) | null = null;
   private connected = false;
   private closed = false;
   private queue: MarketEvent[] = [];
@@ -157,10 +167,41 @@ export class TossWebSocketMarketData implements MarketDataStream {
     }
   }
 
+  /**
+   * Drops the socket this adapter is holding: its handlers are removed and it
+   * is closed. Both halves matter. A socket left registered with the provider
+   * is a *duplicate subscription* on the next connect, which the provider
+   * evicts with `"Bye"` — one reconnect then causes the next. And a socket
+   * left wired keeps calling back into an adapter that has moved on.
+   */
+  private detachSocket(reason: string): void {
+    this.abandonHandshake?.();
+    const socket = this.socket;
+    this.socket = null;
+    this.connected = false;
+    if (!socket) return;
+    delete socket.onopen;
+    delete socket.onclose;
+    delete socket.onerror;
+    delete socket.onmessage;
+    try {
+      socket.close(1000, reason);
+    } catch {
+      /* a socket that is already gone needs no closing */
+    }
+  }
+
   private async handshake(token: string, signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw abortError();
+    this.detachSocket('client reconnect');
     this.closed = false;
     this.controlQueue = [];
+    // Whatever the previous connection left unread belongs to a recovery epoch
+    // that is over; a queued `transportClosed` would degrade the new one.
+    this.queue = [];
+    this.generation += 1;
+    const generation = this.generation;
+    const isCurrent = (): boolean => this.generation === generation;
     const socket = this.socketFactory(this.options.url, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -170,9 +211,20 @@ export class TossWebSocketMarketData implements MarketDataStream {
       const settle = (fn: () => void): void => {
         if (settled) return;
         settled = true;
+        this.abandonHandshake = null;
         fn();
       };
+      this.abandonHandshake = () =>
+        settle(() =>
+          reject(
+            new MarketDataError(
+              'TRANSPORT_CLOSED',
+              'Toss WebSocket handshake superseded by a new connection',
+            ),
+          ),
+        );
       socket.onerror = (e) => {
+        if (!isCurrent()) return;
         const statusCode = (e as { statusCode?: number })?.statusCode;
         if (statusCode === 401 || statusCode === 403) {
           settle(() =>
@@ -202,10 +254,12 @@ export class TossWebSocketMarketData implements MarketDataStream {
           );
       };
       socket.onopen = () => {
+        if (!isCurrent()) return;
         this.connected = true;
         settle(resolve);
       };
       socket.onclose = (e) => {
+        if (!isCurrent()) return;
         const wasConnected = this.connected;
         this.connected = false;
         if (!wasConnected)
@@ -219,12 +273,17 @@ export class TossWebSocketMarketData implements MarketDataStream {
           );
         this.finish(e?.reason && e.reason.length > 0 ? e.reason : 'closed');
       };
-      socket.onmessage = (e) => this.receive(e.data);
+      socket.onmessage = (e) => {
+        if (!isCurrent()) return;
+        this.receive(e.data);
+      };
       signal.addEventListener(
         'abort',
         () => {
-          this.close().catch(() => undefined);
+          // Settle first: `close()` detaches this socket, and an abandoned
+          // handshake must still report the abort that caused it.
           settle(() => reject(abortError()));
+          this.close().catch(() => undefined);
         },
         { once: true },
       );
@@ -352,10 +411,7 @@ export class TossWebSocketMarketData implements MarketDataStream {
   }
 
   async close(): Promise<void> {
-    const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    socket?.close(1000, 'client shutdown');
+    this.detachSocket('client shutdown');
     this.finish('closed');
     this.closed = true;
   }
