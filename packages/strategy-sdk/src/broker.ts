@@ -1,30 +1,21 @@
-import {
-  assertPositiveWholeQuantity,
-  type Currency,
-  type DecimalString,
-  DomainError,
-  type Market,
-  type OrderStatus,
-  type OrderType,
-  type Quantity,
-  type Side,
+import type {
+  Currency,
+  DecimalString,
+  Market,
+  OrderStatus,
+  OrderType,
+  Quantity,
+  Side,
 } from '@moi/trading-core';
 
 import {
-  assertCommandObject,
-  assertIdentifier,
-  isPositiveMoneyAmount,
-  isPositiveWholeQuantity,
-  type OptionalFieldRead,
-  projectOptionalField,
-  readOptionalField,
-} from './validation.js';
+  assertOrderIntentFields,
+  ORDER_INTENT_PRICE_RULES,
+  snapshotOrderIntentFields,
+} from './order-intent.js';
+import { assertCommandObject, assertIdentifier } from './validation.js';
 
-// Keyed by the domain union rather than listed, so adding a `Market`, a `Side`,
-// or an `OrderType` in trading-core breaks this build until the new member is
-// given a rule here.
-const MARKETS: Readonly<Record<Market, true>> = { KR: true, US: true };
-const SIDES: Readonly<Record<Side, true>> = { BUY: true, SELL: true };
+export type { PriceRule, PriceRules } from './order-intent.js';
 
 interface PlaceOrderCommandBase {
   readonly sessionId: string;
@@ -250,85 +241,15 @@ export interface Broker {
   getPortfolio(sessionId: string): Promise<BrokerPortfolio>;
 }
 
-export type PriceRule = 'required' | 'optional' | 'forbidden';
-
-export interface PriceRules {
-  readonly limitPrice: PriceRule;
-  readonly stopPrice: PriceRule;
-}
-
 /**
- * The runtime mirror of the discriminated union above, so a JavaScript caller
- * or a decoded payload is held to the same rule as a TypeScript caller. It is
- * exported so a test can pin it against trading-core's own executable gates
- * instead of restating them: no type may carry an `optional` limit price,
- * because `planReservation` has no such rule for any type.
+ * The price rules a place-order command is held to. They live with the
+ * instruction shape in `order-intent.ts`, because a strategy's `OrderIntent`
+ * and a gateway's `PlaceOrderCommand` are the same instruction and must be held
+ * to one rule rather than two near-copies. Re-exported under this name because
+ * `broker-contract.ts` and `broker.test.ts` pin it against trading-core's own
+ * executable gates through this entry.
  */
-export const PLACE_ORDER_PRICE_RULES: Readonly<Record<OrderType, PriceRules>> =
-  {
-    MARKET: { limitPrice: 'forbidden', stopPrice: 'forbidden' },
-    LIMIT: { limitPrice: 'required', stopPrice: 'forbidden' },
-    STOP: { limitPrice: 'forbidden', stopPrice: 'required' },
-    TAKE_PROFIT: { limitPrice: 'forbidden', stopPrice: 'required' },
-    OCO: { limitPrice: 'required', stopPrice: 'required' },
-  };
-
-function assertMember<T extends string>(
-  value: unknown,
-  allowed: Readonly<Record<T, unknown>>,
-  field: string,
-): asserts value is T {
-  // `Object.hasOwn` rather than a property read, so `__proto__` and
-  // `constructor` are rejected like any other unknown member.
-  if (typeof value !== 'string' || !Object.hasOwn(allowed, value)) {
-    throw new DomainError(
-      'INVALID_ORDER',
-      `${field} must be one of ${Object.keys(allowed).join(', ')}`,
-    );
-  }
-}
-
-function assertPositivePrice(value: unknown, field: string): void {
-  if (!isPositiveMoneyAmount(value)) {
-    throw new DomainError(
-      'INVALID_PRICE',
-      `${field} must be a positive plain decimal string inside the money domain`,
-    );
-  }
-}
-
-function assertPriceField(
-  read: OptionalFieldRead,
-  field: 'limitPrice' | 'stopPrice',
-  rule: PriceRule,
-  type: OrderType,
-): void {
-  // The read handed in is the one the boundary snapshot already performed, so
-  // the price inspected here is the price the request body carries. Reading the
-  // field again would let the two disagree, and a disagreement in either
-  // direction re-opens the hole the price rules exist to close.
-  const { supplied, value } = read;
-
-  if (!supplied) {
-    if (rule === 'required') {
-      throw new DomainError(
-        'INVALID_ORDER',
-        `a ${type} order requires ${field}`,
-      );
-    }
-
-    return;
-  }
-
-  if (rule === 'forbidden') {
-    throw new DomainError(
-      'INVALID_ORDER',
-      `a ${type} order cannot carry ${field}`,
-    );
-  }
-
-  assertPositivePrice(value, field);
-}
+export const PLACE_ORDER_PRICE_RULES = ORDER_INTENT_PRICE_RULES;
 
 /**
  * Snapshots a command that crossed a runtime boundary: every field is read
@@ -374,13 +295,7 @@ function snapshotPlaceOrderCommand(command: unknown): Record<string, unknown> {
   return Object.assign(Object.create(null) as Record<string, unknown>, {
     sessionId: source.sessionId,
     idempotencyKey: source.idempotencyKey,
-    market: source.market,
-    symbol: source.symbol,
-    side: source.side,
-    type: source.type,
-    quantity: source.quantity,
-    ...projectOptionalField(source, 'limitPrice'),
-    ...projectOptionalField(source, 'stopPrice'),
+    ...snapshotOrderIntentFields(source),
   });
 }
 
@@ -388,48 +303,15 @@ function assertPlaceOrderFields(
   snapshot: unknown,
 ): asserts snapshot is PlaceOrderCommand {
   const candidate = snapshot as Record<string, unknown>;
-  const { sessionId, idempotencyKey, symbol, market, side, type, quantity } =
-    candidate;
+  const { sessionId, idempotencyKey } = candidate;
 
+  // The two fields the gateway owns come first, then the instruction half —
+  // which is the same field list, in the same order, that `readOrderIntent`
+  // validates. The first invalid field is the one reported, so that order is
+  // observable behaviour rather than an implementation detail.
   assertIdentifier(sessionId, 'sessionId');
   assertIdentifier(idempotencyKey, 'idempotencyKey');
-  assertIdentifier(symbol, 'symbol');
-  assertMember(market, MARKETS, 'market');
-  assertMember(side, SIDES, 'side');
-  assertMember(type, PLACE_ORDER_PRICE_RULES, 'type');
-
-  // trading-core parses quantities with decimal.js, which reads `'1e3'`,
-  // `'0x10'`, and `'+1'` as positive whole numbers. The wire carries the string
-  // verbatim, so the plain form is settled here before delegating.
-  //
-  // The delegate parses on the shared global `Decimal`, so a same-realm
-  // `Decimal.set({ maxE })` can make it refuse a quantity this boundary
-  // accepts. That fails closed, and the delegate lives in trading-core, so
-  // hardening it the way the money predicate is hardened is a trading-core
-  // change rather than one available here.
-  if (!isPositiveWholeQuantity(quantity)) {
-    throw new DomainError(
-      'INVALID_QUANTITY',
-      'quantity must be a positive whole number in plain decimal form',
-    );
-  }
-
-  assertPositiveWholeQuantity(quantity);
-
-  const rules = PLACE_ORDER_PRICE_RULES[type];
-
-  assertPriceField(
-    readOptionalField(candidate, 'limitPrice'),
-    'limitPrice',
-    rules.limitPrice,
-    type,
-  );
-  assertPriceField(
-    readOptionalField(candidate, 'stopPrice'),
-    'stopPrice',
-    rules.stopPrice,
-    type,
-  );
+  assertOrderIntentFields(candidate);
 }
 
 /**

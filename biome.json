@@ -31,5 +31,57 @@
     "rules": {
       "preset": "recommended"
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "packages/strategy-sdk/src/strategies/**",
+        "!packages/strategy-sdk/src/strategies/**/*.test.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "Date": "onTick must be pure: take the time from context.now() instead.",
+                  "Math": "onTick must be deterministic: no Math.random, and money arithmetic goes through @moi/trading-core.",
+                  "performance": "onTick must be pure: take the time from context.now() instead.",
+                  "crypto": "onTick must be deterministic: no randomness inside a strategy.",
+                  "fetch": "onTick must not perform I/O: the runner owns every network call.",
+                  "XMLHttpRequest": "onTick must not perform I/O: the runner owns every network call.",
+                  "WebSocket": "onTick must not perform I/O: the runner owns every network call.",
+                  "process": "onTick must not read the environment: declare a parameter instead.",
+                  "setTimeout": "onTick is synchronous: it may not schedule work.",
+                  "setInterval": "onTick is synchronous: it may not schedule work.",
+                  "setImmediate": "onTick is synchronous: it may not schedule work.",
+                  "queueMicrotask": "onTick is synchronous: it may not schedule work.",
+                  "require": "A strategy declares its imports statically.",
+                  "globalThis": "A strategy reaches the world only through StrategyContext."
+                }
+              }
+            },
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "node:*",
+                      "@moi/paper-api",
+                      "@moi/paper-api/**",
+                      "@moi/market-data",
+                      "@moi/market-data/**",
+                      "decimal.js"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

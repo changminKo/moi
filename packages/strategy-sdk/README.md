@@ -250,3 +250,101 @@ transitions:
   property *read*: a presence probe (`Object.hasOwn`, `in`) is not counted, so
   the property binds what reaches your request body rather than every way you
   might inspect the argument.
+
+## The strategy contract
+
+The other half of this package, behind its own subpath. A strategy author never
+touches the broker; the runner imports both.
+
+```ts
+import type { Strategy, Tick } from '@moi/strategy-sdk/strategy';
+import { createSmaCrossover } from '@moi/strategy-sdk/strategies/sma-crossover';
+```
+
+`Strategy` is the design's §6.1 shape verbatim. `onTick` is synchronous and
+pure: same state, same tick, same context answers, same decisions. The only time
+it may read is `context.now()`, and the only view of the world it gets is
+`StrategyContext` — there is no escape hatch, which is what makes a recorded
+tick series replayable in a backtest. That is enforced rather than requested:
+`biome.json` has an override on `src/strategies/**` that denies `Date`, `Math`,
+`crypto`, `fetch`, `process`, the timer globals, `globalThis`, and the `node:*`,
+`@moi/paper-api` and `@moi/market-data` import groups.
+
+### Decisions carry no session and no key
+
+```ts
+type StrategyDecision =
+  | { kind: 'noop'; reason?: string }
+  | { kind: 'place'; intent: OrderIntent; reason: string }
+  | { kind: 'cancel'; orderId: string; reason: string };
+```
+
+`OrderIntent` is `PlaceOrderCommand` with `sessionId` and `idempotencyKey`
+removed, distributed over the union so the price rules above still hold at
+compile time. The gateway appends the decision to state, derives the key from
+the recorded `decisionId`, and only then promotes the intent to a command — so a
+strategy that chooses its own key has broken the one property the derivation
+exists to provide, that the same key is recomputed after a crash.
+`readOrderIntent` refuses an intent carrying either field, and
+`readStrategyDecisions` validates and snapshots what a strategy returned, on the
+grounds that a registry entry is caller code like any other.
+
+### Parameters
+
+`ParameterSchema` is a value, so the runner can validate every configured
+strategy — and report what each accepts — before any of them runs. It is not a
+schema library: `zod` is in the repository but would be this package's first
+runtime dependency beyond trading-core, and the SDK already owns one validation
+posture in `validation.ts` that every field below delegates to. Unknown keys are
+refused, every declared key is required, and there are no defaults — a risk
+parameter that quietly defaults is one an operator never had to write down.
+
+### `sma-crossover`
+
+The averages are compared, never computed. `sumFast / fastPeriod` against
+`sumSlow / slowPeriod` is the same question as `sumFast · slowPeriod` against
+`sumSlow · fastPeriod`, and the periods are positive integers — so the signal is
+exact addition and multiplication over `moneyDecimal`, with **no division and
+therefore no rounding mode to configure**. A test pins a series where the two
+averages differ by one part in 10^20: float64 calls it a tie and suppresses the
+entry, and the exact comparison sees the cross.
+
+A window sum can leave the money domain even when every price in it is valid on
+its own — 80-digit prices are inside `isPositiveMoneyAmount` and two of them are
+not. That is returned as a `noop` with reason `price-out-of-domain`, not raised,
+**and the tick is still recorded**. Recording it is the point: the ring only
+advances on a successful return, so raising from the comparison would leave the
+offending price in the window, and every later tick would recompute the same sum
+and raise again, permanently. Because the ring advances, the price ages out
+within `slowPeriod + 1` ticks and the strategy resumes unaided. A *malformed*
+price is a different case and still fails closed — `assertPositivePrice` runs
+before any state changes, so that tick raises once and the next valid one
+proceeds.
+
+State is the newest `slowPeriod + 1` prices and nothing else. Both relations are
+recomputed from that ring every tick, so nothing derived is stored and
+`snapshot()` → `onStart` restores the window exactly. A tick marked `gapBefore`
+discards the ring rather than averaging across a discontinuity, which makes the
+post-gap hold `slowPeriod + 1` ticks — derived from the parameters instead of
+configured as a number nobody can justify.
+
+**That suspends exits, not only entries.** §5.3 asks an indicator to hold off
+*entering* after a gap; discarding the window is stricter, because a dead cross
+needs two consecutive relations and there are none while the ring refills. With
+`slowPeriod` at its maximum that is up to 513 ticks; at a typical 20 it is 21.
+Gaps correlate with market stress, so this is stated rather than left implicit.
+It is still right: a strategy is a signal generator, not a liquidation path.
+Exiting on the first post-gap tick would flatten the book on every WS reconnect,
+a partial window is a different indicator wearing this one's name, and the
+pre-gap prices are the discontinuity the discard exists to avoid. The paths that
+*do* flatten under stress are the kill switch's cancel-and-verify barrier
+(§7.2), the RiskGate's loss limits (§6.4), and an operator acting on the ledger
+(§7.3) — none of which run through a strategy. What the strategy owes that
+arrangement is visibility, so a warm-up while holding reports
+`warming-up-while-long` and the gap tick reports `gap-reset-while-long`. The
+decision is unchanged; the exposure is no longer silent.
+
+`src/strategies/sma-crossover.test.ts` states the whole behaviour as one
+decision table over (previous relation, current relation, position). A cross is
+confirmed only between two strict relations: an exact tie on either side
+suppresses the signal rather than entering a position the averages never made.
