@@ -236,13 +236,23 @@ running the compose stack behind a Caddy TLS edge (`infra/oracle/`). It costs
 nothing, the VM's reserved public IP is the static egress address Toss
 requires, and the artefacts are the same ones the local smoke uses.
 
-1. **VM.** Region `ap-seoul-1` (or `ap-chuncheon-1`), shape `VM.Standard.A1.Flex`
-   (2 OCPU / 12 GB is plenty; the free allowance is 4 OCPU / 24 GB in total),
-   image Ubuntu 24.04 (aarch64), boot volume 50–100 GB. If A1 capacity is
-   unavailable retry later or use `VM.Standard.E2.1.Micro` (amd64, 1 GB —
-   workable because images are pulled, not built, and the bootstrap adds a
-   2 GB swap file). Assign a **reserved** public IP so it survives
-   stop/start.
+1. **VM.** The tenancy's **home region**: Always Free compute exists only
+   there, and the home region is chosen when the tenancy is created and can
+   never be changed afterwards — so the host's region is whatever the account
+   was opened with (the reference host is `ap-osaka-1`). Moving to another
+   region therefore means a new tenancy, a new reserved IP and an egress
+   release (*Egress allow list* above); a paid instance in a subscribed
+   region is the only alternative. Shape `VM.Standard.A1.Flex` at
+   2 OCPU / 12 GB, which is the entire Always Free Ampere allowance since
+   Oracle halved it on 2026-06-15 (1,500 OCPU-hours and 9,000 GB-hours a
+   month, previously 4 OCPU / 24 GB); Ampere A1 is not offered in
+   `ap-chuncheon-1`, and a new tenancy is only ever given the home regions
+   Oracle currently opens to signups (`ap-seoul-1` was not among them on
+   2026-09-01). Image Ubuntu 24.04 (aarch64), boot volume 50–100 GB. If A1
+   capacity is unavailable retry later or use `VM.Standard.E2.1.Micro`
+   (amd64, 1 GB — workable because images are pulled, not built, and the
+   bootstrap adds a 4 GB swap file). Assign a **reserved** public IP so it
+   survives stop/start.
 2. **Network.** In the VCN security list allow ingress TCP 22 (your IP only),
    80 and 443 from `0.0.0.0/0`. Nothing else: PostgreSQL and Redis stay on the
    compose network. The OS firewall is opened by the bootstrap script.
