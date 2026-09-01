@@ -145,6 +145,52 @@ function checkDockerfile(relative) {
   return instructions;
 }
 
+/**
+ * Build-context sources of every COPY (stage-to-stage copies excluded): the
+ * paths that must exist in the context for the build to see them.
+ */
+function contextCopySources(instructions) {
+  const sources = [];
+  for (const copy of instructions.filter((i) => i.instruction === 'COPY')) {
+    const tokens = copy.args.split(/\s+/);
+    if (tokens.some((t) => t.startsWith('--from='))) continue;
+    const paths = tokens.filter((t) => !t.startsWith('--'));
+    sources.push(...paths.slice(0, -1).map((s) => s.replace(/\/+$/, '')));
+  }
+  return sources;
+}
+
+/**
+ * Every workspace:* dependency of the app, dev included, resolved recursively
+ * to its directory. `pnpm deploy` resolves the app's whole manifest — a dev
+ * dependency whose directory is missing from the build context fails the image
+ * build with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND (this broke the #43 deploy: the
+ * api image never built because apps/strategy-runner was not copied in).
+ */
+function workspaceDependencyDirs(appDir) {
+  const dirs = new Map();
+  const queue = [appDir];
+  while (queue.length > 0) {
+    const manifest = JSON.parse(read(join(queue.pop(), 'package.json')));
+    const wanted = { ...manifest.dependencies, ...manifest.devDependencies };
+    for (const [name, range] of Object.entries(wanted)) {
+      if (!String(range).startsWith('workspace:') || dirs.has(name)) continue;
+      const short = name.replace(/^@[^/]+\//, '');
+      const candidates = ['packages', 'apps']
+        .map((kind) => `${kind}/${short}`)
+        .filter((candidate) => existsSync(path(candidate, 'package.json')));
+      assert.equal(
+        candidates.length,
+        1,
+        `cannot locate workspace package ${name} (dependency of ${appDir})`,
+      );
+      dirs.set(name, candidates[0]);
+      queue.push(candidates[0]);
+    }
+  }
+  return dirs;
+}
+
 check('node runtime pin', () => {
   assert.equal(read('.nvmrc').trim(), NODE_VERSION);
   const pkg = JSON.parse(read('package.json'));
@@ -162,6 +208,21 @@ check('api image', () => {
   assert.ok(cmd, 'api Dockerfile needs CMD');
   assert.match(cmd.args, /apps\/paper-api\/dist\/main\.js/);
   assert.match(cmd.args, /"node"/, 'api CMD must use exec form with node');
+});
+
+check('image build contexts carry every workspace dependency', () => {
+  for (const app of ['apps/paper-api', 'apps/web']) {
+    const instructions = dockerfileInstructions(read(`${app}/Dockerfile`));
+    const sources = contextCopySources(instructions);
+    const covered = (dir) =>
+      sources.some((s) => s === dir || dir.startsWith(`${s}/`));
+    for (const [name, dir] of workspaceDependencyDirs(app)) {
+      assert.ok(
+        covered(dir),
+        `${app}/Dockerfile build context misses ${dir} — ${name} is a workspace dependency (dev counts: pnpm deploy resolves the whole manifest), so the image build fails without it`,
+      );
+    }
+  }
 });
 
 check('web image', () => {
