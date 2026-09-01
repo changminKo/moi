@@ -510,6 +510,81 @@ describe('MarketRuntime', () => {
     await runtime.close();
   });
 
+  /**
+   * The browser paints the quote panel from `GET …/quote` and then keeps it
+   * live from this frame, so the frame has to state the same things the REST
+   * projection does. It used to carry the bare `OrderBookSnapshot` — no
+   * price, no instant — which is why the panel's chart never collected a
+   * second point and why the web had to cast the payload to a shape it was
+   * not (spec §16.36).
+   */
+  it('states the price and the instant on the quote frame, not just the book', async () => {
+    const { runtime, stream, hub } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(hub.publishQuote).toHaveBeenCalledTimes(2));
+
+    const frames = (hub.publishQuote.mock.calls as unknown[][]).map(
+      (call) =>
+        call[0] as {
+          market: string;
+          symbol: string;
+          recoveryEpoch: bigint;
+          payload: Record<string, unknown>;
+        },
+    );
+    for (const frame of frames) {
+      expect(frame.market).toBe('US');
+      expect(frame.symbol).toBe('AAPL');
+      expect(frame.recoveryEpoch).toBe(3n);
+      // Decimal strings, never JS numbers.
+      expect(typeof frame.payload.price).toBe('string');
+      expect(new Date(frame.payload.asOf as string).getTime()).not.toBeNaN();
+    }
+    // A trade moves the displayed price, so it has to reach subscribers.
+    expect(frames[0]?.payload).toMatchObject({ price: '100.25' });
+    // The book frame keeps the last trade as the price (`quotePrice`) and
+    // carries the depth the panel draws.
+    expect(frames[1]?.payload).toMatchObject({
+      price: '100.25',
+      currency: 'USD',
+      bids: BOOK.bids,
+      asks: BOOK.asks,
+    });
+  });
+
+  it('publishes a quote frame per trade even with no book yet', async () => {
+    const { runtime, stream, hub } = build();
+    await runtime.connect(new AbortController().signal);
+    for (const price of ['100.25', '100.30', '100.10']) {
+      stream.emitTrade({
+        market: 'US',
+        symbol: 'AAPL',
+        price,
+        volume: '5',
+        sourceTimestamp: null,
+      });
+    }
+    await vi.waitFor(() => expect(hub.publishQuote).toHaveBeenCalledTimes(3));
+
+    const prices = (hub.publishQuote.mock.calls as unknown[][]).map(
+      (call) => (call[0] as { payload: { price: string } }).payload.price,
+    );
+    expect(prices).toEqual(['100.25', '100.30', '100.10']);
+  });
+
   it('hands the engine the raw trade and book payloads, not the merged slot', async () => {
     const { runtime, stream, engine } = build();
     await runtime.connect(new AbortController().signal);

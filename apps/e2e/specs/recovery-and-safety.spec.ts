@@ -67,8 +67,8 @@ test('rejects placement while degraded, permits cancel, then labels a recovery f
   await paperSystem.setBook({
     market: 'US',
     symbol: 'AAPL',
-    bids: [{ price: '189', size: '1' }],
-    asks: [{ price: '190', size: '1' }],
+    bids: [{ price: '189', volume: '1' }],
+    asks: [{ price: '190', volume: '1' }],
   });
   await page.reload();
   await expect(page.getByText('Market data delayed').first()).toBeVisible();

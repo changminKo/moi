@@ -5,8 +5,8 @@ import { type E2eStateFile, stateFilePath } from '../state-file.js';
 type BookInput = Readonly<{
   market: 'KR' | 'US';
   symbol: string;
-  bids: readonly { price: string; size: string }[];
-  asks: readonly { price: string; size: string }[];
+  bids: readonly { price: string; volume: string }[];
+  asks: readonly { price: string; volume: string }[];
 }>;
 type FillInput = Readonly<{
   orderId: string;

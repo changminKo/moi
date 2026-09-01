@@ -12,6 +12,7 @@ import type {
   MarketEnvelope,
   MarketStateStore,
 } from '../market-data/market-state-store.js';
+import { projectQuote } from '../market-data/quote-projection.js';
 import {
   type RecoveryClock,
   RecoveryCoordinator,
@@ -359,6 +360,9 @@ export class MarketRuntime {
             sourceTimestamp: event.sourceTimestamp,
           },
         });
+        // A trade moves the displayed price (`quotePrice` prefers the last
+        // trade), so subscribers hear about it too — not only about books.
+        this.#publishQuote(event.symbol, envelope);
       } else if (event.kind === 'orderBook') {
         const stored = store.applyEvent({
           symbol: event.symbol,
@@ -373,13 +377,7 @@ export class MarketRuntime {
           payload: event.book,
         } as MarketEnvelope<OrderBookSnapshot>;
         await this.#d.engine.onOrderBook(envelope);
-        this.#d.hub.publishQuote({
-          market: event.market,
-          symbol: event.symbol,
-          recoveryEpoch: envelope.recoveryEpoch,
-          marketDataVersion: envelope.marketDataVersion,
-          payload: event.book,
-        });
+        this.#publishQuote(event.symbol, envelope);
       }
       this.#rejections = 0;
     } catch (error) {
@@ -416,6 +414,38 @@ export class MarketRuntime {
     await this.#d.health.onClose(causeCode);
     this.supervisor.schedule(() => this.#recoverOnce(), {
       serverShutdown: reason === 'server-shutdown',
+    });
+  }
+
+  /**
+   * The `quote` frame subscribers receive. Its payload is `projectQuote` —
+   * the very same builder the REST answer uses — so the snapshot a browser
+   * paints from and the frames it stays live on cannot be two different
+   * shapes (`docs/api/quote-contract.md`, spec §16.36). The frame used to
+   * carry the bare `OrderBookSnapshot`, with no price and no instant, which
+   * left the web casting the payload onto a shape it was not and left the
+   * panel's chart with a single point forever.
+   */
+  #publishQuote(
+    symbol: string,
+    envelope: {
+      readonly recoveryEpoch: bigint;
+      readonly marketDataVersion: bigint;
+    },
+  ): void {
+    this.#d.hub.publishQuote({
+      market: this.#d.market,
+      symbol,
+      recoveryEpoch: envelope.recoveryEpoch,
+      marketDataVersion: envelope.marketDataVersion,
+      payload: projectQuote({
+        market: this.#d.market,
+        symbol,
+        state: this.#d.stateStore.get(symbol) as SymbolQuoteState | undefined,
+        health: this.#d.health.state,
+        recoveryEpoch: envelope.recoveryEpoch,
+        marketDataVersion: envelope.marketDataVersion,
+      }),
     });
   }
 
