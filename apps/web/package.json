@@ -11,7 +11,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@tanstack/react-query": "5.102.5",
+    "@tanstack/react-query": "5.102.8",
     "clsx": "2.1.1",
     "decimal.js": "10.6.0",
     "i18next": "26.4.0",
