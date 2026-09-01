@@ -4,6 +4,7 @@ import {
   applyFillToPosition,
   assertExactMoney,
   type DecimalString,
+  DomainError,
   type Market,
   moneyDecimal,
   type PositionCost,
@@ -60,7 +61,31 @@ import type { CommittedFill, FillJournal } from '../state/fill-journal.js';
  * same judgement `StateStore.dailyEntryNotional` makes about the notional limit,
  * and it is the right one for a limit whose job is to stop this bot.
  *
- * When the ledger holds a position the runner never saw itself acquire — a
+ * ## A fill it cannot account for stops it
+ *
+ * Three shapes say "a fill happened and the runner cannot say which fill": a
+ * record naming a different event than the one carrying it, a record it cannot
+ * read, and a fill event with no records at all. All three **throw**.
+ *
+ * Skipping one and letting the event commit was the tempting shape, and it is
+ * fail *open*: the cursor advances past a fill that then reaches no strategy,
+ * ever. Unlike a crash there is nothing to replay it — the runner chose to pass
+ * it by. That is precisely the "lost fill" this phase exists to prevent, and it
+ * is the one place the runner would have differed from the fail-closed rule
+ * (AGENTS.md rule 6) it keeps everywhere else.
+ *
+ * Throwing wedges the cursor, and wedging is the point. Each of these means the
+ * ledger published something the contract says it cannot, and continuing to
+ * trade against an account whose fill history the runner has demonstrably lost
+ * track of is worse than stopping. `StreamClient` contains the throw and reports
+ * it, so the process stays up and says so on every replay; when the ledger is
+ * fixed, the replay from the unmoved cursor **delivers** the fill rather than
+ * having lost it.
+ *
+ * What the wedge stops is *fill processing*, not tick-driven trading — halting
+ * the whole runner is the submission barrier of §7.2, in phase D.
+ *
+ * ## When the ledger holds a position the runner never saw itself acquire — a
  * session with holdings from before the bot, or one whose events it had to skip
  * at a resync — a sell can exceed the basis. `applyFillToPosition` refuses that,
  * correctly. The fill is then recorded realising nothing, the basis is reset
@@ -97,6 +122,10 @@ export const isFillEvent = (eventType: string): boolean =>
   FILL_EVENTS.has(eventType);
 
 const key = (market: string, symbol: string): string => `${market}:${symbol}`;
+
+function invalid(message: string): never {
+  throw new DomainError('INVARIANT_VIOLATION', message);
+}
 
 const opening = (symbol: string): PositionCost =>
   Object.freeze({
@@ -228,19 +257,21 @@ export class FillResolver {
     const entries = payload.fills;
 
     if (!Array.isArray(entries)) {
-      // A fill event with no fills on it. Before `#43` every one looked like
-      // this; after it, one does only if something upstream changed shape, and
-      // the runner must not quietly carry on believing it saw the whole event.
+      // Before `#43` every fill event looked like this. After it, both
+      // producers — the matching path and the STOP/TAKE_PROFIT trigger path —
+      // build `fills` through `fillRecord()`, so one without it means something
+      // upstream changed shape and the runner cannot know what filled.
       this.#reporter.report(
-        'warn',
-        'a fill event carried no fill records and could not be resolved',
+        'error',
+        'a fill event carried no fill records; the cursor is held here until the ledger is fixed, so the event replays rather than being lost',
         {
           accountSequence: event.accountSequence,
           eventType: event.eventType,
         },
       );
-
-      return EMPTY;
+      invalid(
+        `the ${event.eventType} at ${event.accountSequence} carried no fill records`,
+      );
     }
 
     const resolved: ResolvedFill[] = [];
@@ -251,12 +282,13 @@ export class FillResolver {
 
       if (fill === null) {
         this.#reporter.report(
-          'warn',
-          'a fill record was malformed and was not applied',
+          'error',
+          'a fill record could not be read; the cursor is held here until the ledger is fixed, so the event replays rather than being lost',
           { accountSequence: event.accountSequence },
         );
-
-        continue;
+        invalid(
+          `a fill record on the event at ${event.accountSequence} could not be read`,
+        );
       }
 
       // The ledger allocates the sequence before the rows precisely so each
@@ -268,16 +300,17 @@ export class FillResolver {
         fill.accountSequence !== event.accountSequence
       ) {
         this.#reporter.report(
-          'warn',
-          'a fill record named a different account sequence than the event carrying it',
+          'error',
+          'a fill record named a different account sequence than the event carrying it; the cursor is held here until the ledger is fixed, so the event replays rather than being lost',
           {
             accountSequence: event.accountSequence,
             fillAccountSequence: fill.accountSequence,
             fillId: fill.id,
           },
         );
-
-        continue;
+        invalid(
+          `fill ${fill.id} names account sequence ${fill.accountSequence} but arrived on the event at ${event.accountSequence}`,
+        );
       }
 
       if (this.#journal.hasFill(fill.id)) {

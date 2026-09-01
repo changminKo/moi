@@ -8,6 +8,7 @@ import type {
   StrategyDecision,
 } from '@moi/strategy-sdk/strategy';
 import { defineParameterSchema } from '@moi/strategy-sdk/strategy';
+import { DomainError } from '@moi/trading-core';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { StreamAccountEvent } from '../feed/stream-client.js';
 import { deriveIdempotencyKey } from '../gateway/idempotency.js';
@@ -283,53 +284,69 @@ describe('processing one account event', () => {
   });
 
   /**
-   * `#43` made the payload authoritative, and the runner holds it to that. A
-   * record naming a different event than the one carrying it means the payload
-   * was assembled from two events, and attributing a fill to the wrong cursor is
-   * how a replay loses one.
+   * A fill the runner cannot account for must **stop** it, not be skipped past.
+   *
+   * The three shapes below are all "this event says a fill happened and the
+   * runner cannot say which fill": a record naming a different event than the
+   * one carrying it, a record it cannot read, and an event with no records at
+   * all. Skipping any of them and committing the event anyway advances the
+   * cursor past a fill that then reaches no strategy, ever — and unlike a crash,
+   * nothing replays it. That is the "lost fill" half of §11's criterion,
+   * arrived at by the runner's own choice rather than by a failure.
+   *
+   * So they fail closed (AGENTS.md rule 6). The cursor stays put, the stream
+   * replays the event on the next connect, and the runner keeps failing loudly
+   * until a person fixes the ledger — at which point the replay delivers the
+   * fill rather than having lost it. Wedging *is* the desired behaviour here:
+   * an event that proves the ledger assembled a payload wrongly is not a state
+   * to keep trading through.
    */
-  it('refuses a fill record that names a different account sequence', async () => {
+  const unaccountable = async (
+    what: RegExp,
+    event: StreamAccountEvent,
+  ): Promise<void> => {
     const { processor, state, reporter } = build(scratch());
 
-    await processor.process(
+    await expect(processor.process(event)).rejects.toThrow(DomainError);
+
+    expect(state.fills.cursor).toBeNull();
+    expect(state.fills.hasEvent(event.eventId)).toBe(false);
+    expect(reporter.lines.join('\n')).toMatch(what);
+  };
+
+  it('stops on a fill record that names a different account sequence', async () => {
+    await unaccountable(
+      /named a different account sequence/u,
       fillEvent('12', [{ id: 'fill-1', accountSequence: '11' }]),
     );
-
-    expect(state.fills.hasFill('fill-1')).toBe(false);
-    expect(state.fills.cursor).toBe('12');
-    expect(reporter.lines.join('\n')).toMatch(
-      /named a different account sequence/u,
-    );
-  });
-
-  it('skips a malformed fill record and keeps the rest of the event', async () => {
-    const { processor, state, reporter } = build(scratch());
-
-    await processor.process(
-      fillEvent('12', [{ id: 'fill-1', price: 'not-money' }, { id: 'fill-2' }]),
-    );
-
-    expect(state.fills.hasFill('fill-1')).toBe(false);
-    expect(state.fills.hasFill('fill-2')).toBe(true);
-    expect(reporter.lines.join('\n')).toMatch(/a fill record was malformed/u);
   });
 
   /**
-   * A fill event with no `fills` array is what every one looked like before
-   * `#43`. After it, one means something upstream changed shape, and the runner
-   * must not carry on believing it saw the whole event.
+   * And it stops on the *whole* event, not just the bad record. A payload with
+   * one unreadable fill beside a good one is a payload the runner cannot trust
+   * to be complete, and committing the good half would claim the event was
+   * processed.
    */
-  it('says so when a fill event carries no fill records', async () => {
-    const { processor, state, reporter } = build(scratch());
+  it('stops on a malformed fill record, taking the rest of the event with it', async () => {
+    await unaccountable(
+      /a fill record could not be read/u,
+      fillEvent('12', [{ id: 'fill-1', price: 'not-money' }, { id: 'fill-2' }]),
+    );
+  });
 
-    await processor.process(
+  /**
+   * Every `ORDER_FILLED` producer in the paper API carries `fills` — the
+   * matching path and the STOP/TAKE_PROFIT trigger path both build it through
+   * `fillRecord()` (#43). One without it means something upstream changed
+   * shape, and the runner must not carry on believing it saw the whole event.
+   */
+  it('stops when a fill event carries no fill records at all', async () => {
+    await unaccountable(
+      /carried no fill records/u,
       fillEvent('12', [], {
         payload: { orderId: 'order-a', filledQuantity: '10' },
       }),
     );
-
-    expect(state.fills.cursor).toBe('12');
-    expect(reporter.lines.join('\n')).toMatch(/carried no fill records/u);
   });
 
   /**
