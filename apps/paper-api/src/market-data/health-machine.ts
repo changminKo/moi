@@ -85,9 +85,11 @@ export class MarketHealthMachine {
     if (this.#state !== 'HEALTHY') this.#state = 'RECOVERING';
   }
   /**
-   * The feed is back at `epoch`. Answers whether the market is also clear of
-   * the incidents that gate placement — the feed state itself always returns
-   * to HEALTHY, because it is what decides whether to close the transport.
+   * The feed is back at `epoch`. Answers whether this market's own incidents
+   * are all clear; a GLOBAL incident can still gate placement and is reported
+   * by `marketHealthView`, not here. The feed state always returns to HEALTHY
+   * — it is what decides whether to close the transport, so an unrelated
+   * incident must not make a healthy pong look like a failing one.
    */
   async markHealthy(epoch: bigint): Promise<boolean> {
     const resolveMarket = this.#incidents.resolveMarketIncidents;
