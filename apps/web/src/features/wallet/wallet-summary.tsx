@@ -1,10 +1,17 @@
 import { useTranslation } from 'react-i18next';
 import type { Wallet } from '../../lib/api-types';
-import { formatDecimal } from '../../lib/format-number';
+import { capFractionDigits, formatDecimal } from '../../lib/format-number';
 import './wallet.css';
 
+// Same cap as the FX ticket's quote block, and for the same reason: shown
+// here only, never padded onto a shorter fraction. The wallet's ledger
+// value, and whatever the API returned, are untouched.
+const MAX_DISPLAYED_FRACTION_DIGITS = 2;
+
 function displayAmount(currency: Wallet['currency'], value: string): string {
-  const amount = formatDecimal(value || '0');
+  const amount = formatDecimal(
+    capFractionDigits(value || '0', MAX_DISPLAYED_FRACTION_DIGITS),
+  );
   return currency === 'KRW' ? `₩${amount}` : `$${amount}`;
 }
 
