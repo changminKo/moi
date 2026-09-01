@@ -44,6 +44,7 @@ function build(
       input,
     })),
     resolveCas: vi.fn(async () => true),
+    resolveRetryExhausted: vi.fn(async () => undefined),
   };
   const health = new MarketHealthMachine({ market: 'US', incidents });
   const stateStore = new MarketStateStore();
@@ -238,6 +239,50 @@ describe('MarketRuntime', () => {
     expect(
       logs.filter((l) => l.event === 'recovery.failed').length,
     ).toBeGreaterThanOrEqual(3);
+    await runtime.close();
+  });
+
+  it('keeps retrying after the hold and clears it without an operator (A3, §16.34)', async () => {
+    const { runtime, incidents, connectSpy, health, logs, stream } = build({
+      // The production re-arm is 30 s doubling to 5 min; the shape is what is
+      // under test, so the test runs it at millisecond scale.
+      rearmDelayMs: () => 5,
+    });
+    connectSpy.mockRejectedValue(
+      Object.assign(new Error('nope'), { statusCode: 401 }),
+    );
+    await runtime.connect(new AbortController().signal);
+    await vi.waitFor(() => expect(runtime.supervisor.exhausted).toBe(true), {
+      timeout: 3_000,
+    });
+    const attemptsAtHold = connectSpy.mock.calls.length;
+
+    // No operator touches anything: the supervisor re-arms on its own.
+    await vi.waitFor(
+      () =>
+        expect(connectSpy.mock.calls.length).toBeGreaterThan(attemptsAtHold),
+      { timeout: 3_000 },
+    );
+    expect(
+      logs.filter((l) => l.event === 'recovery.rearmed').length,
+    ).toBeGreaterThanOrEqual(1);
+    // The hold is raised once, not once per re-armed failure.
+    expect(
+      incidents.activate.mock.calls.filter(
+        (c) =>
+          (c[0] as { causeCode: string }).causeCode ===
+          'RECOVERY_RETRY_EXHAUSTED',
+      ),
+    ).toHaveLength(1);
+
+    connectSpy.mockImplementation((signal) =>
+      FakeMarketData.prototype.connect.call(stream, signal),
+    );
+    await vi.waitFor(() => expect(health.state).toBe('HEALTHY'), {
+      timeout: 3_000,
+    });
+    expect(runtime.supervisor.exhausted).toBe(false);
+    expect(incidents.resolveRetryExhausted).toHaveBeenCalledWith('US');
     await runtime.close();
   });
 
