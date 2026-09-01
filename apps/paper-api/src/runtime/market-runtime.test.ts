@@ -39,6 +39,7 @@ function build(
       input,
     })),
     resolveCas: vi.fn(async () => true),
+    resolveRetryExhausted: vi.fn(async () => undefined),
   };
   const health = new MarketHealthMachine({ market: 'US', incidents });
   const stateStore = new MarketStateStore();
@@ -236,7 +237,7 @@ describe('MarketRuntime', () => {
     await runtime.close();
   });
 
-  it('keeps retrying after the hold and clears it without an operator (A3, §16.33)', async () => {
+  it('keeps retrying after the hold and clears it without an operator (A3, §16.34)', async () => {
     const { runtime, incidents, connectSpy, health, logs, stream } = build({
       // The production re-arm is 30 s doubling to 5 min; the shape is what is
       // under test, so the test runs it at millisecond scale.
@@ -276,11 +277,7 @@ describe('MarketRuntime', () => {
       timeout: 3_000,
     });
     expect(runtime.supervisor.exhausted).toBe(false);
-    // The incident row itself is cleared on the recovery path by
-    // `resolveMarketIncidents` (§16.34), not from here.
-    expect(
-      logs.filter((l) => l.event === 'recovery.hold_cleared'),
-    ).toHaveLength(1);
+    expect(incidents.resolveRetryExhausted).toHaveBeenCalledWith('US');
     await runtime.close();
   });
 
