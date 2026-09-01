@@ -279,3 +279,97 @@ describe('usePortfolioStream fill announcements', () => {
     expect(onFill).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The write itself. `portfolio-cache-contract.test.ts` fixes what a snapshot
+ * must look like before it may go into the cache; these fix that it goes there
+ * at all, and that a refused patch does not.
+ *
+ * Red on purpose until the implementation lands — nothing writes the cache
+ * today, which is why the trade page's wallets and sell-side holding sit still
+ * between invalidations while the portfolio page beside them is live.
+ */
+describe('usePortfolioStream writing through to the query cache', () => {
+  const complete = (accountSequence: string, krw: string) =>
+    ({
+      sessionId: 's-1',
+      wallets: [{ currency: 'KRW', total: krw, available: krw, reserved: '0' }],
+      positions: [],
+      reservations: [],
+      activeOrders: [],
+      accountSequence,
+      market: { health: {}, recoveryFill: {} },
+    }) as unknown as PortfolioSnapshot;
+
+  const patch = (accountSequence: string, krw: string) => ({
+    type: 'event',
+    eventId: `e-${accountSequence}`,
+    accountSequence,
+    eventType: 'ORDER_FILLED',
+    payload: {
+      orderId: 'o-1',
+      status: 'FILLED',
+      filledQuantity: '1',
+      ...complete(accountSequence, krw),
+    },
+  });
+
+  it('publishes an applied patch so every cache reader sees it', () => {
+    // The trade page reads its wallets and the sell-side holding straight out
+    // of this cache entry. Patching only the hook's own state leaves that
+    // page a version behind until something happens to invalidate.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('43', '900')));
+
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('43');
+    expect(cached.wallets[0]?.available).toBe('900');
+  });
+
+  it('publishes nothing the REST response would not have answered', () => {
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('43', '900')));
+
+    // The sequence is asserted alongside the key set on purpose. Checking the
+    // keys alone would pass while nothing writes at all — the seeded snapshot
+    // is already REST-shaped — and a test that cannot tell "written correctly"
+    // from "never written" is worse than no test, because it reads as cover.
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('43');
+    expect(Object.keys(cached).sort()).toEqual([
+      'accountSequence',
+      'activeOrders',
+      'market',
+      'positions',
+      'reservations',
+      'sessionId',
+      'wallets',
+    ]);
+  });
+
+  it('leaves the cache alone when the patch is refused', () => {
+    // A gap means the snapshot in hand is no longer trustworthy. Writing a
+    // half-applied one would hand every reader a state the server never sent,
+    // which is worse than the staleness this whole change is fixing.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('99', '900')));
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('1000');
+  });
+});
