@@ -22,6 +22,42 @@
   margin: 0;
   color: var(--color-muted);
   font-size: var(--type-md);
+  /* A flex row of its own, nested inside .quote-header's: lets .quote-name
+     shrink and ellipsis while .quote-ticker keeps its full text. `min-width:
+     0` overrides the flex default (min-width: auto, i.e. the unwrapped
+     content width), which would otherwise stop this heading from ever
+     shrinking below "name + ticker" and defeat the ellipsis below. This does
+     not touch how .quote-header itself centres this heading against the
+     badge — that centring is keyed to this element's own margin box, not to
+     what's inside it. */
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+/* When a display name is available, it carries the heading's weight and the
+   ticker becomes the secondary, muted detail beside it — same hierarchy as
+   .instrument-name / .instrument-symbol in instrument-search.css: the name
+   in the ambient (display) face, the ticker dropped to the body face like
+   .instrument-symbol, so the two surfaces read the same way even though the
+   ticker's own text differs (this heading's ticker keeps the market prefix,
+   `KR:005930`, rather than the list's parenthesized symbol — the header
+   already showed that full ticker before this change, and the list's badge
+   already carries the market separately, so the two are addressing
+   different layouts, not disagreeing on one). */
+.quote-name {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--color-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quote-ticker {
+  flex-shrink: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
 }
 
 .quote-price {

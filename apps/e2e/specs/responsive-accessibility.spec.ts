@@ -60,4 +60,28 @@ test('supports keyboard-only order validation without overflow', async ({
     Math.abs((centres?.badge ?? 0) - (centres?.heading ?? 0)),
     `${testInfo.project.name}: badge and heading must share an optical line`,
   ).toBeLessThan(1);
+
+  // A name too long for the row must ellipsis, not wrap the heading onto a
+  // second line — that would grow the heading's box and break the alignment
+  // above. The e2e fixture only ever seeds a short name ("Apple"), so this
+  // exercises the real CSS layout (jsdom has none) by growing the live
+  // element's text directly, rather than widening the shared instrument
+  // catalog every other spec in this suite also depends on.
+  const nameHeightDelta = await page.evaluate(() => {
+    const nameEl = document.querySelector<HTMLElement>('.quote-name');
+    if (!nameEl) return null;
+    const before = nameEl.getBoundingClientRect().height;
+    nameEl.textContent =
+      '아주 길게 늘어나는 가상의 종목명을 흉내 낸 테스트용 문자열이며 한 줄로는 절대 담기지 않을 만큼 계속 이어집니다';
+    const after = nameEl.getBoundingClientRect().height;
+    return after - before;
+  });
+  expect(
+    nameHeightDelta,
+    'the quote heading must render a .quote-name span to test truncation on',
+  ).not.toBe(null);
+  expect(
+    nameHeightDelta,
+    `${testInfo.project.name}: a long name must ellipsis, not wrap the heading onto a second line`,
+  ).toBeLessThan(1);
 });
