@@ -71,6 +71,7 @@ export const en = {
   'fx.getQuote': 'Get quote',
   'fx.convert': 'Convert',
   'fx.rate': 'Exchange rate',
+  'fx.rateValue': '1 USD ≈ {{krw}} KRW',
   'fx.fee': 'Fee',
   'fx.source': 'You send',
   'fx.destination': 'You receive',

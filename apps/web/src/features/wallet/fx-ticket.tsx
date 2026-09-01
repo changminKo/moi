@@ -5,23 +5,41 @@ import { GroupedNumberInput } from '../../components/grouped-number-input';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { FxQuote } from '../../lib/api-types';
-import { formatDecimal } from '../../lib/format-number';
+import { formatDecimal, isDecimal } from '../../lib/format-number';
 import { useAppLocale } from '../../lib/i18n';
 import { newIdempotencyKey } from '../../lib/idempotency';
 import { presentationForReason } from '../system/system-status-provider';
 import './wallet.css';
 
+// Past this, an inverted rate no longer reads as an exchange rate — it reads
+// as a wall of digits (a wire rate of "0.000...001" inverts to a 31-digit
+// number) — so above it the raw wire value is the honest thing to show.
+const MAX_DISPLAYABLE_KRW_PER_USD = 1e15;
+
 /**
  * The wire rate is USD per KRW ("0.0007"): correct for the quoting math, but
  * unreadable as an exchange rate — a person thinks "about 1,430 won", and at
  * four decimal places the wire value can't even tell 1,400 from 1,430 apart.
- * This is a display-only inversion; the exact string the API returned is
- * still what quoting and conversion use.
+ * This inverts *for display only* — quoting and conversion still use the
+ * exact wire string — and commits to one direction, KRW per USD, matching
+ * the fixed pair `quoteFx` below actually requests. The name says so: a
+ * future caller quoting the opposite pair would otherwise get a silently
+ * wrong inversion instead of a type error.
+ *
+ * `quote.rate` arrives from the API with no schema validation, so this must
+ * never throw: anything that isn't a plain positive decimal, or whose
+ * inverse is too large to mean anything as a rate, reports "not displayable"
+ * (null) rather than guessing — the same contract `formatDecimal` already
+ * uses for values it can't format.
  */
-function formatRate(rate: string): string {
+export function formatKrwPerUsd(rate: string): string | null {
+  if (!isDecimal(rate)) return null;
   const value = new Decimal(rate);
-  if (!value.isFinite() || value.lte(0)) return rate;
-  return `1 USD = ${formatDecimal(new Decimal(1).dividedBy(value).toFixed(2))} KRW`;
+  if (value.lte(0)) return null;
+  const inverse = new Decimal(1).dividedBy(value);
+  if (!inverse.isFinite() || inverse.gte(MAX_DISPLAYABLE_KRW_PER_USD))
+    return null;
+  return formatDecimal(inverse.toFixed(2));
 }
 
 export function FxTicket({
@@ -78,6 +96,7 @@ export function FxTicket({
       setPending(false);
     }
   };
+  const krw = quote ? formatKrwPerUsd(quote.rate) : null;
   return (
     <section className="panel fx-ticket" aria-labelledby="fx-title">
       <h2 id="fx-title">{t('fx.title')}</h2>
@@ -100,7 +119,8 @@ export function FxTicket({
       {quote && (
         <div aria-live="polite" className="fx-quote">
           <p>
-            {t('fx.rate')}: {formatRate(quote.rate)}
+            {t('fx.rate')}:{' '}
+            {krw === null ? quote.rate : t('fx.rateValue', { krw })}
           </p>
           <p>
             {t('fx.fee')}: ₩{formatDecimal(quote.fee)}

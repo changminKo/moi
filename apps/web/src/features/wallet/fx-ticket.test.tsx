@@ -6,7 +6,7 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FxTicket } from './fx-ticket';
+import { FxTicket, formatKrwPerUsd } from './fx-ticket';
 
 afterEach(cleanup);
 
@@ -38,7 +38,8 @@ describe('FxTicket', () => {
     fireEvent.click(screen.getByRole('button', { name: /quote/i }));
     // The wire rate (USD per KRW, "0.0007") is inverted for display into the
     // direction and precision a person actually reads exchange rates in.
-    expect(await screen.findByText(/1 USD = 1,428\.57 KRW/)).toBeVisible();
+    // "≈" because toFixed(2) is a rounded display value, not the wire rate.
+    expect(await screen.findByText(/1 USD ≈ 1,428\.57 KRW/)).toBeVisible();
     // Amounts are grouped and carry their currency, matching the input field
     // right above the quote block and the wallet panel's ₩/$ convention.
     expect(screen.getByText(/₩1,000/)).toBeVisible();
@@ -78,5 +79,71 @@ describe('FxTicket', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /quote/i }));
     expect(screen.getByText(/positive/i)).toBeVisible();
+  });
+
+  it('falls back to the raw rate instead of crashing on a malformed wire value', async () => {
+    // quote.rate comes straight off the wire with no schema validation; a
+    // non-numeric value must not unmount the panel (or the whole app — there
+    // is no ErrorBoundary above it).
+    const api = {
+      post: vi.fn().mockResolvedValueOnce({
+        quoteId: 'q3',
+        rate: 'not-a-number',
+        fee: '0',
+        sourceAmount: '1000',
+        destinationAmount: '0.6993',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    };
+    render(<FxTicket apiClient={api as never} />);
+    fireEvent.change(screen.getByLabelText(/amount/i), {
+      target: { value: '1000' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /quote/i }));
+    expect(await screen.findByText(/not-a-number/)).toBeVisible();
+  });
+
+  it('falls back to the raw rate when the inverted ratio is unreadably large', async () => {
+    const tinyRate = '0.000000000000000000000000000001'; // 1e-30
+    const api = {
+      post: vi.fn().mockResolvedValueOnce({
+        quoteId: 'q4',
+        rate: tinyRate,
+        fee: '0',
+        sourceAmount: '1000',
+        destinationAmount: '0.001',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    };
+    render(<FxTicket apiClient={api as never} />);
+    fireEvent.change(screen.getByLabelText(/amount/i), {
+      target: { value: '1000' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /quote/i }));
+    expect(
+      await screen.findByText(new RegExp(tinyRate.replaceAll('.', '\\.'))),
+    ).toBeVisible();
+    expect(screen.queryByText(/≈/)).not.toBeInTheDocument();
+  });
+});
+
+describe('formatKrwPerUsd', () => {
+  it('inverts and formats a plain wire rate', () => {
+    expect(formatKrwPerUsd('0.0007')).toBe('1,428.57');
+  });
+
+  it('returns null for values format-number.ts would also pass through unchanged', () => {
+    expect(formatKrwPerUsd('')).toBeNull();
+    expect(formatKrwPerUsd('abc')).toBeNull();
+    expect(formatKrwPerUsd('NaN')).toBeNull();
+  });
+
+  it('returns null for zero and negative rates instead of dividing by zero', () => {
+    expect(formatKrwPerUsd('0')).toBeNull();
+    expect(formatKrwPerUsd('-0.0007')).toBeNull();
+  });
+
+  it('returns null when the inverted ratio is too large to read as a rate', () => {
+    expect(formatKrwPerUsd('0.000000000000000000000000000001')).toBeNull();
   });
 });

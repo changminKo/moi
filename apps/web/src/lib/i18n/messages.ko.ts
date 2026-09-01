@@ -73,6 +73,7 @@ export const ko: Record<MessageKey, string> = {
   'fx.getQuote': '환율 조회',
   'fx.convert': '환전하기',
   'fx.rate': '환율',
+  'fx.rateValue': '1 USD ≈ {{krw}} KRW',
   'fx.fee': '수수료',
   'fx.source': '보내는 금액',
   'fx.destination': '받는 금액',
