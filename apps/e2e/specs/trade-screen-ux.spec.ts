@@ -103,7 +103,18 @@ test('says how much of the chosen window it has actually collected', async ({
           bids: [{ price: '316.44', volume: '80' }],
           asks: [{ price: '316.65', volume: '40' }],
         });
-        return page.locator('.sparkline-summary').textContent();
+        // Read without blocking. The summary only exists from the second tick
+        // on, and `waitForStream` only promises *a* stream — the shell opens
+        // one for account events at page load, so the quote subscription can
+        // still be a moment behind and swallow the first book. Blocking here
+        // would spend the whole budget on one push; returning empty lets the
+        // poll do what it was written to do and push another.
+        return (
+          (await page
+            .locator('.sparkline-summary')
+            .textContent({ timeout: 1_000 })
+            .catch(() => null)) ?? ''
+        );
       },
       { timeout: 20_000 },
     )

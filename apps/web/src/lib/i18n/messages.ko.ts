@@ -172,5 +172,14 @@ export const ko: Record<MessageKey, string> = {
   'reason.SESSION_EXPIRED': '세션이 만료되었습니다 — 새 세션을 시작하세요',
   'reason.SYMBOL_NOT_TRADABLE': '거래할 수 없는 종목입니다',
 
+  'fillToast.regionAria': '체결 알림',
+  'fillToast.complete':
+    '{{symbol}} {{side}} {{quantity}}주 체결 · {{price}} · 주문 완료',
+  'fillToast.partial':
+    '{{symbol}} {{side}} {{quantity}}주 체결 · {{price}} · {{filled}}/{{total}}',
+  'fillToast.completeCumulative': '{{symbol}} {{side}} {{total}}주 전량 체결',
+  'fillToast.partialCumulative':
+    '{{symbol}} {{side}} {{filled}}/{{total}}주 체결',
+
   'guard.unavailable': '지금은 이용할 수 없습니다',
 };

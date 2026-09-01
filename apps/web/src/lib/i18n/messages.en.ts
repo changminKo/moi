@@ -173,6 +173,25 @@ export const en = {
   'reason.SESSION_EXPIRED': 'Session expired — start a new session',
   'reason.SYMBOL_NOT_TRADABLE': 'This instrument is not tradable',
 
+  // The one notification the app raises on its own. A fill arrives
+  // asynchronously with no form beside it, so the wording has to carry the
+  // whole story: which instrument, which side, how much, at what price, and
+  // whether the order is now done. The price is bare — neither the fill row
+  // nor the order row states a currency, and `lib/currency.ts` refuses to
+  // derive one from `market`.
+  'fillToast.regionAria': 'Fill notifications',
+  'fillToast.complete':
+    '{{symbol}} {{side}} {{quantity}} filled · {{price}} · order complete',
+  'fillToast.partial':
+    '{{symbol}} {{side}} {{quantity}} filled · {{price}} · {{filled}}/{{total}}',
+  // One delivery can settle several fills at different prices. There is no
+  // single price to name then, and blending them would be arithmetic on
+  // money, so the wording falls back to the totals the server sent.
+  'fillToast.completeCumulative':
+    '{{symbol}} {{side}} {{total}} filled in full',
+  'fillToast.partialCumulative':
+    '{{symbol}} {{side}} {{filled}}/{{total}} filled',
+
   'guard.unavailable': 'Action unavailable',
 } as const;
 
