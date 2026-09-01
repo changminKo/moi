@@ -28,7 +28,8 @@ export interface FillRecord {
   readonly quantity: DecimalString;
   readonly price: DecimalString;
   readonly fee: DecimalString;
-  readonly feeCurrency: Currency;
+  /** What `price` and `fee` are both denominated in; see `currencyFor`. */
+  readonly currency: Currency;
   readonly isRecoveryFill: boolean;
   readonly occurredAt: string;
 }
@@ -63,7 +64,7 @@ export function fillRecord(fill: FillFacts, context: FillContext): FillRecord {
     quantity: fill.quantity,
     price: fill.price,
     fee: fill.fee,
-    feeCurrency: currencyFor(context.market),
+    currency: currencyFor(context.market),
     isRecoveryFill: context.isRecoveryFill,
     occurredAt: context.occurredAt ?? new Date().toISOString(),
   };

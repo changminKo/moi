@@ -43,13 +43,25 @@ const order = (
   ...overrides,
 });
 
-const fill = (id: string, quantity: string, price: string) => ({
+const fill = (
+  id: string,
+  quantity: string,
+  price: string,
+  currency = 'USD',
+) => ({
   id,
+  fillSequence: '1',
+  accountSequence: '7',
+  orderId: 'o1',
+  market: 'US',
   symbol: 'AAPL',
+  side: 'BUY',
   quantity,
   price,
   fee: '0',
-  recoveryFill: false,
+  currency,
+  isRecoveryFill: false,
+  occurredAt: '2026-09-01T00:00:00.000Z',
 });
 
 const seeded = () => recordFills(createFillLedger(), enriched({}, []));
@@ -69,6 +81,7 @@ describe('announceFill', () => {
       side: 'BUY',
       quantity: '3',
       price: '325.26',
+      currency: 'USD',
       filledQuantity: '3',
       orderQuantity: '3',
       complete: true,
@@ -90,7 +103,7 @@ describe('announceFill', () => {
               status: 'PARTIALLY_FILLED',
               filledQuantity: '2',
             },
-            [fill('f1', '2', '70000')],
+            [fill('f1', '2', '70000', 'KRW')],
           ),
         ],
       ),
@@ -101,6 +114,7 @@ describe('announceFill', () => {
       symbol: '005930',
       quantity: '2',
       price: '70000',
+      currency: 'KRW',
       filledQuantity: '2',
       orderQuantity: '3',
     });
@@ -263,7 +277,7 @@ describe('fillToastMessage', () => {
     orderQuantity: '3',
   } as const;
 
-  it('words a complete fill with its price, grouped for display', () => {
+  it('words a complete fill with its price, grouped and in its currency', () => {
     expect(
       fillToastMessage({
         ...base,
@@ -271,13 +285,36 @@ describe('fillToastMessage', () => {
         side: 'SELL',
         quantity: '3',
         price: '70000',
+        currency: 'KRW',
         complete: true,
       }),
     ).toEqual({
       key: 'fillToast.complete',
       sideKey: 'ticket.sell',
-      values: { symbol: '005930', quantity: '3', price: '70,000' },
+      values: { symbol: '005930', quantity: '3', price: '₩70,000' },
     });
+  });
+
+  it('leaves the amount bare when the fill states no currency it knows', () => {
+    // The rule `lib/currency.ts` already follows: a symbol this client guessed
+    // is worse than a bare number.
+    expect(
+      fillToastMessage({
+        ...base,
+        quantity: '3',
+        price: '325.26',
+        currency: 'GBP',
+        complete: true,
+      }).values.price,
+    ).toBe('325.26');
+    expect(
+      fillToastMessage({
+        ...base,
+        quantity: '3',
+        price: '325.26',
+        complete: true,
+      }).values.price,
+    ).toBe('325.26');
   });
 
   it('words a partial fill with the progress against the order', () => {
@@ -287,6 +324,7 @@ describe('fillToastMessage', () => {
         filledQuantity: '2',
         quantity: '2',
         price: '325.26',
+        currency: 'USD',
         complete: false,
       }),
     ).toEqual({
@@ -295,7 +333,7 @@ describe('fillToastMessage', () => {
       values: {
         symbol: 'AAPL',
         quantity: '2',
-        price: '325.26',
+        price: '$325.26',
         filled: '2',
         total: '3',
       },

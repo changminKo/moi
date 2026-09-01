@@ -184,6 +184,48 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     );
   });
 
+  // The one field whose name the SDK and the API had drifted apart on. The
+  // fixture is spelled the way the server spells it — `fillRecord()` in
+  // `fill-schemas.ts` — rather than the way `BrokerFill` used to, because a
+  // fixture written in the SDK's own vocabulary would have kept passing while
+  // every recovery fill decoded to `false` (spec §16.32).
+  it('reads a recovery fill the way the server reports one', async () => {
+    const snapshot = await new PaperBroker(
+      ok(
+        portfolio({
+          activeOrders: [
+            {
+              id: 'order-1',
+              market: 'KR',
+              symbol: '005930',
+              type: 'LIMIT',
+              side: 'BUY',
+              quantity: '1',
+              filledQuantity: '1',
+              status: 'FILLED',
+              limitPrice: '70000',
+              stopPrice: null,
+              terminalReason: null,
+              fills: [
+                {
+                  id: 'fill-1',
+                  symbol: '005930',
+                  quantity: '1',
+                  price: '70000',
+                  fee: '10',
+                  isRecoveryFill: true,
+                },
+              ],
+              siblingOrderIds: [],
+            },
+          ],
+        }),
+      ),
+    ).getPortfolio(SESSION_ID);
+
+    expect(snapshot.activeOrders[0]?.fills[0]?.isRecoveryFill).toBe(true);
+  });
+
   it('accepts a well-formed portfolio and receipt', async () => {
     const snapshot = await new PaperBroker(ok(portfolio())).getPortfolio(
       SESSION_ID,

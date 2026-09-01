@@ -68,7 +68,7 @@ describe('the one place that says which currency a market settles in', () => {
           accountSequence: '1',
           isRecoveryFill: false,
         },
-      ).feeCurrency,
+      ).currency,
     ).toBe(EXPECTED[market]);
   });
 

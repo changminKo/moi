@@ -39,7 +39,8 @@ const fill = (id: string, quantity: string, price: string) => ({
   quantity,
   price,
   fee: '0',
-  recoveryFill: false,
+  currency: 'USD',
+  isRecoveryFill: false,
 });
 
 const snapshot = (fills: readonly Record<string, unknown>[]) => ({
@@ -105,7 +106,7 @@ describe('FillToastProvider', () => {
       ),
     );
     expect(region).toHaveTextContent(
-      'AAPL Buy 3 filled · 325.26 · order complete',
+      'AAPL Buy 3 filled · $325.26 · order complete',
     );
     expect(document.activeElement).toBe(before);
   });
@@ -122,7 +123,7 @@ describe('FillToastProvider', () => {
     );
     expect(
       screen.getByRole('list', { name: 'Fill notifications' }),
-    ).toHaveTextContent('AAPL Buy 2 filled · 70,000 · 2/3');
+    ).toHaveTextContent('AAPL Buy 2 filled · $70,000 · 2/3');
   });
 
   it('speaks Korean when the app does', async () => {
@@ -138,7 +139,7 @@ describe('FillToastProvider', () => {
       ),
     );
     expect(screen.getByRole('list', { name: '체결 알림' })).toHaveTextContent(
-      'AAPL 매수 3주 체결 · 325.26 · 주문 완료',
+      'AAPL 매수 3주 체결 · $325.26 · 주문 완료',
     );
   });
 });

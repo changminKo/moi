@@ -276,7 +276,7 @@ function decodeFill(payload: unknown): BrokerFill {
     quantity: readQuantity(body.quantity, 'fill quantity'),
     price: readMoneyAmount(body.price, 'fill price'),
     fee: readMoneyAmount(body.fee, 'fill fee'),
-    recoveryFill: body.recoveryFill === true,
+    isRecoveryFill: body.isRecoveryFill === true,
   };
 }
 

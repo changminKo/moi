@@ -199,7 +199,7 @@ describe('fill history', () => {
       // (`numeric` → decimal.toString()): the value is exact, the trailing
       // zeros are not part of it.
       fee: '10.68',
-      feeCurrency: 'KRW',
+      currency: 'KRW',
       isRecoveryFill: false,
       occurredAt: expect.stringMatching(/^\d{4}-/),
     });
@@ -223,7 +223,7 @@ describe('fill history', () => {
     // Another session's fill is invisible, whatever the cursor.
     const other = await repository.listFills(theirs, { limit: 50 });
     expect(other.items.map((item) => item.orderId)).toEqual([theirOrder]);
-    expect(other.items[0]?.feeCurrency).toBe('USD');
+    expect(other.items[0]?.currency).toBe('USD');
     expect(other.items[0]?.side).toBe('SELL');
     expect(
       (await repository.listFills(mine, { limit: 50, after: '0' })).items.map(
