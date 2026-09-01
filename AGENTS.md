@@ -86,6 +86,13 @@ points to; when they disagree, the spec wins and the plan/this file is fixed.
   author `changminKo <rhckdals123@gmail.com>`. Small, verified commits; the
   release checklist and spec §16 are updated in the commit that changes
   behaviour, not later.
+- **Write commit messages and pull requests in Korean.** The type, the scope
+  and the conventional-commit punctuation stay as they are — only the prose is
+  Korean, so `fix(web): 시세 헤더의 배지를 텍스트와 같은 줄에 맞춘다`. The body
+  carries the same weight it always did: what changed, and why it had to. Code,
+  identifiers, file paths, log lines, command output and error text are quoted
+  verbatim in their original form — never translate them. The same rule governs
+  a pull request's title and body.
 - Review convention: two independent read-only review lanes per wave (for
   example Codex deep reviews split by ledger vs runtime), findings ranked
   BLOCKER/HIGH/MEDIUM/LOW with file:line, each finding either fixed with a
