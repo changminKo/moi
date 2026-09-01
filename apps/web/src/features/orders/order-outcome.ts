@@ -53,9 +53,16 @@ export type PlacementFailure = Readonly<{
  *
  * The endpoint answers `{ id, status, filledQuantity: "0", quantity }` — a
  * MARKET order comes back `OPEN` with nothing filled and is filled moments
- * later over the stream, so the message says *accepted*, not *filled*. A STOP
- * or TAKE_PROFIT (and an OCO's legs) come back `PENDING_TRIGGER` and may wait
- * indefinitely, which is a different promise and gets its own sentence.
+ * later over the stream, so the message says *accepted*, not *filled*. It says
+ * no more than that: the fill announces itself now
+ * (`features/notifications/fill-toasts.tsx`), which is what let this sentence
+ * lose the clause that used to promise it.
+ *
+ * A STOP or TAKE_PROFIT (and an OCO's legs) come back `PENDING_TRIGGER` and
+ * keep the longer wording. They may wait indefinitely and emit nothing at all
+ * until the trigger is hit, so no toast will ever speak for them; the clause
+ * is the only thing standing between a resting order and a reader who thinks
+ * nothing happened.
  *
  * The response body is not validated on the wire, so anything unrecognisable
  * degrades to plain acceptance: the request did succeed, and inventing a

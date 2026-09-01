@@ -339,3 +339,73 @@ describe('TradePage order estimate', () => {
     expect(screen.getByText('Estimated ≈ $979.05')).toBeVisible();
   });
 });
+
+describe('TradePage holding on the sell side', () => {
+  const withPositions = (positions: readonly Record<string, string>[]) => ({
+    get: vi.fn(async (path: string) => {
+      if (path.startsWith('/api/v1/instruments'))
+        return [
+          {
+            market: 'US',
+            symbol: 'AAPL',
+            name: 'Apple',
+            tradable: true,
+            currency: 'USD',
+          },
+        ];
+      if (path.includes('/quote'))
+        return {
+          market: 'US',
+          symbol: 'AAPL',
+          price: '326.30',
+          asOf: '2026-09-01T00:00:00Z',
+          health: 'HEALTHY',
+          currency: 'USD',
+          bids: [{ price: '326.31', volume: '10' }],
+          asks: [{ price: '326.35', volume: '4' }],
+        };
+      // The positions ride in the same response the wallets do, so the sell
+      // side costs no request of its own.
+      if (path === '/api/v1/portfolio') return { wallets: [], positions };
+      return [];
+    }),
+    post: vi.fn(),
+  });
+
+  const openSellTicket = async (api: unknown) => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade?symbol=AAPL']}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+    expect(await screen.findByText('$326.30')).toBeVisible();
+    fireEvent.click(screen.getByLabelText('Sell'));
+  };
+
+  it('reads the selected instrument holding out of the portfolio cache', async () => {
+    await openSellTicket(
+      withPositions([
+        { market: 'KR', symbol: '005930', available: '9', reserved: '0' },
+        { market: 'US', symbol: 'AAPL', available: '4', reserved: '1' },
+      ]),
+    );
+
+    await waitFor(() =>
+      expect(document.querySelector('.order-holding')).toHaveTextContent(
+        '4 available to sell · 1 reserved',
+      ),
+    );
+  });
+
+  it('says the reader holds none of an instrument with no position row', async () => {
+    await openSellTicket(withPositions([]));
+
+    await waitFor(() =>
+      expect(document.querySelector('.order-holding')).toHaveTextContent(
+        'No holding',
+      ),
+    );
+  });
+});

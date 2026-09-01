@@ -1,13 +1,13 @@
 import { useTranslation } from 'react-i18next';
 import { FillHistory } from '../features/orders/fill-history';
 import { OpenOrders } from '../features/orders/open-orders';
+import { usePortfolioStreamValue } from '../features/portfolio/portfolio-stream-provider';
 import { PositionsTable } from '../features/portfolio/positions-table';
-import { usePortfolioStream } from '../features/portfolio/use-portfolio-stream';
 import './portfolio-page.css';
 
 export function PortfolioPage() {
   const { t } = useTranslation();
-  const { snapshot, isLoading } = usePortfolioStream();
+  const { snapshot, isLoading } = usePortfolioStreamValue();
   if (isLoading)
     return <section aria-busy="true">{t('portfolio.loading')}</section>;
   const snapshotOrders = snapshot.activeOrders as readonly Record<

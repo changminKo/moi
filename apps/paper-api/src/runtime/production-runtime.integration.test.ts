@@ -1446,14 +1446,37 @@ describe('ProductionRuntime', () => {
         available: '9999900',
         reserved: '0',
       });
+      // Selling out does not delete the row: the quantities fall to zero and
+      // `average_cost` keeps what the position was actually bought at. The
+      // snapshot reports it unchanged, so a client can tell "held today, now
+      // closed" from "never held" — hiding the row is the client's decision to
+      // make (`positions-table.tsx`), not something the ledger does for it.
       expect(
         (
           await observer.query(
-            'select total_quantity::text as q, reserved_quantity::text as r from positions where session_id = $1 and symbol = $2',
+            'select total_quantity::text as q, reserved_quantity::text as r, average_cost::text as c from positions where session_id = $1 and symbol = $2',
             [client.id, '005930'],
           )
         ).rows[0],
-      ).toEqual({ q: '0', r: '0' });
+      ).toEqual({ q: '0', r: '0', c: '70000' });
+      const { 'content-type': _portfolioJson, ...readHeaders } = headers();
+      const portfolio = await json(`${origin}/api/v1/portfolio`, {
+        headers: readHeaders,
+      });
+      expect(portfolio.status).toBe(200);
+      expect(
+        (portfolio.body as { positions: readonly Record<string, string>[] })
+          .positions,
+      ).toEqual([
+        expect.objectContaining({
+          market: 'KR',
+          symbol: '005930',
+          total: '0',
+          available: '0',
+          reserved: '0',
+          averageCost: '70000',
+        }),
+      ]);
       expect(runtime.engineFor('KR').getOrder(sellId)?.status).toBe('FILLED');
     },
     TEST_TIMEOUT_MS,

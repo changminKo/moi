@@ -75,6 +75,16 @@
   display: none;
 }
 
+/* Sits between the quantity label and its field, where the reader looks
+   before typing a sell quantity. Quiet — it is a fact about the account, not
+   a warning — but tabular so the digits line up with the estimate below. */
+.order-holding {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--color-muted);
+  font-size: var(--type-sm);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The support handle under a rejection: kept, but subordinate to the sentence
    the reader actually reads, and outside the alert so assistive tech
    announces the reason rather than an opaque id. */

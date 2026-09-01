@@ -7,6 +7,12 @@ import {
   type UserStreamMessage,
 } from '../../lib/user-stream';
 import {
+  announceFill,
+  createFillLedger,
+  type FillAnnouncement,
+  recordFills,
+} from '../orders/fill-announcement';
+import {
   createPortfolioState,
   type PortfolioSnapshot,
   type PortfolioState,
@@ -20,6 +26,14 @@ type Options = Readonly<{
   webSocketFactory?: (url: string) => StreamSocket;
   now?: () => number;
   random?: () => number;
+  /**
+   * Called once for each fill this client had not seen before, so a caller can
+   * announce it. The stream is the only place that sees both the REST snapshot
+   * and every event, which is what `fill-announcement.ts` needs to tell a fresh
+   * fill from a replayed one — hence the callback here rather than a second
+   * consumer of the same socket.
+   */
+  onFill?: (announcement: FillAnnouncement) => void;
 }>;
 
 const AFTER_SEQUENCE = /^(0|[1-9][0-9]{0,18})$/;
@@ -55,6 +69,13 @@ export function usePortfolioStream(
   const attempt = useRef(0);
   const refreshQueued = useRef(false);
   const random = options.random ?? Math.random;
+  const fills = useRef(createFillLedger());
+  // Held in a ref so a caller may pass an inline closure without tearing the
+  // socket down and reconnecting on every render.
+  const onFill = useRef(options.onFill);
+  useEffect(() => {
+    onFill.current = options.onFill;
+  }, [options.onFill]);
 
   const requestRefresh = useCallback(() => {
     if (refreshQueued.current) return;
@@ -68,6 +89,10 @@ export function usePortfolioStream(
 
   useEffect(() => {
     if (!query.data) return;
+    // Every fill the snapshot already carries is history, not news. Recording
+    // it here — before the socket can deliver a replay of the same fills — is
+    // what keeps a page load silent.
+    fills.current = recordFills(fills.current, query.data);
     setState(() => createPortfolioState(query.data));
   }, [query.data]);
   useEffect(() => {
@@ -118,6 +143,18 @@ export function usePortfolioStream(
             socket.close(4000, 'heartbeat timeout');
           }, heartbeatInterval.current * 2);
         } else if (message.type === 'event') {
+          // Outside the state updater on purpose: StrictMode invokes an
+          // updater twice, and an announcement must happen exactly once. It is
+          // also independent of the store going STALE — a gap means the patch
+          // cannot be applied, not that the fill did not happen.
+          const fill = announceFill(
+            fills.current,
+            message.eventType,
+            message.payload,
+          );
+          fills.current = fill.ledger;
+          if (fill.announcement !== undefined)
+            onFill.current?.(fill.announcement);
           setState((current) => {
             if (!current) return current;
             const next = reducePortfolio(current, message);

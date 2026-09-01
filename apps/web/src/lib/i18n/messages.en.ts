@@ -61,10 +61,16 @@ export const en = {
   'ticket.placeAria': 'Order ticket — Place order',
   'ticket.invalidOrder': 'Invalid order',
   'ticket.rejected': 'Order rejected',
-  'ticket.placedOpen':
-    'Order accepted — fills appear in your portfolio as they happen',
+  // Short on purpose. The clause that used to follow ("fills appear in your
+  // portfolio as they happen") was standing in for a notification the app did
+  // not have; the fill toast now says the same thing at the moment it becomes
+  // true, and this line is left with the one fact it can vouch for.
+  'ticket.placedOpen': 'Order accepted.',
+  // A trigger order does not get the same trim. Nothing announces waiting —
+  // there is no event until the trigger is hit, possibly never — so without
+  // this sentence a reader cannot tell a resting order from a broken one.
   'ticket.placedPendingTrigger':
-    'Order accepted — it waits for its trigger price',
+    'Order accepted. It waits for its trigger price.',
   'ticket.rejectedWithCode': 'Order rejected (code: {{code}})',
   'ticket.requestId': 'Request ID: {{requestId}}',
 
@@ -140,6 +146,10 @@ export const en = {
   'positions.reserved': 'Reserved',
   'positions.total': 'Total',
   'positions.avgCost': 'Avg cost',
+  'positions.closedTitle': 'Closed positions',
+  'positions.closedCaption':
+    'Symbols sold in full, with the average cost they were held at',
+  'positions.closedAvgCost': 'Avg cost held at',
 
   'orders.title': 'Open orders',
   'orders.empty': 'No open orders.',
@@ -168,6 +178,33 @@ export const en = {
   'reason.SERVICE_UNAVAILABLE': 'Service unavailable',
   'reason.SESSION_EXPIRED': 'Session expired — start a new session',
   'reason.SYMBOL_NOT_TRADABLE': 'This instrument is not tradable',
+
+  // The one notification the app raises on its own. A fill arrives
+  // asynchronously with no form beside it, so the wording has to carry the
+  // whole story: which instrument, which side, how much, at what price, and
+  // whether the order is now done. The price is bare — neither the fill row
+  // nor the order row states a currency, and `lib/currency.ts` refuses to
+  // derive one from `market`.
+  // The sell side of the ticket. `available` is what the ledger will actually
+  // accept; `reserved` is named whenever there is any, because otherwise the
+  // gap between what the reader owns and what the ticket takes is invisible.
+  'holding.available': '{{available}} available to sell',
+  'holding.availableReserved':
+    '{{available}} available to sell · {{reserved}} reserved',
+  'holding.none': 'No holding',
+
+  'fillToast.regionAria': 'Fill notifications',
+  'fillToast.complete':
+    '{{symbol}} {{side}} {{quantity}} filled · {{price}} · order complete',
+  'fillToast.partial':
+    '{{symbol}} {{side}} {{quantity}} filled · {{price}} · {{filled}}/{{total}}',
+  // One delivery can settle several fills at different prices. There is no
+  // single price to name then, and blending them would be arithmetic on
+  // money, so the wording falls back to the totals the server sent.
+  'fillToast.completeCumulative':
+    '{{symbol}} {{side}} {{total}} filled in full',
+  'fillToast.partialCumulative':
+    '{{symbol}} {{side}} {{filled}}/{{total}} filled',
 
   'guard.unavailable': 'Action unavailable',
 } as const;

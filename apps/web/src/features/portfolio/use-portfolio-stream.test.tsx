@@ -166,3 +166,116 @@ describe('usePortfolioStream stream protocol (§7.5)', () => {
     expect(factory).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('usePortfolioStream fill announcements', () => {
+  const fill = (id: string) => ({
+    id,
+    symbol: 'AAPL',
+    quantity: '1',
+    price: '325.26',
+    fee: '0',
+    recoveryFill: false,
+  });
+  const withOrder = (
+    accountSequence: string,
+    fills: readonly Record<string, unknown>[],
+  ): PortfolioSnapshot => ({
+    ...snapshot(accountSequence),
+    activeOrders: [
+      {
+        id: 'o1',
+        market: 'US',
+        symbol: 'AAPL',
+        type: 'MARKET',
+        side: 'BUY',
+        quantity: '1',
+        filledQuantity: '1',
+        status: 'FILLED',
+      } as unknown as Record<string, string | null>,
+    ].map((order, index) => ({
+      ...order,
+      fills: index === 0 ? fills : [],
+    })) as unknown as PortfolioSnapshot['activeOrders'],
+  });
+
+  function setupWithFills(seed: PortfolioSnapshot) {
+    const onFill = vi.fn();
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+      },
+    });
+    queryClient.setQueryData(PORTFOLIO_QUERY_KEY, seed);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const options = {
+      webSocketFactory: (url: string) =>
+        new FakeSocket(url) as unknown as WebSocket,
+      random: () => 0.5,
+      onFill,
+    };
+    renderHook(() => usePortfolioStream(options), { wrapper });
+    return { onFill, socket: FakeSocket.instances[0] as FakeSocket };
+  }
+
+  const filledEvent = (
+    accountSequence: string,
+    fills: readonly Record<string, unknown>[],
+  ) => ({
+    type: 'event',
+    eventId: `e-${accountSequence}`,
+    accountSequence,
+    eventType: 'ORDER_FILLED',
+    payload: {
+      orderId: 'o1',
+      status: 'FILLED',
+      filledQuantity: '1',
+      ...withOrder(accountSequence, fills),
+    },
+  });
+
+  it('announces a fill the snapshot had not already reported', () => {
+    const { onFill, socket } = setupWithFills(withOrder('42', []));
+    act(() => socket.open());
+    act(() => socket.receive(filledEvent('43', [fill('f1')])));
+    expect(onFill).toHaveBeenCalledTimes(1);
+    expect(onFill.mock.calls[0]?.[0]).toMatchObject({
+      id: 'f1',
+      symbol: 'AAPL',
+      side: 'BUY',
+      quantity: '1',
+      price: '325.26',
+      complete: true,
+    });
+  });
+
+  it('says nothing when the server replays the fill the snapshot already had', () => {
+    // Every first connect omits `afterSequence`, so the server replays the
+    // outbox from zero: this is the ordinary page load, not an edge case.
+    const { onFill, socket } = setupWithFills(withOrder('42', [fill('f1')]));
+    act(() => socket.open());
+    act(() => socket.receive(filledEvent('43', [fill('f1')])));
+    expect(onFill).not.toHaveBeenCalled();
+  });
+
+  it('says nothing twice when the same delivery is repeated', () => {
+    const { onFill, socket } = setupWithFills(withOrder('42', []));
+    act(() => socket.open());
+    act(() => socket.receive(filledEvent('43', [fill('f1')])));
+    act(() => socket.receive(filledEvent('44', [fill('f1')])));
+    expect(onFill).toHaveBeenCalledTimes(1);
+  });
+
+  it('still announces after the store has gone stale', () => {
+    // A sequence gap only means the patch cannot be applied; the fill in the
+    // payload still happened, and the reader still needs to hear about it.
+    const { onFill, socket } = setupWithFills(withOrder('42', []));
+    act(() => socket.open());
+    act(() =>
+      socket.receive({ type: 'resync-required', reason: 'OUTBOX_GAP' }),
+    );
+    act(() => socket.receive(filledEvent('99', [fill('f1')])));
+    expect(onFill).toHaveBeenCalledTimes(1);
+  });
+});
