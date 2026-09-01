@@ -1,9 +1,11 @@
-import type { Currency, DecimalString, Market, Side } from '@moi/trading-core';
+import {
+  type Currency,
+  currencyFor,
+  type DecimalString,
+  type Market,
+  type Side,
+} from '@moi/trading-core';
 import { z } from 'zod';
-
-/** Fee is charged in the market's settlement currency. */
-export const currencyFor = (market: Market): Currency =>
-  market === 'KR' ? 'KRW' : 'USD';
 
 /**
  * One executed fill, in the shape both the `ORDER_FILLED` event payload and

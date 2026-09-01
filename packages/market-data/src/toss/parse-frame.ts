@@ -61,7 +61,17 @@ const PROVIDER_MARKETS: Readonly<Record<string, Market>> = {
   kr: 'KR',
 };
 
-/** The currency each market is allowed to quote in. */
+/**
+ * The currency each market is allowed to quote in.
+ *
+ * Deliberately not `currencyFor` from `@moi/trading-core`, which answers the
+ * same two pairs. What Toss prices a symbol in is a fact about Toss; which
+ * wallet the ledger takes the money out of is a fact about our ledger. This
+ * one is used to reject a frame whose currency contradicts the provider
+ * contract, and it would keep that job even if the ledger ever settled a
+ * market somewhere else. Folding them together would tie a provider check to
+ * an accounting decision.
+ */
 const MARKET_CURRENCIES: Readonly<Record<Market, Currency>> = {
   KR: 'KRW',
   US: 'USD',

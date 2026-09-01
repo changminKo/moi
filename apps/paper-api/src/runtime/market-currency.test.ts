@@ -1,30 +1,29 @@
-import { createFeeModel, type Market } from '@moi/trading-core';
+import { createFeeModel, currencyFor, type Market } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_FEE_SCHEDULES } from '../config.js';
-import { currencyFor as currencyForFillRecord } from '../modules/portfolio/fill-schemas.js';
+import { fillRecord } from '../modules/portfolio/fill-schemas.js';
 import { feeModelFor } from './fee-schedule.js';
-import { currencyFor as currencyForSettlement } from './fill-settlement.js';
 
 /**
- * Which currency a market settles in is answered independently in several
- * places, and they are about to be folded into one. These pin what each of
- * them answers *before* the fold, so that "the refactor changed no behaviour"
- * is a thing the suite proves rather than a thing the diff looks like.
- *
- * Today's copies, all `market === 'KR' ? 'KRW' : 'USD'` written out again:
+ * Which currency a market settles in used to be answered independently in five
+ * places, each spelling out `market === 'KR' ? 'KRW' : 'USD'` again:
  *
  * | where | what it decides |
  * |---|---|
- * | `fill-settlement.ts` `currencyFor` | which wallet a fill locks and settles against |
- * | `fill-schemas.ts` `currencyFor` | `FillRecord.feeCurrency` on the event and `GET /api/v1/fills` |
+ * | `fill-settlement.ts` | which wallet a fill locks and settles against |
+ * | `fill-schemas.ts` | the currency on the event payload and `GET /api/v1/fills` |
  * | `order-placement-service.ts` (private) | the currency a cash reservation is held in |
  * | `fee-schedule.ts` | `FeeModel.currency` for the engine |
- * | `production-runtime.ts` | the currency of an order restored into the engine at startup |
+ * | `production-runtime.ts` | an order restored into the engine at startup |
  *
- * The last two of those are not importable — one is a module-private const,
- * the other is inline inside a private method — so they are pinned here
- * through the seams that do observe them, and the rest by the type checker
- * once they call the shared function.
+ * They now all call `currencyFor` from `@moi/trading-core`. The expectations
+ * below are the ones this file asserted before the fold, unchanged — that is
+ * what makes "the refactor changed no behaviour" something the suite proves
+ * rather than something the diff looks like. Two of the five had no importable
+ * seam even then, so they are checked through what does observe them: the fee
+ * model the engine is handed, and the fill record the event and the REST page
+ * are built from. The settlement and reservation call sites are SQL, and are
+ * held by the type checker plus the integration suites that exercise them.
  *
  * Why they must agree is not convention. The ledger adds a fee straight onto a
  * notional (`cost = Σ(price × quantity + fee)` in `fill-settlement.ts`) and
@@ -40,22 +39,37 @@ const EXPECTED: Readonly<Record<Market, 'KRW' | 'USD'>> = {
   US: 'USD',
 };
 
-describe('the currency a market settles in, before it is folded into one place', () => {
-  it.each(MARKETS)('settlement picks the %s wallet', (market) => {
-    expect(currencyForSettlement(market)).toBe(EXPECTED[market]);
-  });
-
-  it.each(MARKETS)('a fill record reports %s the same way', (market) => {
-    expect(currencyForFillRecord(market)).toBe(EXPECTED[market]);
-    // The pair, not just each against a literal: the fold replaces both with
-    // one call, and this is the line that says the replacement is a no-op.
-    expect(currencyForFillRecord(market)).toBe(currencyForSettlement(market));
+describe('the one place that says which currency a market settles in', () => {
+  it.each(MARKETS)('answers %s with the currency it always did', (market) => {
+    expect(currencyFor(market)).toBe(EXPECTED[market]);
   });
 
   it.each(MARKETS)('the %s fee model is denominated the same way', (market) => {
     expect(feeModelFor(DEFAULT_FEE_SCHEDULES, market).currency).toBe(
-      currencyForSettlement(market),
+      EXPECTED[market],
     );
+  });
+
+  it.each(MARKETS)('a %s fill record reports the same currency', (market) => {
+    expect(
+      fillRecord(
+        {
+          id: 'f-1',
+          fillSequence: '1',
+          price: '100',
+          quantity: '1',
+          fee: '0',
+        },
+        {
+          orderId: 'o-1',
+          market,
+          symbol: 'X',
+          side: 'BUY',
+          accountSequence: '1',
+          isRecoveryFill: false,
+        },
+      ).feeCurrency,
+    ).toBe(EXPECTED[market]);
   });
 
   it.each(MARKETS)(

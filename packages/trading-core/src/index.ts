@@ -25,6 +25,7 @@ export type {
   Quantity,
   Side,
 } from './domain-types.js';
+export { currencyFor } from './domain-types.js';
 export {
   type ConsumedOrderBookLevel,
   calculateExecution,

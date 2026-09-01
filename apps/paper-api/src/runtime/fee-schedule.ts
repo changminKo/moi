@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   createFeeModel,
+  currencyFor,
   DomainError,
   type FeeModel,
   type Market,
@@ -22,7 +23,7 @@ export function feeModelFor(fees: FeeSchedules, market: Market): FeeModel {
   return createFeeModel({
     version: feeModelVersionName(fees.version),
     market,
-    currency: market === 'KR' ? 'KRW' : 'USD',
+    currency: currencyFor(market),
     commissionRate: rates.commissionRate,
     sellTaxRate: rates.sellTaxRate,
     roundingDecimals: ROUNDING_DECIMALS[market],
@@ -47,7 +48,7 @@ function scheduleFor(fees: FeeSchedules, market: Market) {
   return {
     commissionRate: fees[market].commissionRate,
     sellTaxRate: fees[market].sellTaxRate,
-    currency: market === 'KR' ? 'KRW' : 'USD',
+    currency: currencyFor(market),
     roundingDecimals: ROUNDING_DECIMALS[market],
   };
 }
