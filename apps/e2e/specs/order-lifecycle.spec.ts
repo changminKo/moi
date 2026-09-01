@@ -112,7 +112,19 @@ test('cancels the OCO sibling and releases its reservation', async ({
   await paperSystem.triggerOco({ orderId, price: '210' });
   await expect(page.getByText('AAPL FILLED')).toHaveCount(2);
   await expect(page.getByText('AAPL CANCELLED')).toBeVisible();
-  await expect(page.getByRole('row', { name: /AAPL 0 0 0/ })).toBeVisible();
+  // The ledger keeps the sold-out row (quantity 0, the average cost it was
+  // held at); the screen stops calling it a holding and reports it as closed,
+  // so "held today, now closed" still reads differently from "never held".
+  await expect(
+    page
+      .getByRole('region', { name: 'Positions', exact: true })
+      .getByText('AAPL'),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByRole('region', { name: 'Closed positions' })
+      .getByRole('row', { name: /AAPL/ }),
+  ).toBeVisible();
   const liveReservations = await page.evaluate(async () => {
     const response = await fetch('/api/v1/portfolio');
     const snapshot = (await response.json()) as {
