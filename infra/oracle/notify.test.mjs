@@ -110,6 +110,48 @@ describe('notify.sh masking', () => {
       assert.ok(!body.includes(secret), `notify.sh leaked ${secret}`);
   });
 
+  /**
+   * A journal tail is many lines, and `sed` works one line at a time: every
+   * rule here used to match only while the secret sat on the same line as its
+   * marker. `alert-unit-failed.sh` forwards exactly that kind of text, and a
+   * wrapped log line puts the value on the next one.
+   */
+  it('masks a secret that sits on the line after its marker', async () => {
+    const body = await post(
+      'fail',
+      'unit failed: moi.service',
+      [
+        'Authorization: Bearer',
+        'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+        'Cookie: moi_session=',
+        'Zm9vYmFyc2Vzc2lvbnZhbHVl',
+        'X-CSRF-Token:',
+        '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
+        'ADMIN_API_KEY=',
+        '0123456789abcdef0123456789abcdef',
+      ].join('\n'),
+    );
+
+    for (const secret of [
+      'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+      'Zm9vYmFyc2Vzc2lvbnZhbHVl',
+      '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
+      '0123456789abcdef0123456789abcdef',
+    ])
+      assert.ok(!body.includes(secret), `notify.sh leaked ${secret}`);
+  });
+
+  it('keeps the line structure of a multi-line journal tail', async () => {
+    const body = await post(
+      'fail',
+      'unit failed: moi.service',
+      'first line\nsecond line\nthird line',
+    );
+    const { embeds } = JSON.parse(body);
+
+    assert.equal(embeds[0].description, 'first line\nsecond line\nthird line');
+  });
+
   it('does not mask the identifiers an operator needs to read', async () => {
     const body = await post(
       'ok',

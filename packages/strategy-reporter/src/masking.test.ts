@@ -38,6 +38,34 @@ describe('maskOutbound', () => {
     );
   });
 
+  /**
+   * Design §7.4 asks for the same patterns on both sides, and `notify.sh`
+   * masks a value that sits on the line after its marker. A wrapped log line
+   * or a report field built from one puts it there, so this side must too.
+   */
+  it('masks a secret that sits on the line after its marker', () => {
+    const masked = maskOutbound(
+      [
+        'Bearer',
+        'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+        'moi_session=',
+        'Zm9vYmFyc2Vzc2lvbnZhbHVl',
+        'X-CSRF-Token:',
+        '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
+        'ADMIN_API_KEY=',
+        '0123456789abcdef0123456789abcdef',
+      ].join('\n'),
+    );
+
+    for (const secret of [
+      'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+      'Zm9vYmFyc2Vzc2lvbnZhbHVl',
+      '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
+      '0123456789abcdef0123456789abcdef',
+    ])
+      expect(masked, secret).not.toContain(secret);
+  });
+
   it('masks an exact secret value the runner holds even when no pattern matches it', () => {
     const cookie = 'Zm9vYmFyLXNlc3Npb24tdmFsdWU';
 

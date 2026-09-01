@@ -49,9 +49,12 @@ export const MASKING_RULES: readonly MaskingRule[] = [
     replacement: `$1${SECRET_MASK}@`,
   },
   { pattern: /\bBearer\s+\S+/gi, replacement: `Bearer ${SECRET_MASK}` },
-  // §7.4: the paper-api session cookie, by name, wherever it appears.
+  // §7.4: the paper-api session cookie, by name, wherever it appears. The
+  // `\s*` lets the value sit on the line after the marker, which is where a
+  // wrapped log line puts it; `infra/oracle/notify.sh` crosses the newline for
+  // the same reason. Over-masking is the safe direction.
   {
-    pattern: /\bmoi_session=[^;\s,"']+/gi,
+    pattern: /\bmoi_session=\s*[^;\s,"']*/gi,
     replacement: `moi_session=${SECRET_MASK}`,
   },
   // §7.4: hyphenated headers the assignment rule below cannot reach.
