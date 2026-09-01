@@ -19,7 +19,9 @@ import { FillResolver } from './fill-resolver.js';
  *    disagree. This is what makes a stream replay free: the server replays from
  *    `afterSequence`, and anything it re-sends that the runner already committed
  *    is dropped here before a strategy sees it.
- * 2. **Resolve the fills** against the ledger's portfolio (`FillResolver`).
+ * 2. **Resolve the fills** off the event itself (`FillResolver`). Since `#43`
+ *    the `ORDER_FILLED` payload carries priceable fill records, so this reads
+ *    the event and, on the ordinary path, touches the network not at all.
  *    Nothing durable happens; a crash here leaves the cursor where it was.
  * 3. **Ask the strategy.** `onFill` is synchronous and pure, and each decision
  *    it returns takes a `decisionId` derived from
@@ -71,7 +73,12 @@ export interface FillProcessorOptions {
   readonly context: StrategyContext;
   /** The strategy that owns each instrument, keyed `MARKET:SYMBOL` (§6.3). */
   readonly owner: ReadonlyMap<string, StrategyHost>;
-  /** The ledger's own view, re-read for the event being processed. */
+  /**
+   * The ledger's own view. A supplier, and read lazily: since `#43` the happy
+   * path resolves a fill entirely from the event, and the portfolio is needed
+   * only to re-base a position whose basis the runner never saw, or to find the
+   * cursor to adopt at a resync.
+   */
   readonly portfolio: () => Promise<BrokerPortfolio>;
   readonly now?: () => number;
 }
@@ -109,8 +116,15 @@ export class FillProcessor {
       return;
     }
 
-    const portfolio = await this.#options.portfolio();
-    const resolution = this.#resolver.resolve(event, portfolio);
+    // Memoised for the span of one event: the two paths that need it must not
+    // read two different snapshots, and the ordinary path reads none.
+    let snapshot: Promise<BrokerPortfolio> | null = null;
+    const portfolio = (): Promise<BrokerPortfolio> => {
+      snapshot ??= this.#options.portfolio();
+
+      return snapshot;
+    };
+    const resolution = await this.#resolver.resolve(event, portfolio);
     const decisions: DecisionRecord[] = [];
 
     for (const { event: fill } of resolution.fills) {

@@ -4,8 +4,11 @@ import {
   applyFillToPosition,
   assertExactMoney,
   type DecimalString,
+  type Market,
   moneyDecimal,
   type PositionCost,
+  type Quantity,
+  type Side,
 } from '@moi/trading-core';
 import type { StreamAccountEvent } from '../feed/stream-client.js';
 import type { Reporter } from '../reporter.js';
@@ -15,40 +18,33 @@ import type { CommittedFill, FillJournal } from '../state/fill-journal.js';
  * Turns an account event into the fills the strategy has not seen yet, and
  * works out what each of them realised.
  *
- * ## Why an event is not enough on its own
+ * ## The event describes itself
  *
- * Design §6.4 says "fills arrive as account events", and they nearly do. What
- * the outbox actually carries for a fill (`runtime/fill-persistence.ts`) is
+ * It did not always. Until `#43` the `ORDER_FILLED` payload was
+ * `{orderId, status, filledQuantity, recoveryEpoch, recoveryFill}` — a
+ * cumulative quantity and nothing priceable — so this class had to read
+ * `GET /api/v1/portfolio` and walk `activeOrders[].fills`, bounded by the
+ * quantity the event announced, to recover a price and a fee. That worked and
+ * it was a workaround, and phase B was right to be uneasy about the shape of it.
  *
- * ```json
- * { "orderId": …, "status": …, "filledQuantity": …, "recoveryEpoch": …, "recoveryFill": … }
- * ```
+ * `#43` made the payload carry `fills: FillRecord[]` — id, order, market,
+ * symbol, side, quantity, price, fee, and the `accountSequence` of the event
+ * publishing them — built by the same `fillRecord` builder behind
+ * `GET /api/v1/fills`. So the workaround is gone, and with it the bound walk,
+ * the "the portfolio showed fewer fills than the event announced" self-heal,
+ * and a portfolio round trip on every account event. What is left is a read of
+ * the event and nothing else.
  *
- * — the order's *cumulative* filled quantity, and no price, no fee, no fill id.
- * The SDK's `FillEvent` needs all three, and realised PnL cannot be computed
- * without price and fee at all. So the event is the **trigger and the
- * ordering**, and the detail comes from `GET /api/v1/portfolio`, whose
- * `activeOrders[].fills` the SDK already documents as "currently the only path
- * by which a client can reach fill data".
+ * That is not merely shorter. The old path took its numbers from a snapshot
+ * captured at a *different instant* than the event and had to reason about the
+ * difference; the payload is the fill as it was committed, in the transaction
+ * that committed it.
  *
- * That is *not* the cursorless fill path phase B warned against. The distinction
- * is which side decides that a fill happened: nothing here is emitted unless an
- * account event at a known `accountSequence` announced it, and every fill is
- * committed with that sequence. The portfolio is consulted for fields, never for
- * existence.
+ * ## The portfolio is still needed, but only when the accounting is already wrong
  *
- * ## Bounded by the quantity the event announced
- *
- * The portfolio is read *after* the event, so it can already hold fills from a
- * later event that has not been processed yet. Emitting those would attribute a
- * fill to the wrong sequence and let the cursor claim work it had not done. So
- * the order's fills are walked oldest first and stop once the running quantity
- * reaches the `filledQuantity` this event announced.
- *
- * The bound is also what makes a short read self-heal. If the portfolio somehow
- * shows fewer fills than the event claims, the next event for the same order
- * carries a larger cumulative quantity, and the fills missed the first time are
- * inside the new bound and not yet in the journal — so they are emitted then.
+ * It is passed as a supplier and awaited on exactly one path: a sell whose
+ * quantity exceeds the basis the runner has been tracking. On the ordinary path
+ * an event costs no network read at all.
  *
  * ## Realised PnL is the ledger's own arithmetic
  *
@@ -61,8 +57,8 @@ import type { CommittedFill, FillJournal } from '../state/fill-journal.js';
  *
  * The basis starts at zero at the first fill the runner commits, so realised PnL
  * measures **the bot's own trading**, not the account's history. That is the
- * same judgement `StateStore.dailyNotional` makes about the notional limit, and
- * it is the right one for a limit whose job is to stop this bot.
+ * same judgement `StateStore.dailyEntryNotional` makes about the notional limit,
+ * and it is the right one for a limit whose job is to stop this bot.
  *
  * When the ledger holds a position the runner never saw itself acquire — a
  * session with holdings from before the bot, or one whose events it had to skip
@@ -100,8 +96,6 @@ const FILL_EVENTS: ReadonlySet<string> = new Set([
 export const isFillEvent = (eventType: string): boolean =>
   FILL_EVENTS.has(eventType);
 
-type PortfolioOrder = BrokerPortfolio['activeOrders'][number];
-
 const key = (market: string, symbol: string): string => `${market}:${symbol}`;
 
 const opening = (symbol: string): PositionCost =>
@@ -111,6 +105,98 @@ const opening = (symbol: string): PositionCost =>
     totalCost: '0',
     realizedPnl: '0',
   });
+
+/**
+ * One fill off the wire. The payload is a network message, so every field is
+ * read once into a frozen snapshot before anything acts on it — the same
+ * treatment `readOrderIntent` gives a strategy's answer.
+ *
+ * `feeCurrency`, `isRecoveryFill`, `fillSequence` and `occurredAt` are on the
+ * record and are deliberately not read. `fillSequence` is the cursor for
+ * `GET /api/v1/fills`, which this runner does not page; the runner's cursor is
+ * `accountSequence`, because that is what the stream replays from. Reading a
+ * second cursor it does not advance would invite someone to believe it did.
+ */
+interface WireFill {
+  readonly id: string;
+  readonly orderId: string;
+  readonly market: Market;
+  readonly symbol: string;
+  readonly side: Side;
+  readonly quantity: Quantity;
+  readonly price: DecimalString;
+  readonly fee: DecimalString;
+  readonly accountSequence: string | null;
+}
+
+const WHOLE = /^(?:0|[1-9][0-9]*)$/u;
+
+function text(source: Record<string, unknown>, field: string): string | null {
+  const value = source[field];
+
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function money(source: Record<string, unknown>, field: string): string | null {
+  const value = text(source, field);
+
+  if (value === null) {
+    return null;
+  }
+
+  try {
+    assertExactMoney(moneyDecimal(value), field);
+  } catch {
+    return null;
+  }
+
+  return value;
+}
+
+/** `null` when the entry is not a fill this runner can act on. */
+function readWireFill(value: unknown): WireFill | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  const id = text(source, 'id');
+  const orderId = text(source, 'orderId');
+  const symbol = text(source, 'symbol');
+  const market = source.market;
+  const side = source.side;
+  const quantity = text(source, 'quantity');
+  const price = money(source, 'price');
+  const fee = money(source, 'fee');
+
+  if (
+    id === null ||
+    orderId === null ||
+    symbol === null ||
+    (market !== 'KR' && market !== 'US') ||
+    (side !== 'BUY' && side !== 'SELL') ||
+    quantity === null ||
+    !WHOLE.test(quantity) ||
+    price === null ||
+    fee === null
+  ) {
+    return null;
+  }
+
+  const accountSequence = text(source, 'accountSequence');
+
+  return Object.freeze({
+    id,
+    orderId,
+    market,
+    symbol,
+    side,
+    quantity,
+    price,
+    fee,
+    accountSequence,
+  });
+}
 
 export interface FillResolverOptions {
   readonly journal: FillJournal;
@@ -126,99 +212,93 @@ export class FillResolver {
     this.#reporter = options.reporter;
   }
 
-  resolve(event: StreamAccountEvent, portfolio: BrokerPortfolio): Resolution {
+  /**
+   * `portfolio` is a supplier, and it is awaited only when a sell exceeds the
+   * basis the runner tracks. On every ordinary event it is not called.
+   */
+  async resolve(
+    event: StreamAccountEvent,
+    portfolio: () => Promise<BrokerPortfolio>,
+  ): Promise<Resolution> {
     if (!isFillEvent(event.eventType)) {
       return EMPTY;
     }
 
     const payload = (event.payload ?? {}) as Record<string, unknown>;
-    const orderId = payload.orderId;
+    const entries = payload.fills;
 
-    if (typeof orderId !== 'string' || orderId.length === 0) {
+    if (!Array.isArray(entries)) {
+      // A fill event with no fills on it. Before `#43` every one looked like
+      // this; after it, one does only if something upstream changed shape, and
+      // the runner must not quietly carry on believing it saw the whole event.
       this.#reporter.report(
         'warn',
-        'a fill event named no order and could not be resolved',
-        { accountSequence: event.accountSequence, eventType: event.eventType },
+        'a fill event carried no fill records and could not be resolved',
+        {
+          accountSequence: event.accountSequence,
+          eventType: event.eventType,
+        },
       );
 
       return EMPTY;
     }
 
-    const order = portfolio.activeOrders.find((each) => each.id === orderId);
-
-    if (order === undefined) {
-      this.#reporter.report(
-        'warn',
-        'a fill event named an order the portfolio does not list',
-        { accountSequence: event.accountSequence, orderId },
-      );
-
-      return EMPTY;
-    }
-
-    return this.#walk(event, order, portfolio, this.#bound(payload, order));
-  }
-
-  /**
-   * How much of this order the event says is filled. The event's own
-   * `filledQuantity` when it stated one; the order's otherwise, which is the
-   * honest fallback — the portfolio was read after the event, so the order's
-   * own cumulative quantity is at least as new as the event's.
-   */
-  #bound(
-    payload: Readonly<Record<string, unknown>>,
-    order: PortfolioOrder,
-  ): bigint {
-    const announced = payload.filledQuantity;
-
-    if (typeof announced === 'string' && /^[0-9]+$/u.test(announced)) {
-      return BigInt(announced);
-    }
-
-    return BigInt(order.filledQuantity);
-  }
-
-  #walk(
-    event: StreamAccountEvent,
-    order: PortfolioOrder,
-    portfolio: BrokerPortfolio,
-    bound: bigint,
-  ): Resolution {
     const resolved: ResolvedFill[] = [];
     const positions = new Map<string, PositionCost>();
-    const instrument = key(order.market, order.symbol);
-    let running = 0n;
 
-    for (const fill of order.fills) {
-      const quantity = BigInt(fill.quantity);
+    for (const entry of entries) {
+      const fill = readWireFill(entry);
 
-      // Past what this event announced: it belongs to a later sequence, and
-      // claiming it here would attribute a fill to a cursor that had not
-      // reached it.
-      if (running + quantity > bound) {
-        break;
+      if (fill === null) {
+        this.#reporter.report(
+          'warn',
+          'a fill record was malformed and was not applied',
+          { accountSequence: event.accountSequence },
+        );
+
+        continue;
       }
 
-      running += quantity;
+      // The ledger allocates the sequence before the rows precisely so each
+      // fill names the event publishing it. A mismatch means the payload was
+      // assembled from two events, and attributing a fill to the wrong cursor
+      // is how a replay loses one.
+      if (
+        fill.accountSequence !== null &&
+        fill.accountSequence !== event.accountSequence
+      ) {
+        this.#reporter.report(
+          'warn',
+          'a fill record named a different account sequence than the event carrying it',
+          {
+            accountSequence: event.accountSequence,
+            fillAccountSequence: fill.accountSequence,
+            fillId: fill.id,
+          },
+        );
+
+        continue;
+      }
 
       if (this.#journal.hasFill(fill.id)) {
         continue;
       }
 
+      const instrument = key(fill.market, fill.symbol);
       const before =
         positions.get(instrument) ??
         this.#journal.position(instrument) ??
-        opening(order.symbol);
-      const after = this.#apply(before, order, fill, portfolio, instrument);
+        opening(fill.symbol);
+      const after = await this.#apply(before, fill, instrument, portfolio);
 
       positions.set(instrument, after.position);
       resolved.push({
         event: Object.freeze({
-          orderId: order.id,
+          orderId: fill.orderId,
           fillId: fill.id,
-          market: order.market,
-          symbol: order.symbol,
-          side: order.side,
+          market: fill.market,
+          symbol: fill.symbol,
+          side: fill.side,
           quantity: fill.quantity,
           price: fill.price,
           fee: fill.fee,
@@ -226,10 +306,10 @@ export class FillResolver {
         }),
         committed: Object.freeze({
           fillId: fill.id,
-          orderId: order.id,
-          market: order.market,
-          symbol: order.symbol,
-          side: order.side,
+          orderId: fill.orderId,
+          market: fill.market,
+          symbol: fill.symbol,
+          side: fill.side,
           quantity: fill.quantity,
           price: fill.price,
           fee: fill.fee,
@@ -238,39 +318,25 @@ export class FillResolver {
       });
     }
 
-    if (running < bound) {
-      this.#reporter.report(
-        'warn',
-        'the portfolio showed fewer fills than the event announced; the rest will resolve on the next event for this order',
-        {
-          orderId: order.id,
-          accountSequence: event.accountSequence,
-          seen: running.toString(),
-          announced: bound.toString(),
-        },
-      );
-    }
-
     return Object.freeze({
       fills: Object.freeze(resolved),
       positions: Object.freeze(Object.fromEntries(positions)),
     });
   }
 
-  #apply(
+  async #apply(
     before: PositionCost,
-    order: PortfolioOrder,
-    fill: PortfolioOrder['fills'][number],
-    portfolio: BrokerPortfolio,
+    fill: WireFill,
     instrument: string,
-  ): {
+    portfolio: () => Promise<BrokerPortfolio>,
+  ): Promise<{
     readonly position: PositionCost;
     readonly realizedDelta: DecimalString;
-  } {
+  }> {
     try {
       const after = applyFillToPosition(before, {
-        symbol: order.symbol,
-        side: order.side,
+        symbol: fill.symbol,
+        side: fill.side,
         price: fill.price,
         quantity: fill.quantity,
         fee: fill.fee,
@@ -299,7 +365,7 @@ export class FillResolver {
       );
 
       return {
-        position: this.#fromLedger(order, portfolio, before),
+        position: await this.#fromLedger(fill, portfolio, before),
         realizedDelta: '0',
       };
     }
@@ -312,26 +378,25 @@ export class FillResolver {
    * and this is a recovery from a state that was already wrong, so the residue
    * is smaller than the hole it is patching and is reported alongside it.
    */
-  #fromLedger(
-    order: PortfolioOrder,
-    portfolio: BrokerPortfolio,
+  async #fromLedger(
+    fill: WireFill,
+    portfolio: () => Promise<BrokerPortfolio>,
     before: PositionCost,
-  ): PositionCost {
-    const held = portfolio.positions.find(
+  ): Promise<PositionCost> {
+    const held = (await portfolio()).positions.find(
       (position) =>
-        key(position.market, position.symbol) ===
-        key(order.market, order.symbol),
+        key(position.market, position.symbol) === key(fill.market, fill.symbol),
     );
 
     if (held === undefined) {
       return Object.freeze({
-        ...opening(order.symbol),
+        ...opening(fill.symbol),
         realizedPnl: before.realizedPnl,
       });
     }
 
     return Object.freeze({
-      symbol: order.symbol,
+      symbol: fill.symbol,
       quantity: held.total,
       totalCost: assertExactMoney(
         moneyDecimal(held.averageCost).times(held.total),

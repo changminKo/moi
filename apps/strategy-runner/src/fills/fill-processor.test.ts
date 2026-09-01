@@ -62,27 +62,50 @@ class RecordingBroker implements Broker {
   }
 }
 
-interface StubFill {
+/**
+ * One entry of the `fills` array the `ORDER_FILLED` payload has carried since
+ * `#43`, built the way `fillRecord` builds it.
+ */
+interface WireFill {
   readonly id: string;
-  readonly quantity: string;
-  readonly price: string;
-  readonly fee: string;
+  readonly quantity?: string;
+  readonly price?: string;
+  readonly fee?: string;
+  readonly side?: 'BUY' | 'SELL';
+  readonly accountSequence?: string | null;
 }
 
+function wireFill(fill: WireFill, sequence: string): Record<string, unknown> {
+  return {
+    id: fill.id,
+    fillSequence: `9${fill.id.replace(/\D/gu, '') || '0'}`,
+    accountSequence:
+      fill.accountSequence === undefined ? sequence : fill.accountSequence,
+    orderId: 'order-a',
+    market: 'KR',
+    symbol: '005930',
+    side: fill.side ?? 'BUY',
+    quantity: fill.quantity ?? '10',
+    price: fill.price ?? '1000',
+    fee: fill.fee ?? '5',
+    feeCurrency: 'KRW',
+    isRecoveryFill: false,
+    occurredAt: '2026-09-02T02:00:00.000Z',
+  };
+}
+
+/**
+ * The ledger's own view. Since `#43` this is needed only to re-base a position
+ * the runner has no basis for; the ordinary path never reads it, which
+ * `portfolioReads` below is here to prove.
+ */
 function portfolioWith(
   options: {
-    readonly side?: 'BUY' | 'SELL';
-    readonly fills?: readonly StubFill[];
-    readonly filledQuantity?: string;
     readonly positionTotal?: string;
     readonly averageCost?: string;
     readonly accountSequence?: string;
   } = {},
 ): BrokerPortfolio {
-  const fills = options.fills ?? [
-    { id: 'fill-1', quantity: '10', price: '1000', fee: '5' },
-  ];
-
   return Object.freeze({
     sessionId: 'session-1',
     wallets: [],
@@ -99,39 +122,26 @@ function portfolioWith(
               averageCost: options.averageCost ?? '1000',
             },
           ],
-    activeOrders: [
-      {
-        id: 'order-a',
-        market: 'KR' as const,
-        symbol: '005930',
-        type: 'MARKET' as const,
-        side: options.side ?? ('BUY' as const),
-        quantity: '10',
-        filledQuantity:
-          options.filledQuantity ??
-          String(fills.reduce((sum, each) => sum + Number(each.quantity), 0)),
-        status: 'FILLED' as const,
-        fills: fills.map((each) => ({
-          ...each,
-          symbol: '005930',
-          recoveryFill: false,
-        })),
-        siblingOrderIds: [],
-      },
-    ],
+    activeOrders: [],
     accountSequence: options.accountSequence ?? '9',
   }) as unknown as BrokerPortfolio;
 }
 
 const fillEvent = (
   accountSequence: string,
+  fills: readonly WireFill[] = [{ id: 'fill-1' }],
   overrides: Partial<StreamAccountEvent> = {},
 ): StreamAccountEvent =>
   Object.freeze({
     eventId: `event-${accountSequence}`,
     accountSequence,
     eventType: 'ORDER_FILLED',
-    payload: { orderId: 'order-a', status: 'FILLED', filledQuantity: '10' },
+    payload: {
+      orderId: 'order-a',
+      status: 'FILLED',
+      filledQuantity: '10',
+      fills: fills.map((fill) => wireFill(fill, accountSequence)),
+    },
     ...overrides,
   });
 
@@ -177,6 +187,8 @@ function build(
     readonly portfolio?: BrokerPortfolio;
     readonly broker?: RecordingBroker;
     readonly seen?: FillEvent[];
+    /** Counts every time the processor actually reached for the ledger. */
+    readonly portfolioReads?: { count: number };
   } = {},
 ) {
   const reporter = createRecordingReporter();
@@ -212,7 +224,13 @@ function build(
     reporter,
     context: new RunnerContext(() => NOW_MS),
     owner: new Map([['KR:005930', host]]),
-    portfolio: async () => options.portfolio ?? portfolioWith(),
+    portfolio: async () => {
+      if (options.portfolioReads !== undefined) {
+        options.portfolioReads.count += 1;
+      }
+
+      return options.portfolio ?? portfolioWith();
+    },
     now: () => NOW_MS,
   });
 
@@ -257,36 +275,76 @@ describe('processing one account event', () => {
     const { processor, state } = build(scratch());
 
     await processor.process(
-      fillEvent('12', { eventType: 'ORDER_ACCEPTED', payload: {} }),
+      fillEvent('12', [], { eventType: 'ORDER_ACCEPTED', payload: {} }),
     );
 
     expect(state.fills.cursor).toBe('12');
     expect(state.fills.realizedPnl()).toBe('0');
   });
 
-  it('stops at the quantity the event announced', async () => {
-    const { processor, state } = build(scratch(), {
-      // The portfolio was read after the event and already holds a later fill.
-      portfolio: portfolioWith({
-        fills: [
-          { id: 'fill-1', quantity: '4', price: '1000', fee: '0' },
-          { id: 'fill-2', quantity: '6', price: '1100', fee: '0' },
-        ],
-      }),
-    });
+  /**
+   * `#43` made the payload authoritative, and the runner holds it to that. A
+   * record naming a different event than the one carrying it means the payload
+   * was assembled from two events, and attributing a fill to the wrong cursor is
+   * how a replay loses one.
+   */
+  it('refuses a fill record that names a different account sequence', async () => {
+    const { processor, state, reporter } = build(scratch());
 
     await processor.process(
-      fillEvent('12', {
-        payload: {
-          orderId: 'order-a',
-          status: 'PARTIALLY_FILLED',
-          filledQuantity: '4',
-        },
+      fillEvent('12', [{ id: 'fill-1', accountSequence: '11' }]),
+    );
+
+    expect(state.fills.hasFill('fill-1')).toBe(false);
+    expect(state.fills.cursor).toBe('12');
+    expect(reporter.lines.join('\n')).toMatch(
+      /named a different account sequence/u,
+    );
+  });
+
+  it('skips a malformed fill record and keeps the rest of the event', async () => {
+    const { processor, state, reporter } = build(scratch());
+
+    await processor.process(
+      fillEvent('12', [{ id: 'fill-1', price: 'not-money' }, { id: 'fill-2' }]),
+    );
+
+    expect(state.fills.hasFill('fill-1')).toBe(false);
+    expect(state.fills.hasFill('fill-2')).toBe(true);
+    expect(reporter.lines.join('\n')).toMatch(/a fill record was malformed/u);
+  });
+
+  /**
+   * A fill event with no `fills` array is what every one looked like before
+   * `#43`. After it, one means something upstream changed shape, and the runner
+   * must not carry on believing it saw the whole event.
+   */
+  it('says so when a fill event carries no fill records', async () => {
+    const { processor, state, reporter } = build(scratch());
+
+    await processor.process(
+      fillEvent('12', [], {
+        payload: { orderId: 'order-a', filledQuantity: '10' },
       }),
     );
 
+    expect(state.fills.cursor).toBe('12');
+    expect(reporter.lines.join('\n')).toMatch(/carried no fill records/u);
+  });
+
+  /**
+   * The workaround `#43` removed. Resolving a fill used to cost a portfolio
+   * read on every account event; now the event describes itself and the
+   * ordinary path touches the network not at all.
+   */
+  it('reads no portfolio at all on the ordinary path', async () => {
+    const reads = { count: 0 };
+    const { processor, state } = build(scratch(), { portfolioReads: reads });
+
+    await processor.process(fillEvent('12'));
+
     expect(state.fills.hasFill('fill-1')).toBe(true);
-    expect(state.fills.hasFill('fill-2')).toBe(false);
+    expect(reads.count).toBe(0);
   });
 });
 
@@ -315,33 +373,28 @@ describe('exactly once', () => {
     const { processor } = build(scratch(), { seen });
 
     await processor.process(fillEvent('12'));
-    await processor.process(fillEvent('11', { eventId: 'event-late' }));
+    await processor.process(
+      fillEvent('11', [{ id: 'fill-late' }], { eventId: 'event-late' }),
+    );
 
     expect(seen).toHaveLength(1);
   });
 
   it('does not deliver a fill a previous event already committed', async () => {
     const seen: FillEvent[] = [];
-    const { processor } = build(scratch(), {
-      seen,
-      portfolio: portfolioWith({
-        fills: [
-          { id: 'fill-1', quantity: '4', price: '1000', fee: '0' },
-          { id: 'fill-2', quantity: '6', price: '1100', fee: '0' },
-        ],
-      }),
-    });
+    const { processor } = build(scratch(), { seen });
 
+    await processor.process(fillEvent('12', [{ id: 'fill-1', quantity: '4' }]));
+    // The ledger re-publishing a fill it already announced, beside a new one.
     await processor.process(
-      fillEvent('12', {
-        payload: { orderId: 'order-a', filledQuantity: '4' },
-      }),
-    );
-    await processor.process(
-      fillEvent('13', {
-        eventId: 'event-13',
-        payload: { orderId: 'order-a', filledQuantity: '10' },
-      }),
+      fillEvent(
+        '13',
+        [
+          { id: 'fill-1', quantity: '4' },
+          { id: 'fill-2', quantity: '6' },
+        ],
+        { eventId: 'event-13' },
+      ),
     );
 
     expect(seen.map((fill) => fill.fillId)).toStrictEqual(['fill-1', 'fill-2']);
@@ -423,18 +476,22 @@ describe('what a fill realises', () => {
     opened.state.close();
     stores.length = 0;
 
-    const closing = build(directory, {
-      portfolio: portfolioWith({
-        side: 'SELL',
-        fills: [{ id: 'fill-2', quantity: '10', price: '1200', fee: '7' }],
-      }),
-    });
+    const closing = build(directory);
 
     await closing.processor.process(
-      fillEvent('2', {
-        eventId: 'event-2',
-        payload: { orderId: 'order-a', filledQuantity: '10' },
-      }),
+      fillEvent(
+        '2',
+        [
+          {
+            id: 'fill-2',
+            side: 'SELL',
+            quantity: '10',
+            price: '1200',
+            fee: '7',
+          },
+        ],
+        { eventId: 'event-2' },
+      ),
     );
 
     // Bought 10 at 1000 with a 5 fee → basis 10005. Sold 10 at 1200 with a 7
@@ -455,16 +512,20 @@ describe('what a fill realises', () => {
    * reported so a person knows the PnL series has a hole in it.
    */
   it('says so rather than inventing a number it cannot know', async () => {
+    const reads = { count: 0 };
     const { processor, state, reporter } = build(scratch(), {
-      portfolio: portfolioWith({
-        side: 'SELL',
-        fills: [{ id: 'fill-9', quantity: '10', price: '1200', fee: '0' }],
-        positionTotal: '5',
-        averageCost: '900',
-      }),
+      portfolio: portfolioWith({ positionTotal: '5', averageCost: '900' }),
+      portfolioReads: reads,
     });
 
-    await processor.process(fillEvent('3'));
+    await processor.process(
+      fillEvent('3', [
+        { id: 'fill-9', side: 'SELL', quantity: '10', price: '1200', fee: '0' },
+      ]),
+    );
+
+    // The one path that still needs the ledger, and it reads it once.
+    expect(reads.count).toBe(1);
 
     expect(state.fills.realizedPnl()).toBe('0');
     expect(state.fills.position('KR:005930')).toStrictEqual({
