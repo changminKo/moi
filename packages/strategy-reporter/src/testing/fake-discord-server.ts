@@ -17,6 +17,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { fakeWebhookPath } from './secret-fixtures.js';
 
 export interface FakeDiscordRequest {
   readonly method: string;
@@ -45,7 +46,7 @@ export interface FakeDiscordServer {
   close(): Promise<void>;
 }
 
-const WEBHOOK_PATH = '/api/webhooks/900000000000000000/fake-webhook-token';
+const WEBHOOK_PATH = fakeWebhookPath();
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];

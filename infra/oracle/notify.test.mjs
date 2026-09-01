@@ -17,6 +17,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import {
+  FAKE_ADMIN_KEY,
+  fakeJwt,
+  fakePostgresUri,
+  fakeWebhook,
+} from '../../scripts/lib/secret-fixtures.mjs';
 
 const notify = join(
   resolve(dirname(fileURLToPath(import.meta.url))),
@@ -109,7 +115,11 @@ describe('notify.sh dependencies', () => {
     const result = await new Promise((resolve) => {
       execFile(
         notify,
-        ['fail', 'unit failed', 'Bearer SUPERSECRETTOKENVALUE12345'],
+        [
+          'fail',
+          'unit failed',
+          `Bearer ${fakeJwt('SUPERSECRETTOKENVALUE12345')}`,
+        ],
         {
           encoding: 'utf8',
           env: { PATH: bin, DISCORD_WEBHOOK_URL: webhookUrl },
@@ -161,7 +171,7 @@ describe('notify.sh masking', () => {
         'X-CSRF-Token: 7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
         'Set-Cookie: moi_session=abcdefghijklmnop; HttpOnly',
         'Idempotency-Key: 3d0f1c22-0e1a-4a55-b2ad-9c5e1f0a7b31',
-        'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload',
+        `Authorization: Bearer ${fakeJwt()}`,
       ].join(' | '),
     );
 
@@ -170,7 +180,7 @@ describe('notify.sh masking', () => {
       '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
       'abcdefghijklmnop',
       '3d0f1c22-0e1a-4a55-b2ad-9c5e1f0a7b31',
-      'eyJhbGciOiJIUzI1NiJ9.payload',
+      fakeJwt(),
     ])
       assert.ok(!body.includes(secret), `notify.sh leaked ${secret}`);
   });
@@ -179,10 +189,10 @@ describe('notify.sh masking', () => {
     const body = await post(
       'warn',
       'status degraded',
-      'https://discord.com/api/webhooks/1/leak postgres://moi:hunter2@db/moi ADMIN_API_KEY=0123456789abcdef',
+      `${fakeWebhook('1', 'leak')} ${fakePostgresUri()} ADMIN_API_KEY=${FAKE_ADMIN_KEY}`,
     );
 
-    for (const secret of ['webhooks/1/leak', 'hunter2', '0123456789abcdef'])
+    for (const secret of ['webhooks/1/leak', 'hunter2', FAKE_ADMIN_KEY])
       assert.ok(!body.includes(secret), `notify.sh leaked ${secret}`);
   });
 
@@ -198,21 +208,21 @@ describe('notify.sh masking', () => {
       'unit failed: moi.service',
       [
         'Authorization: Bearer',
-        'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+        fakeJwt('SUPERSECRETTOKENVALUE12345'),
         'Cookie: moi_session=',
         'Zm9vYmFyc2Vzc2lvbnZhbHVl',
         'X-CSRF-Token:',
         '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
         'ADMIN_API_KEY=',
-        '0123456789abcdef0123456789abcdef',
+        FAKE_ADMIN_KEY,
       ].join('\n'),
     );
 
     for (const secret of [
-      'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+      fakeJwt('SUPERSECRETTOKENVALUE12345'),
       'Zm9vYmFyc2Vzc2lvbnZhbHVl',
       '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
-      '0123456789abcdef0123456789abcdef',
+      FAKE_ADMIN_KEY,
     ])
       assert.ok(!body.includes(secret), `notify.sh leaked ${secret}`);
   });

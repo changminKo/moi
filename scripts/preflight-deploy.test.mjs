@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { fakeWebhook } from './lib/secret-fixtures.mjs';
 import {
   checkEgress,
   parseAllowlist,
@@ -97,8 +98,8 @@ describe('validateEnvironment', () => {
 });
 
 describe('strategy runner variables', () => {
-  const TRADE = 'https://discord.com/api/webhooks/900000000000000000/trade-tok';
-  const OPS = 'https://discord.com/api/webhooks/800000000000000000/ops-token1';
+  const TRADE = fakeWebhook();
+  const OPS = fakeWebhook('800000000000000000', 'ops-token1');
 
   it('accepts an environment with no bot variables at all', () => {
     assert.deepEqual(validateEnvironment(goodEnv()), []);
@@ -131,7 +132,7 @@ describe('strategy runner variables', () => {
   it('refuses a trade webhook that is not an https Discord webhook', () => {
     for (const value of [
       'https://example.com/api/webhooks/1/tok',
-      'http://discord.com/api/webhooks/1/tok',
+      fakeWebhook('1', 'tok', 'http'),
       'not-a-url',
     ]) {
       const problems = validateEnvironment({

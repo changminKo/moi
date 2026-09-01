@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { readReporterConfig, TRADE_WEBHOOK_VARIABLE } from './config.js';
+import { fakeWebhook } from './testing/secret-fixtures.js';
 
-const TRADE = 'https://discord.com/api/webhooks/900000000000000000/trade-tok';
-const OPS = 'https://discord.com/api/webhooks/800000000000000000/ops-token1';
+const TRADE = fakeWebhook();
+const OPS = fakeWebhook('800000000000000000', 'ops-token1');
 
 describe('readReporterConfig', () => {
   it('reads the runner’s own webhook variable', () => {
@@ -33,7 +34,7 @@ describe('readReporterConfig', () => {
 
   it('refuses anything that is not a Discord webhook URL', () => {
     for (const value of [
-      'http://discord.com/api/webhooks/1/tok',
+      fakeWebhook('1', 'tok', 'http'),
       'https://example.com/api/webhooks/1/tok',
       'https://discord.com/api/channels/1',
       'not-a-url',

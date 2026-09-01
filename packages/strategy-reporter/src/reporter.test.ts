@@ -6,6 +6,7 @@ import {
   type FakeDiscordServer,
   startFakeDiscord,
 } from './testing/fake-discord-server.js';
+import { fakeJwt } from './testing/secret-fixtures.js';
 
 const CSRF_TOKEN = '7f3c1a9e5b2d40689c0e2f1b4a6d8e07';
 const SESSION_COOKIE = 's%3AZm9vYmFyLXNlc3Npb24tdmFsdWU.9xKq';
@@ -69,7 +70,7 @@ describe('createReporter', () => {
       description: `Cookie: moi_session=${SESSION_COOKIE}; X-CSRF-Token: ${CSRF_TOKEN}`,
       fields: [
         { name: `ADMIN_API_KEY=${ADMIN_API_KEY}`, value: ADMIN_API_KEY },
-        { name: 'authorization', value: 'Bearer eyJhbGciOi.J9' },
+        { name: 'authorization', value: `Bearer ${fakeJwt()}` },
       ],
     });
     await reporter.flush();
@@ -81,7 +82,7 @@ describe('createReporter', () => {
       SESSION_COOKIE,
       ADMIN_API_KEY,
       'fake-webhook-token',
-      'eyJhbGciOi.J9',
+      fakeJwt(),
     ])
       expect(wire).not.toContain(secret);
   });

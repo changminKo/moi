@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { fakeWebhook } from './lib/secret-fixtures.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TRACKED = [
@@ -125,7 +126,7 @@ describe('check-deployment-contract (A8)', () => {
       const file = join(d, 'infra/oracle/notify.sh');
       writeFileSync(
         file,
-        `${readFileSync(file, 'utf8')}\n# DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456789/abcDEF_ghi-jkl\n`,
+        `${readFileSync(file, 'utf8')}\n# DISCORD_WEBHOOK_URL=${fakeWebhook('123456789', 'abcDEF_ghi-jkl')}\n`,
       );
     });
     try {

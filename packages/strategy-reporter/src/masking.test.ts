@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { containsSecret, maskOutbound, SECRET_MASK } from './masking.js';
+import {
+  FAKE_ADMIN_KEY,
+  fakeJwt,
+  fakePostgresUri,
+  fakeWebhook,
+} from './testing/secret-fixtures.js';
 
-const WEBHOOK = 'https://discord.com/api/webhooks/1234567890/abcdefghijklmnop';
+const WEBHOOK = fakeWebhook('1234567890', 'abcdefghijklmnop');
 
 describe('maskOutbound', () => {
   it('masks a Discord webhook URL wherever it appears in the text', () => {
@@ -27,13 +33,13 @@ describe('maskOutbound', () => {
   });
 
   it('masks bearer tokens, URL credentials and KEY/TOKEN/SECRET assignments', () => {
-    expect(maskOutbound('Authorization: Bearer eyJhbGciOi.J9')).toBe(
+    expect(maskOutbound(`Authorization: Bearer ${fakeJwt()}`)).toBe(
       `Authorization: Bearer ${SECRET_MASK}`,
     );
-    expect(maskOutbound('postgres://moi:hunter2@db:5432/moi')).toBe(
+    expect(maskOutbound(fakePostgresUri('db:5432'))).toBe(
       `postgres://moi:${SECRET_MASK}@db:5432/moi`,
     );
-    expect(maskOutbound('ADMIN_API_KEY=0123456789abcdef0123456789abcdef')).toBe(
+    expect(maskOutbound(`ADMIN_API_KEY=${FAKE_ADMIN_KEY}`)).toBe(
       `ADMIN_API_KEY=${SECRET_MASK}`,
     );
   });
@@ -47,21 +53,21 @@ describe('maskOutbound', () => {
     const masked = maskOutbound(
       [
         'Bearer',
-        'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+        fakeJwt('SUPERSECRETTOKENVALUE12345'),
         'moi_session=',
         'Zm9vYmFyc2Vzc2lvbnZhbHVl',
         'X-CSRF-Token:',
         '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
         'ADMIN_API_KEY=',
-        '0123456789abcdef0123456789abcdef',
+        FAKE_ADMIN_KEY,
       ].join('\n'),
     );
 
     for (const secret of [
-      'eyJhbGciOiJIUzI1NiJ9.SUPERSECRETTOKENVALUE12345',
+      fakeJwt('SUPERSECRETTOKENVALUE12345'),
       'Zm9vYmFyc2Vzc2lvbnZhbHVl',
       '7f3c1a9e5b2d40689c0e2f1b4a6d8e07',
-      '0123456789abcdef0123456789abcdef',
+      FAKE_ADMIN_KEY,
     ])
       expect(masked, secret).not.toContain(secret);
   });

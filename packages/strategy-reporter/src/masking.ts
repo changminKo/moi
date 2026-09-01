@@ -43,7 +43,8 @@ export const MASKING_RULES: readonly MaskingRule[] = [
       /https?:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\S+/gi,
     replacement: '<webhook>',
   },
-  // Credentials embedded in a URL: postgres://role:password@host/db.
+  // A password carried in a URL's userinfo, as a postgres connection string
+  // does — the scheme and host survive, the credential does not.
   {
     pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/:@\s]+:)[^@\s]+@/g,
     replacement: `$1${SECRET_MASK}@`,
