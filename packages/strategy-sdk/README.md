@@ -309,12 +309,40 @@ therefore no rounding mode to configure**. A test pins a series where the two
 averages differ by one part in 10^20: float64 calls it a tie and suppresses the
 entry, and the exact comparison sees the cross.
 
+A window sum can leave the money domain even when every price in it is valid on
+its own — 80-digit prices are inside `isPositiveMoneyAmount` and two of them are
+not. That is returned as a `noop` with reason `price-out-of-domain`, not raised,
+**and the tick is still recorded**. Recording it is the point: the ring only
+advances on a successful return, so raising from the comparison would leave the
+offending price in the window, and every later tick would recompute the same sum
+and raise again, permanently. Because the ring advances, the price ages out
+within `slowPeriod + 1` ticks and the strategy resumes unaided. A *malformed*
+price is a different case and still fails closed — `assertPositivePrice` runs
+before any state changes, so that tick raises once and the next valid one
+proceeds.
+
 State is the newest `slowPeriod + 1` prices and nothing else. Both relations are
 recomputed from that ring every tick, so nothing derived is stored and
 `snapshot()` → `onStart` restores the window exactly. A tick marked `gapBefore`
 discards the ring rather than averaging across a discontinuity, which makes the
 post-gap hold `slowPeriod + 1` ticks — derived from the parameters instead of
 configured as a number nobody can justify.
+
+**That suspends exits, not only entries.** §5.3 asks an indicator to hold off
+*entering* after a gap; discarding the window is stricter, because a dead cross
+needs two consecutive relations and there are none while the ring refills. With
+`slowPeriod` at its maximum that is up to 513 ticks; at a typical 20 it is 21.
+Gaps correlate with market stress, so this is stated rather than left implicit.
+It is still right: a strategy is a signal generator, not a liquidation path.
+Exiting on the first post-gap tick would flatten the book on every WS reconnect,
+a partial window is a different indicator wearing this one's name, and the
+pre-gap prices are the discontinuity the discard exists to avoid. The paths that
+*do* flatten under stress are the kill switch's cancel-and-verify barrier
+(§7.2), the RiskGate's loss limits (§6.4), and an operator acting on the ledger
+(§7.3) — none of which run through a strategy. What the strategy owes that
+arrangement is visibility, so a warm-up while holding reports
+`warming-up-while-long` and the gap tick reports `gap-reset-while-long`. The
+decision is unchanged; the exposure is no longer silent.
 
 `src/strategies/sma-crossover.test.ts` states the whole behaviour as one
 decision table over (previous relation, current relation, position). A cross is

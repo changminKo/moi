@@ -126,9 +126,12 @@ export interface StrategyPosition {
  * reproducible from a recorded tick series (design §8.2).
  *
  * `position` comes from the ledger, which is the source of truth for what is
- * held (design §7.3). A strategy that instead accumulates its own position from
- * fills is keeping a second copy that drifts across a restart — the failure
- * §6.4 exists to prevent.
+ * held: design §7.3 is explicit that the ledger is the original of the fact and
+ * the bot's state is a cache. A strategy that instead accumulates its own
+ * position from fills is keeping a second copy of that fact, and a second copy
+ * drifts across a restart. (§6.4 is sometimes cited for this and does not say
+ * it — it binds the *runner's* fill replay and PnL bookkeeping to the
+ * `accountSequence` cursor, and says nothing about what a strategy may keep.)
  *
  * `window` is the runner's shared recent-tick view for an instrument, newest
  * last. Its length is the runner's choice, and after a gap it may contain

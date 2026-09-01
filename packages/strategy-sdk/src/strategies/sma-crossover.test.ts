@@ -270,11 +270,27 @@ const DECISION_TABLE: readonly DecisionCase[] = [
     expected: [sell('5', 'dead-cross')],
   },
   {
+    previous: 'none',
+    current: 'none',
+    position: 'long 5 (two ticks in)',
+    ticks: ['10', '10'],
+    expected: [noop('warming-up-while-long')],
+  },
+  {
     previous: 'below',
     current: 'above',
     position: 'flat, but the tick follows a market-data gap',
     ticks: ['10', '9', '10', { price: '12', gapBefore: true }],
     expected: [noop('gap-reset')],
+  },
+  {
+    // The exit is suspended too, and says so. See the header note on gaps: the
+    // kill switch and the RiskGate are the paths that flatten under stress.
+    previous: 'above',
+    current: 'below',
+    position: 'long 5, and the tick follows a market-data gap',
+    ticks: ['10', '11', '10', { price: '8', gapBefore: true }],
+    expected: [noop('gap-reset-while-long')],
   },
   {
     previous: 'below',
@@ -389,6 +405,116 @@ describe('sma-crossover window', () => {
     expect(() => replay(['10', '9', '1e3'], null)).toThrow(
       /price must be a positive plain decimal string/u,
     );
+  });
+});
+
+/**
+ * A window sum can leave the exact money domain even though every price in it
+ * is valid on its own. The ring must still advance, or the price that caused it
+ * can never be displaced and the strategy is wedged for the life of the
+ * process.
+ */
+describe('sma-crossover out-of-domain sums', () => {
+  // Valid on its own — 80 significant digits is exactly the money domain's
+  // limit, and `isPositiveMoneyAmount` accepts it. Two of them are not.
+  const HUGE = '9'.repeat(80);
+  const WIDE: SmaCrossoverParams = smaCrossoverParameterSchema.parse({
+    market: 'KR',
+    symbol: '005930',
+    fastPeriod: 1,
+    slowPeriod: 2,
+    quantity: '10',
+  });
+
+  /** Every tick's decisions, not only the last. */
+  const trace = (
+    ticks: readonly TickInput[],
+  ): readonly StrategyDecision[][] => {
+    const context = makeContext(null);
+    const decisions: StrategyDecision[][] = [];
+    let state = initialSmaCrossoverState(WIDE);
+
+    for (const [index, input] of ticks.entries()) {
+      const advanced = advanceSmaCrossover(
+        state,
+        makeTick(input, index),
+        context,
+        WIDE,
+      );
+
+      state = advanced.state;
+      decisions.push([...advanced.decisions]);
+    }
+
+    return decisions;
+  };
+
+  it('stands still instead of raising when the window sum overflows', () => {
+    expect(() => trace([HUGE, HUGE, HUGE])).not.toThrow();
+    expect(trace([HUGE, HUGE, HUGE])).toStrictEqual([
+      [noop('warming-up')],
+      [noop('warming-up')],
+      [noop('price-out-of-domain')],
+    ]);
+  });
+
+  it('keeps deciding after the offending price ages out of the ring', () => {
+    const reasons = trace([HUGE, HUGE, HUGE, '10', '11', '12']).map(
+      (decisions) => (decisions[0] as { reason: string }).reason,
+    );
+
+    expect(reasons).toStrictEqual([
+      'warming-up',
+      'warming-up',
+      'price-out-of-domain',
+      // `HUGE` is still inside the two-price slow window.
+      'price-out-of-domain',
+      // Out of the slow window, still inside the ring the previous relation
+      // is computed from.
+      'price-out-of-domain',
+      // Gone. `slowPeriod + 1` ticks, and no operator had to intervene.
+      'no-cross',
+    ]);
+  });
+
+  it('advances the ring on the tick it could not compare', () => {
+    const context = makeContext(null);
+    const wedged = [HUGE, HUGE, HUGE].reduce<Replay>(
+      (carried, price, index) =>
+        advanceSmaCrossover(
+          carried.state,
+          makeTick(price, index),
+          context,
+          WIDE,
+        ),
+      { state: initialSmaCrossoverState(WIDE), decisions: [] },
+    );
+
+    expect(wedged.state.prices).toStrictEqual([HUGE, HUGE, HUGE]);
+
+    const after = advanceSmaCrossover(
+      wedged.state,
+      makeTick('10', 3),
+      context,
+      WIDE,
+    );
+
+    expect(after.state.prices).toStrictEqual([HUGE, HUGE, '10']);
+  });
+
+  // The contrast that makes the case above a different category: a malformed
+  // price is rejected before any state changes, so it raises once and the next
+  // valid tick resumes.
+  it('still fails closed on a malformed price, and recovers on the next tick', () => {
+    const strategy = createSmaCrossover();
+    const context = makeContext(null);
+
+    expect(() => strategy.onTick(makeTick('1e3', 0), context, WIDE)).toThrow(
+      DomainError,
+    );
+    expect(strategy.onTick(makeTick('10', 1), context, WIDE)).toStrictEqual([
+      noop('warming-up'),
+    ]);
   });
 });
 
@@ -619,9 +745,10 @@ describe('sma-crossover contract', () => {
     expect(createSmaCrossover().id).toBe('sma-crossover');
   });
 
-  // §6.4: the ledger owns the position, and the strategy reads it through the
-  // context. Mirroring fills into a second copy is the drift the design warns
-  // about, so there is deliberately no `onFill`.
+  // §7.3: the ledger is the original of the position and the bot's state is a
+  // cache, so the strategy reads it through the context. Mirroring fills into a
+  // second copy is the drift that warning is about, so there is deliberately no
+  // `onFill`.
   it('does not mirror fills into its own position', () => {
     expect(createSmaCrossover().onFill).toBeUndefined();
   });

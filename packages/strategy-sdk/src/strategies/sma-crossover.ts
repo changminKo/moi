@@ -17,6 +17,7 @@ import {
   type Strategy,
   type StrategyContext,
   type StrategyDecision,
+  type StrategyPosition,
   type StrategyState,
   symbolParameter,
   type Tick,
@@ -82,7 +83,7 @@ import {
  * strings, in the same order, so the tick after a restart decides identically
  * to the tick that would have followed without one.
  *
- * ## A gap discards the window
+ * ## A gap discards the window — and that suspends exits, not only entries
  *
  * Quote frames are not replayed (design §5.3), so the prices either side of a
  * market-data gap are not consecutive observations and an average spanning one
@@ -90,8 +91,47 @@ import {
  * never made. Design §5.3 asks an indicator to hold off entering for N ticks
  * after a gap; this strategy discards the window instead, which makes
  * N = `slowPeriod + 1` — derived from the parameters rather than configured as a
- * number nobody can justify — and means no decision is ever taken from prices
- * that straddle a gap, rather than merely no entry.
+ * number nobody can justify.
+ *
+ * §5.3 says *entries*, and discarding the window is stricter than that: while
+ * the ring refills, a held position cannot be exited by this strategy either,
+ * because a dead cross is two consecutive relations and there are none. With
+ * `slowPeriod` at its maximum that is up to 513 ticks; at a typical 20 it is 21.
+ * Gaps correlate with market stress, so this is deliberately stated rather than
+ * left as a side effect.
+ *
+ * It is still the right behaviour, and the reason is that a strategy is a
+ * signal generator, not a liquidation path. The alternatives are worse: exiting
+ * on the first post-gap tick would flatten the book on every WS reconnect;
+ * computing a relation from a partial window is a different indicator wearing
+ * this one's name; and evaluating the exit against the pre-gap prices is
+ * exactly the discontinuous average the discard exists to avoid. The paths that
+ * *are* meant to flatten a position under stress do not run through a strategy
+ * at all — the kill switch's cancel-and-verify barrier (§7.2), the RiskGate's
+ * loss limits (§6.4), and an operator acting on the ledger, which owns the
+ * position (§7.3).
+ *
+ * What this strategy owes that arrangement is visibility, so a warm-up while
+ * holding is reported as `warming-up-while-long` rather than plain
+ * `warming-up`, and the gap tick itself as `gap-reset-while-long`. The decision
+ * is unchanged; the exposure is no longer silent.
+ *
+ * ## A price it cannot compare is a fact, not a fault
+ *
+ * A price can be perfectly valid on its own and still make a window sum leave
+ * the exact money domain — 80-digit prices are inside `isPositiveMoneyAmount`
+ * and two of them are not. When that happens the tick is still recorded and the
+ * decision is `noop` with reason `price-out-of-domain`.
+ *
+ * Recording it is the whole point. Raising from the comparison instead would
+ * leave the ring holding the price that caused the raise, and since the ring
+ * only advances on a successful return, every later tick would recompute the
+ * same sum and raise again — permanently, with no tick able to displace the
+ * offending one. Because the ring advances, the price ages out within
+ * `slowPeriod + 1` ticks and the strategy resumes on its own. A malformed
+ * price is a different case and still fails closed: `assertPositivePrice` runs
+ * before any state changes, so that tick raises once and the next valid tick
+ * proceeds normally.
  *
  * ## What it does not do
  *
@@ -100,9 +140,9 @@ import {
  * live order lifecycle, which is the runner's phase C, not the strategy's.
  *
  * It has no `onFill`. The ledger owns the position and the strategy reads it
- * through `context.position` — a strategy that accumulates its own copy from
- * fills is keeping the second, drifting copy that design §6.4 exists to
- * prevent.
+ * through `context.position` — design §7.3 makes the ledger the original of
+ * that fact and the bot's state a cache, so a strategy that accumulates its own
+ * copy from fills is keeping a second one that drifts across a restart.
  *
  * Short entries are not modelled: the paper ledger reserves position quantity
  * from what is held (`reservePosition`), so a `SELL` with nothing held is
@@ -159,7 +199,10 @@ export type SmaCrossoverState = {
 export type SmaCrossoverReason =
   | 'other-instrument'
   | 'gap-reset'
+  | 'gap-reset-while-long'
   | 'warming-up'
+  | 'warming-up-while-long'
+  | 'price-out-of-domain'
   | 'tie'
   | 'unconfirmed-cross'
   | 'no-cross'
@@ -191,35 +234,104 @@ export const initialSmaCrossoverState = (
   params: SmaCrossoverParams,
 ): SmaCrossoverState => freezeState(params, []);
 
-const sumOf = (prices: readonly DecimalString[]) =>
-  prices.reduce(
-    (sum, price) =>
-      assertExactMoney(sum.plus(price), 'sma window sum', 'INVALID_PRICE'),
+/**
+ * `assertExactMoney` as a predicate, so a value that leaves the domain is an
+ * *outcome* rather than an exception. It asks trading-core rather than
+ * restating the rule: the money domain is defined in one place, `validation.ts`
+ * already keeps a second copy of it for strings, and a third copy here would be
+ * one too many. The only failure that call raises is the domain `DomainError`;
+ * anything else is a genuine fault and is re-thrown.
+ */
+const withinMoneyDomain = (value: ReturnType<typeof moneyDecimal>): boolean => {
+  try {
+    assertExactMoney(value, 'sma window arithmetic', 'INVALID_PRICE');
+
+    return true;
+  } catch (error) {
+    if (error instanceof DomainError) {
+      return false;
+    }
+
+    throw error;
+  }
+};
+
+/** The exact sum of a window, or `null` when it leaves the money domain. */
+const exactSumOf = (prices: readonly DecimalString[]) => {
+  const sum = prices.reduce(
+    (total, price) => total.plus(price),
     moneyDecimal(0),
   );
 
+  return withinMoneyDomain(sum) ? sum : null;
+};
+
 /**
  * Which side of the slow average the fast one is on, decided by
- * cross-multiplication so no division and no rounding is involved.
+ * cross-multiplication so no division and no rounding is involved — or `null`
+ * when a sum or the comparison leaves the exact money domain.
+ *
+ * That is returned rather than thrown, and the distinction matters. A price
+ * this strategy cannot compare is a fact about the current window, not a fault:
+ * the caller records the tick either way, so the offending price ages out and
+ * the strategy recovers. Throwing from here would leave the ring holding the
+ * price that caused the throw, and every later tick would recompute the same
+ * sum and throw again — permanently.
+ *
  * `prices` must hold at least `slowPeriod` entries.
  */
 const relationOf = (
   prices: readonly DecimalString[],
   params: SmaCrossoverParams,
-): Relation => {
-  const difference = assertExactMoney(
-    sumOf(prices.slice(-params.fastPeriod))
-      .times(params.slowPeriod)
-      .minus(sumOf(prices.slice(-params.slowPeriod)).times(params.fastPeriod)),
-    'sma crossover comparison',
-    'INVALID_PRICE',
-  );
+): Relation | null => {
+  const fast = exactSumOf(prices.slice(-params.fastPeriod));
+  const slow = exactSumOf(prices.slice(-params.slowPeriod));
+
+  if (fast === null || slow === null) {
+    return null;
+  }
+
+  const difference = fast
+    .times(params.slowPeriod)
+    .minus(slow.times(params.fastPeriod));
+
+  if (!withinMoneyDomain(difference)) {
+    return null;
+  }
 
   if (difference.isZero()) {
     return 'equal';
   }
 
   return difference.gt(0) ? 'above' : 'below';
+};
+
+/**
+ * The ledger's view of what is held, validated. A quantity that is not a plain
+ * whole number cannot be reasoned about, and must not be forwarded to the
+ * ledger as an order size.
+ */
+const readPosition = (
+  context: StrategyContext,
+  params: SmaCrossoverParams,
+): StrategyPosition | null => {
+  const position = context.position({
+    market: params.market,
+    symbol: params.symbol,
+  });
+
+  if (
+    position !== null &&
+    (!isNonNegativeWholeQuantity(position.total) ||
+      !isNonNegativeWholeQuantity(position.available))
+  ) {
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      'position quantities must be non-negative whole numbers in plain decimal form',
+    );
+  }
+
+  return position;
 };
 
 const standStill = (
@@ -277,6 +389,11 @@ export function advanceSmaCrossover(
 
   assertPositivePrice(tick.price, 'price');
 
+  const position = readPosition(context, params);
+  // `'0'` is the only zero a non-negative whole quantity can spell, so a string
+  // comparison is a complete emptiness test here.
+  const held = position !== null && position.total !== '0';
+
   const windowSize = params.slowPeriod + 1;
   // A gap makes the earlier prices non-consecutive with this one, so they are
   // discarded rather than averaged across.
@@ -289,16 +406,29 @@ export function advanceSmaCrossover(
     tick.price,
   ]);
 
+  // The two branches below name the held case separately. They decide the same
+  // thing either way — a strategy with no window has no signal, and inventing
+  // one to exit on would be worse than waiting — but a position that cannot be
+  // signalled on is an exposure, and an exposure that appears in the decision
+  // log is one an operator and the RiskGate can see. See the note on gaps in
+  // this module's header.
   if (tick.gapBefore) {
-    return standStill(next, 'gap-reset');
+    return standStill(next, held ? 'gap-reset-while-long' : 'gap-reset');
   }
 
   if (next.prices.length < windowSize) {
-    return standStill(next, 'warming-up');
+    return standStill(next, held ? 'warming-up-while-long' : 'warming-up');
   }
 
   const current = relationOf(next.prices, params);
   const previous = relationOf(next.prices.slice(0, -1), params);
+
+  // The ring has already advanced past this tick, so a price whose sums leave
+  // the money domain ages out of the window within `slowPeriod + 1` ticks and
+  // the strategy resumes deciding without anyone intervening.
+  if (current === null || previous === null) {
+    return standStill(next, 'price-out-of-domain');
+  }
 
   // A cross is confirmed only between two *strict* relations. An exact tie on
   // either side suppresses the signal instead: `above → equal → above` is not a
@@ -317,28 +447,6 @@ export function advanceSmaCrossover(
   if (previous === current) {
     return standStill(next, 'no-cross');
   }
-
-  const position = context.position({
-    market: params.market,
-    symbol: params.symbol,
-  });
-
-  // A quantity that is not a plain whole number cannot be reasoned about, and
-  // must not be forwarded to the ledger as an order size.
-  if (
-    position !== null &&
-    (!isNonNegativeWholeQuantity(position.total) ||
-      !isNonNegativeWholeQuantity(position.available))
-  ) {
-    throw new DomainError(
-      'INVARIANT_VIOLATION',
-      'position quantities must be non-negative whole numbers in plain decimal form',
-    );
-  }
-
-  // `'0'` is the only zero a non-negative whole quantity can spell, so a string
-  // comparison is a complete emptiness test here.
-  const held = position !== null && position.total !== '0';
 
   if (current === 'above') {
     return held
