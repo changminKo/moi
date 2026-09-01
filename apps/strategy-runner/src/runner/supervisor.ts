@@ -6,6 +6,7 @@ import type {
   Tick,
 } from '@moi/strategy-sdk/strategy';
 import { DomainError } from '@moi/trading-core';
+import type { TickRecorder } from '../backtest/tick-log.js';
 import type { RunnerConfig } from '../config.js';
 import { MarketFeed } from '../feed/market-feed.js';
 import { MarketSessionCache } from '../feed/market-session.js';
@@ -57,6 +58,14 @@ export interface SupervisorOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   /** Injected so a test can drive the socket. Defaults to Node's `WebSocket`. */
   readonly socketFactory?: StreamSocketFactory;
+  /**
+   * Where to write the tick series, when the operator asked for one
+   * (`BOT_TICK_LOG`). Absent by default: recording is opt-in because the log
+   * does not rotate, and design §8.4 makes it the *only* backtest input there
+   * is, so an operator who wants to replay a period has to have decided to
+   * record it before that period happened.
+   */
+  readonly recorder?: TickRecorder;
 }
 
 interface RuntimeCell {
@@ -101,6 +110,7 @@ export class RunnerSupervisor {
   readonly #context: RunnerContext;
   readonly #hosts: readonly StrategyHost[];
   readonly #owner: ReadonlyMap<string, StrategyHost>;
+  readonly #recorder: TickRecorder | null;
   #running = false;
 
   constructor(options: SupervisorOptions) {
@@ -224,6 +234,7 @@ export class RunnerSupervisor {
     }
 
     this.#owner = owner;
+    this.#recorder = options.recorder ?? null;
     this.#runtime = runtime;
     this.#fills = new FillProcessor({
       state: this.#state,
@@ -306,6 +317,7 @@ export class RunnerSupervisor {
 
   close(): void {
     this.#stream.stop();
+    this.#recorder?.close();
     this.#state.close();
   }
 
@@ -334,6 +346,10 @@ export class RunnerSupervisor {
   }
 
   async #applyTick(tick: Tick, portfolio: BrokerPortfolio): Promise<void> {
+    // Recorded before anything acts on it, so a replay sees the series the
+    // strategies saw — including a tick no strategy owns, because a backtest of
+    // a *different* configuration may well own it.
+    this.#recorder?.record(tick);
     this.#context.observeTick(tick);
 
     const host = this.#owner.get(instrumentKey(tick));

@@ -4,6 +4,28 @@ export {
   readPublicOrigin,
 } from './api-origin.js';
 export {
+  type BacktestCounts,
+  type BacktestOptions,
+  type BacktestRefusal,
+  type BacktestRejection,
+  type BacktestReport,
+  runBacktest,
+} from './backtest/engine.js';
+export { type BacktestPlan, readBacktestPlan } from './backtest/plan.js';
+export { formatBacktestReport } from './backtest/report.js';
+export {
+  BACKTEST_SESSION_ID,
+  SimulatedExchange,
+  type SimulatedFill,
+  type SubmitOutcome,
+} from './backtest/simulated-exchange.js';
+export {
+  openTickRecorder,
+  readTick,
+  readTickLog,
+  type TickRecorder,
+} from './backtest/tick-log.js';
+export {
   type ConfiguredStrategy,
   loadRunnerConfig,
   MAX_QUOTE_SUBSCRIPTIONS,
@@ -43,7 +65,13 @@ export {
   createRecordingReporter,
   type Reporter,
 } from './reporter.js';
-export { notionalOf, RiskGate } from './risk/risk-gate.js';
+export {
+  type MarketPhaseSource,
+  notionalOf,
+  type RealisedPnlSource,
+  RiskGate,
+  type RiskLedgerSource,
+} from './risk/risk-gate.js';
 export { RunnerContext } from './runner/runner-context.js';
 export { StrategyHost } from './runner/strategy-host.js';
 export { RunnerSupervisor } from './runner/supervisor.js';

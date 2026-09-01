@@ -1,3 +1,4 @@
+import { createGrid, GRID_ID } from '@moi/strategy-sdk/strategies/grid';
 import {
   createSmaCrossover,
   SMA_CROSSOVER_ID,
@@ -12,10 +13,10 @@ import { DomainError } from '@moi/trading-core';
  * has accumulated, so two configured entries of the same strategy must not be
  * the same object; asking the registry for one is asking it to make one.
  *
- * Phase A shipped exactly one strategy, so the map has one entry. The shape is
- * what matters here: adding `grid` in phase E is a line in this file, and the
- * configuration loader already validates parameters through whatever schema the
- * factory's product publishes.
+ * Phase A shipped exactly one strategy and phase E added `grid`, which was
+ * exactly the line in this file the shape promised it would be: the
+ * configuration loader validates parameters through whatever schema the
+ * factory's product publishes, so a new strategy needs no loader change.
  */
 
 export type StrategyFactory = () => Strategy<unknown>;
@@ -25,7 +26,10 @@ export type StrategyRegistry = ReadonlyMap<string, StrategyFactory>;
 export const DEFAULT_REGISTRY: StrategyRegistry = new Map<
   string,
   StrategyFactory
->([[SMA_CROSSOVER_ID, createSmaCrossover as StrategyFactory]]);
+>([
+  [GRID_ID, createGrid as StrategyFactory],
+  [SMA_CROSSOVER_ID, createSmaCrossover as StrategyFactory],
+]);
 
 export function createStrategy(
   registry: StrategyRegistry,

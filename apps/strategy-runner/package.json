@@ -11,6 +11,7 @@
   },
   "types": "./dist/index.d.ts",
   "scripts": {
+    "backtest": "tsc --build && node dist/backtest/main.js",
     "build": "tsc --build",
     "test": "vitest run --passWithNoTests --dir src",
     "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"

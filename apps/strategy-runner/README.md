@@ -4,7 +4,7 @@ The trading bot's process: it reads the market through the paper API, asks each
 configured strategy what to do, filters that through a risk gate, and places the
 orders that survive. It is the runner of
 [`docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md`](../../docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md),
-at its **phase C** scope.
+at its **phase C** scope, plus **phase E**'s backtest harness in `src/backtest`.
 
 ## What is here, and what is not
 
@@ -27,8 +27,15 @@ Deliberately **not** here:
 |---|---|---|
 | The kill-switch submission barrier, Discord, the compose service | D (§7.2, §8.1) | The `Reporter` seam and the state layout are here; the wiring is not |
 | Escalating a tripped loss limit past "refuse new entries" | D | That escalation *is* the §7.2 barrier |
-| Backtesting, a second strategy | E | — |
 | Mid-price derivation and its tick-size rounding | nowhere — see below | §5.2's premise no longer holds |
+
+Phase E added the backtest harness (`src/backtest`) and registered the SDK's
+second strategy, `grid`. Neither pulls anything out of D: the replay drives the
+runner's own `RiskGate` and `StrategyHost` as they stand, and it reports the
+places where that means it cannot answer a question (see the table at the end).
+Note what C's arrival changed for it — the gate now has §6.4's realised-PnL and
+loss limits, so a replay *can* show one tripping, which the phase-E deviation
+table below records as no longer being a gap.
 
 ## The boundary
 
@@ -51,6 +58,7 @@ direction `paper-broker-contract.integration.test.ts` already points.
 | `BOT_PUBLIC_ORIGIN` | The `Origin` header value, which must equal the paper API's own `PUBLIC_ORIGIN` (§4.2). Defaults to `BOT_API_ORIGIN`, which is right only when the two are the same host |
 | `BOT_CONFIG_PATH` | The JSON configuration file |
 | `BOT_STATE_DIR` | Where the state store lives. A compose volume in deployment (§8.1) |
+| `BOT_TICK_LOG` | Optional. An NDJSON path to record every tick to, for a later backtest (§8.2). Off by default: the log does not rotate, and §8.4 makes a recorded series the *only* backtest input there is, so recording is a decision taken before the period you want to replay |
 
 The two origins are separate because in compose the bot reaches
 `http://paper-api:3000` while the public origin is the browser app's — sending
@@ -333,3 +341,126 @@ resting orders is the §7.2 barrier, in phase D.
 
 `activeOrders` carries terminal orders too (#33), so the runner filters by status
 itself, as §1 row 12 says to until that lands.
+
+## Backtesting (phase E)
+
+Design §8.2: replay a recorded tick series through the *same* `Strategy`, the
+*same* `StrategyHost` and the *same* `RiskGate`, against a `SimulatedExchange`
+instead of the paper API. The point is that a strategy's behaviour is checkable
+without a live session, an order gateway, or the ledger.
+
+Record a series, then replay it:
+
+```bash
+BOT_TICK_LOG=/var/lib/moi-bot/ticks.ndjson  # on the runner process
+pnpm --filter @moi/strategy-runner backtest --plan plan.json --ticks ticks.ndjson
+```
+
+A plan is the runner's own `strategies` and `risk` blocks — read by the runner's
+own readers, so a plan cannot describe a bot the runner would refuse to be —
+plus the three things a replay has to state because it has no API to ask:
+
+```json
+{
+  "strategies": [
+    {
+      "name": "grid-samsung",
+      "strategyId": "grid",
+      "params": {
+        "market": "KR",
+        "symbol": "005930",
+        "lowerPrice": "70000",
+        "step": "250",
+        "levels": 5,
+        "quantity": "10"
+      }
+    }
+  ],
+  "risk": {
+    "symbolAllowList": [{ "market": "KR", "symbol": "005930" }],
+    "maxOrderNotional": "5000000",
+    "maxDailyNotional": "20000000",
+    "maxPositionQuantity": "100",
+    "maxOpenOrders": 5,
+    "tradingHoursOnly": true,
+    "maxQuoteAgeMs": 60000
+  },
+  "marketPhase": "REGULAR",
+  "cash": [{ "currency": "KRW", "amount": "10000000" }],
+  "fees": [
+    {
+      "version": "backtest-1",
+      "market": "KR",
+      "currency": "KRW",
+      "commissionRate": "0.001",
+      "sellTaxRate": "0.002",
+      "roundingDecimals": 0,
+      "roundingMode": "HALF_UP"
+    }
+  ]
+}
+```
+
+### The worked example the tests pin
+
+`src/backtest/engine.test.ts` replays five ticks through that plan. The grid's
+levels are `70000 70250 70500 70750 71000` and every quote carries a ±10 spread,
+so a market order pays the touch rather than the quote:
+
+| tick | rung | what the grid does | fill | fee |
+|---|---|---|---|---|
+| 70800 | 4 | primes, no order | — | — |
+| 70600 | 3 | crosses 70750 down, buys slot 3 | BUY 10 @ 70610 | 706 |
+| 70300 | 2 | crosses 70500 down, buys slot 2 | BUY 10 @ 70310 | 703 |
+| 70900 | 4 | re-enters rung 4, releases slot 2 | SELL 10 @ 70890 | 2127 |
+| 71200 | 5 | leaves the band, releases slot 3 | SELL 10 @ 71190 | 2136 |
+
+Gross 11,600, fees 5,672, realised PnL **5,928**, and the closing wallet is
+`10,000,000 + 5,928 = 10,005,928` to the won — the position is flat, so the two
+have to agree exactly, and a rounding error anywhere in the chain would show up
+as a discrepancy between them.
+
+### What a backtest here cannot tell you
+
+Every one of these is a place the harness's answer is knowably different from a
+real one, and each is stated in the module that causes it:
+
+- **No depth and no queue.** A resting order fills whole, at one price, the
+  instant the touch reaches it. A large order looks free; an order that lives on
+  being filled at the touch looks better than it is.
+- **Fees are the plan's, not the ledger's** (§1 row 13, §8.3). The report says so
+  in its header and names the schedule versions it used.
+- **Loss limits do apply, on the replay's own fills.** §6.4's limits arrived with
+  phase C, and the replay's `fills` source is the simulated exchange — a
+  replay's own fills are the only realised PnL it has, so this is the honest
+  source rather than a stub. What a replay still cannot show is a limit tripping
+  on a fill the recorded series never contained.
+- **One market phase for the whole replay.** A recorded tick carries no calendar.
+- **The clock is the tick's.** Quote freshness therefore always measures zero: a
+  replay cannot reproduce a tick that was already stale when the runner saw it,
+  because the log has no second timestamp to say so.
+
+`src/backtest/boundary.test.ts` pins the rule that makes the harness safe to
+point at anything: **no module under `src/backtest` may reach the network.** The
+package manifest cannot express that — `PaperApiClient` is legitimately in the
+same package — so the rule is checked over the source, and the list of runner
+modules a replay may share is pinned so a fourth one is a decision somebody makes.
+
+## Deviations from the design
+
+Phase B's are recorded in the module documentation above. These are phase E's.
+The four that are genuine departures from the design carry a numbered row in the
+production-runtime spec's §16 table — **§16.41 to §16.44** — as AGENTS.md
+requires; the rest are consequences of phase B's own design and are recorded
+here only.
+
+| # | Design | What the code does, and why |
+|---|---|---|
+| E1 (§16.41) | §8.2 replays *"the NDJSON ticks left by `--record`"* | There is no `--record` flag. The runner's entry point takes no arguments at all — it is configured entirely by environment — so recording is turned on with `BOT_TICK_LOG`. The artefact is the one §8.2 describes |
+| E2 (§16.42) | §8.2 specifies `SimulatedExchange` as two fill rules | It also models cash, position, fees and resting orders, because a report that cannot say whether the strategy had the money is not a report. It **refuses** `STOP`, `TAKE_PROFIT` and `OCO` rather than leaving them unfilled: an order that silently never fills reports a strategy whose protective exit did nothing as one that never needed it |
+| E3 (§16.43) | §6.3 decides trading hours from `GET /markets/:m/session` | A recorded tick carries no calendar, so a plan states `marketPhase` and it applies to every market for the whole replay |
+| E4 | §6.4's loss limits | **No longer a gap.** They were phase C when this was written and phase C has landed, so the gate applies them here too: the replay's `RiskLedgerSource.fills` is the `SimulatedExchange`, whose fills are the only realised PnL a replay has. `engine.test.ts` pins a losing round trip tripping the daily-loss limit and the next entry being refused |
+| E5 (§16.43) | §8.2 requires the replay to use the same `RiskGate` | `RiskGateOptions.sessions` and `.state` were narrowed from `MarketSessionCache` and `StateStore` to the `MarketPhaseSource` and `DailyNotionalSource` interfaces they already satisfy. A class with `#private` fields cannot be substituted structurally, so without this the replay would need a second gate — which is the one thing §8.2 rules out. No behaviour changed |
+| E6 (§16.44) | §5.3 caps subscriptions at four | A backtest plan is **not** capped: a replay subscribes to nothing, and replaying a recorded five-symbol series is a legitimate question even though the live runner would refuse that configuration. The live cap is unchanged |
+| E7 | §11 phase E asks for a `grid` strategy | It places `MARKET` orders on a level crossing rather than resting limits at each level, because `StrategyContext` shows a strategy its position and not its open orders, and a strategy that guessed at its resting orders would accumulate phantoms until `maxOpenOrders` refused everything. The cost — the realised price is the tick's, not the level's — is stated in the strategy and visible in the report |
+| E8 | §6.3's limits | A grid emits both sides continuously, and the gate is BUY-only by design. Its sells are bounded by the strategy itself (only recorded lots, at most `quantity` each, capped at `position.available`), not by any configured limit. `engine.test.ts` pins both halves |
