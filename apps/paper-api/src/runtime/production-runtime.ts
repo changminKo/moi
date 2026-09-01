@@ -821,6 +821,7 @@ export class ProductionRuntime {
                 incidentId: incident.incidentId,
                 version: incident.version,
                 recoveryEpoch: incident.recoveryEpoch,
+                resolvedBy: 'RECOVERY',
               });
               (outcome === undefined ? remaining : resolved).push(
                 incident.causeCode,
@@ -844,11 +845,8 @@ export class ProductionRuntime {
               error: error instanceof Error ? error.message : String(error),
             });
           }
-          // The retry budget this market spent is no longer spent, the same
-          // hold the admin resolve path lifts.
-          const runtime = this.markets.get(market);
-          if (runtime?.supervisor.exhausted === true)
-            runtime.supervisor.resume();
+          // Lifting the market's retry hold belongs to the supervisor's own
+          // success path (`MarketRuntime.#clearRetryHold`, §16.33), not here.
           return remaining;
         },
       },
@@ -1044,6 +1042,7 @@ export class ProductionRuntime {
                   body.recoveryEpoch == null
                     ? null
                     : BigInt(body.recoveryEpoch),
+                resolvedBy: 'ADMIN_API',
               });
               await this.#refreshIncidents();
               for (const runtime of this.markets.values())

@@ -7,6 +7,13 @@ export interface IncidentRepository {
     incidentId: string;
     version: bigint;
     recoveryEpoch: bigint | null;
+    /**
+     * What closed the row, recorded in `resolved_by`. A row raised as
+     * `source = 'MANUAL'` can now close without an operator, so the pair
+     * `(source, resolved_by)` is what tells a later reader which happened
+     * (§16.34). Defaults to `'runtime'` for callers that do not say.
+     */
+    resolvedBy?: string;
   }): Promise<SafetyIncident | undefined>;
 }
 

@@ -2651,6 +2651,46 @@ describe('ProductionRuntime', () => {
         const trading = await json(`${origin}/api/v1/health/trading`);
         expect(trading.body).toMatchObject({ placement: true, reasons: [] });
         expect(await activeIncidents()).toEqual([]);
+        // A row opened MANUAL and closed without an operator has to say so:
+        // `source` records who raised it, `resolved_by` who cleared it.
+        expect(
+          (
+            await observer.query(
+              "select scope_id, cause_code, source, resolved_by from safety_incidents where status = 'RESOLVED' order by scope_id, cause_code",
+            )
+          ).rows,
+        ).toEqual([
+          {
+            scope_id: 'KR',
+            cause_code: 'RECOVERY_RETRY_EXHAUSTED',
+            source: 'MANUAL',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'KR',
+            cause_code: 'TRANSPORT_CLOSED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'PONG_FAILED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'RECOVERY_RETRY_EXHAUSTED',
+            source: 'MANUAL',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'TRANSPORT_CLOSED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+        ]);
       },
       TEST_TIMEOUT_MS,
     );
@@ -2702,13 +2742,14 @@ describe('ProductionRuntime', () => {
              'seeded', $2::text[], 0, 'ACTIVE', 1)`,
           [randomUUID(), MARKET_DENIED],
         );
-        await json(`${origin}/admin/incidents`, {
+        const admin = {
+          authorization: 'Bearer runtime-admin-key-at-least-32-bytes!',
+          'idempotency-key': randomUUID(),
+          'content-type': 'application/json',
+        };
+        const pinned = await json(`${origin}/admin/incidents`, {
           method: 'POST',
-          headers: {
-            authorization: 'Bearer runtime-admin-key-at-least-32-bytes!',
-            'idempotency-key': randomUUID(),
-            'content-type': 'application/json',
-          },
+          headers: admin,
           body: JSON.stringify({
             scope: { type: 'MARKET', id: 'US' },
             denied: ['PLACE'],
@@ -2730,6 +2771,24 @@ describe('ProductionRuntime', () => {
         expect((market.body.US as { reasons: string[] }).reasons).toContain(
           'OPERATOR_PIN',
         );
+        // The operator's own resolve is distinguishable from a recovery's.
+        const resolve = await json(
+          `${origin}/admin/incidents/${pinned.body.incidentId}/resolve`,
+          {
+            method: 'POST',
+            headers: admin,
+            body: JSON.stringify({ expectedVersion: pinned.body.version }),
+          },
+        );
+        expect(resolve.status, JSON.stringify(resolve.body)).toBe(200);
+        expect(
+          (
+            await observer.query(
+              'select resolved_by from safety_incidents where id = $1',
+              [pinned.body.incidentId],
+            )
+          ).rows[0],
+        ).toEqual({ resolved_by: 'ADMIN_API' });
       },
       TEST_TIMEOUT_MS,
     );

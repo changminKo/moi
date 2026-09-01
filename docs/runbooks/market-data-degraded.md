@@ -67,6 +67,19 @@ A `409 VERSION_CONFLICT` means the row changed under you; re-read `version` and
 retry. Do not resolve `STARTUP_INVARIANT_OR_AUDIT_FAILURE` until the ledger
 invariants pass — see `emergency-cancel-only.md`.
 
+Reading a closed row afterwards: `source` says who raised it, `resolved_by` who
+cleared it — `RECOVERY` for a market that came back on its own, `ADMIN_API` for
+the call above. `source = 'MANUAL'` with `resolved_by = 'RECOVERY'` is a hold
+that closed without an operator, which is expected for
+`RECOVERY_RETRY_EXHAUSTED` and worth a second look for anything else:
+
+```sql
+select scope_id, cause_code, source, resolved_by, activated_at, resolved_at
+from safety_incidents
+where status = 'RESOLVED' and resolved_at > now() - interval '24 hours'
+order by resolved_at;
+```
+
 ## Read-only diagnosis
 
 ```bash
