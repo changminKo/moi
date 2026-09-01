@@ -129,10 +129,19 @@ export class FillProcessor {
         const record = this.#options.gateway.record(
           host.name,
           decision,
-          // A fill's own price is the price the decision was taken at. There is
-          // no tick here, and using the last one would measure the notional of
-          // a `MARKET` order against a quote that is older than the execution
-          // that prompted it.
+          // There is no tick here — the decision came from an execution, not
+          // from an observation — and `record()` reads this only to price the
+          // order through `notionalOf`. The fill's own price is the right
+          // number for that: a `MARKET` order sized against the last *quote*
+          // would be measured against something older than the execution that
+          // prompted it, and a priced order ignores this field entirely.
+          //
+          // `priceSource` is the one field here that cannot tell the truth. The
+          // SDK's union names market-data paths and a fill is not one, and
+          // adding a member for an object that never reaches a strategy would
+          // put a case in every consumer's switch for a value none of them can
+          // ever see. It is unread on this path; the honest statement is this
+          // comment rather than a fourth enum member.
           {
             market: fill.market,
             symbol: fill.symbol,
