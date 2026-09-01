@@ -1215,9 +1215,23 @@ export class ProductionRuntime {
       | undefined;
   }
 
+  /**
+   * The quote a client paints the panel from. It carries the book as well as
+   * the price so that this snapshot and the stream's `quote` frame
+   * (`MarketRuntime.#publishQuote`) are **one shape** — the same discipline
+   * `#enrichPayload` states for portfolio: a snapshot and a patch of the same
+   * thing must not be two different shapes, because that divergence is how
+   * the SDK and this API drifted apart (spec §16.32). It also means the order
+   * book has depth on first paint instead of reading "호가 없음" until the
+   * first live frame lands (spec §16.36).
+   *
+   * Nothing is invented: the price is `quotePrice` over the merged slot and
+   * the book is whatever that slot holds, omitted entirely when it holds none.
+   */
   #quote(market: Market, symbol: string): Record<string, unknown> {
     const store = this.#stores.get(market);
     const health = this.markets.get(market)?.health.state ?? 'RECOVERING';
+    const book = this.#symbolState(market, symbol)?.book;
     return {
       market,
       symbol,
@@ -1226,6 +1240,9 @@ export class ProductionRuntime {
       health,
       recoveryEpoch: store?.recoveryEpoch.toString() ?? '0',
       marketDataVersion: store?.currentVersion.toString() ?? '0',
+      ...(book === undefined
+        ? {}
+        : { currency: book.currency, bids: book.bids, asks: book.asks }),
     };
   }
 

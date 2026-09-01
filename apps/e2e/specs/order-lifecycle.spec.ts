@@ -29,8 +29,8 @@ test('reconciles a KR limit order after partial and complete fills', async ({
   await paperSystem.setBook({
     market: 'KR',
     symbol: '005930',
-    bids: [{ price: '69900', size: '10' }],
-    asks: [{ price: '70000', size: '2' }],
+    bids: [{ price: '69900', volume: '10' }],
+    asks: [{ price: '70000', volume: '2' }],
   });
   await page.goto('/trade');
   await selectInstrument(page, '005930');

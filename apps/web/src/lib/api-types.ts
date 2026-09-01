@@ -31,7 +31,13 @@ export type Wallet = Readonly<{
   reserved: string;
   total: string;
 }>;
-export type BookLevel = Readonly<{ price: string; size: string }>;
+/**
+ * One order-book level. `volume` is the word the whole system uses — the
+ * ledger column `book_level_volume`, `OrderBookLevel` in `@moi/trading-core`,
+ * the engine, and the stream frame on the wire. This type used to say `size`,
+ * which existed nowhere else and so read `undefined` off every real frame.
+ */
+export type BookLevel = Readonly<{ price: string; volume: string }>;
 export type QuoteSnapshot = Readonly<{
   market: 'KR' | 'US';
   symbol: string;

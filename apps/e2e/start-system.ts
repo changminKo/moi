@@ -75,8 +75,8 @@ const controlCredential = randomBytes(32).toString('base64url');
 
 type Market = 'KR' | 'US';
 type Book = Readonly<{
-  bids: readonly { price: string; size: string }[];
-  asks: readonly { price: string; size: string }[];
+  bids: readonly { price: string; volume: string }[];
+  asks: readonly { price: string; volume: string }[];
 }>;
 type Mode = 'NORMAL' | 'DEGRADED' | 'RECOVERING' | 'CANCEL_ONLY';
 type JsonObject = Record<string, unknown>;
@@ -325,11 +325,11 @@ async function injectBook(
     currency: input.market === 'KR' ? ('KRW' as const) : ('USD' as const),
     bids: input.bids.map((level) => ({
       price: level.price,
-      volume: level.size,
+      volume: level.volume,
     })),
     asks: input.asks.map((level) => ({
       price: level.price,
-      volume: level.size,
+      volume: level.volume,
     })),
   };
   if (!recovery) {
@@ -354,6 +354,25 @@ async function injectBook(
   if (!marketEngine) throw new Error(`missing ${input.market} paper engine`);
   if (recovery) await marketEngine.onRecoveryOrderBook(envelope);
   else await marketEngine.onOrderBook(envelope);
+  // What `MarketRuntime.#publishQuote` sends: the price and the instant as
+  // well as the depth. The harness used to hand books straight to the engine
+  // and publish nothing, so no e2e run ever pushed a `quote` frame at the
+  // browser — the one path the production crash lived on.
+  streamHub.publishQuote({
+    market: input.market,
+    symbol: input.symbol,
+    recoveryEpoch: envelope.recoveryEpoch,
+    marketDataVersion: envelope.marketDataVersion,
+    payload: {
+      market: input.market,
+      symbol: input.symbol,
+      price: book.asks[0]?.price ?? book.bids[0]?.price ?? null,
+      asOf: new Date().toISOString(),
+      currency: book.currency,
+      bids: book.bids,
+      asks: book.asks,
+    },
+  });
 }
 
 async function resetState(): Promise<void> {
@@ -487,7 +506,7 @@ async function controlApi(
             row.side === 'SELL'
               ? String(input.price)
               : decimal(String(input.price)).minus('1').toString(),
-          size: String(input.quantity),
+          volume: String(input.quantity),
         },
       ],
       asks: [
@@ -496,7 +515,7 @@ async function controlApi(
             row.side === 'BUY'
               ? String(input.price)
               : decimal(String(input.price)).plus('1').toString(),
-          size: String(input.quantity),
+          volume: String(input.quantity),
         },
       ],
     });
@@ -873,11 +892,11 @@ async function main(): Promise<void> {
                 currency,
                 bids: current.bids.map((level) => ({
                   price: level.price,
-                  volume: level.size,
+                  volume: level.volume,
                 })),
                 asks: current.asks.map((level) => ({
                   price: level.price,
-                  volume: level.size,
+                  volume: level.volume,
                 })),
               },
               fetchedAt: new Date().toISOString(),
@@ -1004,10 +1023,15 @@ async function main(): Promise<void> {
             },
           ],
         }),
+        // Mirrors `ProductionRuntime.#quote` field for field, including the
+        // book: a harness that answers in a shape production never serves
+        // cannot catch a wire/type mismatch, and this one used to answer
+        // `bids`/`asks` spelled `size` — the web's spelling, not the wire's —
+        // which is precisely why e2e stayed green through the crash.
         (market, symbol) => {
           const current = books.get(`${market}:${symbol}`) ?? {
-            bids: [{ price: market === 'KR' ? '69900' : '199', size: '10' }],
-            asks: [{ price: market === 'KR' ? '70000' : '200', size: '10' }],
+            bids: [{ price: market === 'KR' ? '69900' : '199', volume: '10' }],
+            asks: [{ price: market === 'KR' ? '70000' : '200', volume: '10' }],
           };
           return {
             market,
@@ -1017,7 +1041,9 @@ async function main(): Promise<void> {
             health: mode === 'NORMAL' ? 'HEALTHY' : mode,
             recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
             marketDataVersion: marketVersion.toString(),
-            ...current,
+            currency: market === 'KR' ? 'KRW' : 'USD',
+            bids: current.bids,
+            asks: current.asks,
           };
         },
       );
