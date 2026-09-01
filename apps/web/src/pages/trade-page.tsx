@@ -10,6 +10,7 @@ import { InstrumentSearch } from '../features/instruments/instrument-search';
 import { useInstruments } from '../features/instruments/use-instruments';
 import { QuotePanel } from '../features/market/quote-panel';
 import { useQuoteStream } from '../features/market/use-quote-stream';
+import { findPosition, type PositionRow } from '../features/orders/holding';
 import { OrderTicket } from '../features/orders/order-ticket';
 import { PORTFOLIO_QUERY_KEY } from '../features/portfolio/use-portfolio-stream';
 import { useTradingStatus } from '../features/system/system-status-provider';
@@ -24,6 +25,7 @@ import './trade-page.css';
 
 /** Stable identity: a fresh literal here would re-render the wallet panel. */
 const NO_WALLETS: readonly Wallet[] = [];
+const NO_POSITIONS: readonly PositionRow[] = [];
 
 /**
  * The provider shell. The screen below reads the shared query cache, so it has
@@ -62,9 +64,15 @@ function TradeScreen({ apiClient }: { apiClient: ApiClient }) {
   const portfolio = useQuery({
     queryKey: PORTFOLIO_QUERY_KEY,
     queryFn: () =>
-      apiClient.get<{ wallets?: readonly Wallet[] }>('/api/v1/portfolio'),
+      apiClient.get<{
+        wallets?: readonly Wallet[];
+        positions?: readonly PositionRow[];
+      }>('/api/v1/portfolio'),
   });
   const wallets = portfolio.data?.wallets ?? NO_WALLETS;
+  // The positions are in the same response the wallets came from, so the sell
+  // side of the ticket costs no request of its own.
+  const positions = portfolio.data?.positions ?? NO_POSITIONS;
   const refreshPortfolio = useCallback(() => {
     void client.invalidateQueries({ queryKey: PORTFOLIO_QUERY_KEY });
   }, [client]);
@@ -173,6 +181,7 @@ function TradeScreen({ apiClient }: { apiClient: ApiClient }) {
             apiClient={apiClient}
             quote={quote}
             {...(currency === undefined ? {} : { currency })}
+            position={findPosition(positions, selected.market, selected.symbol)}
             capability={{
               canPlace: selected.tradable && availability.place.enabled,
               reasonCodes: availability.place.reasons,

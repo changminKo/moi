@@ -171,6 +171,11 @@ export const ko: Record<MessageKey, string> = {
   'reason.SESSION_EXPIRED': '세션이 만료되었습니다 — 새 세션을 시작하세요',
   'reason.SYMBOL_NOT_TRADABLE': '거래할 수 없는 종목입니다',
 
+  'holding.available': '주문 가능 {{available}}주',
+  'holding.availableReserved':
+    '주문 가능 {{available}}주 · 예약 중 {{reserved}}주',
+  'holding.none': '보유 없음',
+
   'fillToast.regionAria': '체결 알림',
   'fillToast.complete':
     '{{symbol}} {{side}} {{quantity}}주 체결 · {{price}} · 주문 완료',

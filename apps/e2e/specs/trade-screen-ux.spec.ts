@@ -216,3 +216,48 @@ test('resets the conversion form and refreshes the wallet beside it', async ({
   await expect(availableBalance(page, 'KRW')).toHaveText('₩9,999,000');
   await expect(availableBalance(page, 'USD')).toHaveText('$100,000.7');
 });
+
+test('states the sell-side holding, and what an open order has reserved', async ({
+  page,
+  paperSystem,
+}) => {
+  await paperSystem.setBook({
+    market: 'KR',
+    symbol: '005930',
+    bids: [{ price: '69900', volume: '10' }],
+    asks: [{ price: '70000', volume: '5' }],
+  });
+  await page.goto('/trade');
+  await selectInstrument(page, '005930');
+
+  // Nothing held yet, and the ticket says so rather than leaving the reader
+  // to guess at an empty quantity field.
+  await page.getByLabel('Sell').check();
+  await expect(page.locator('.order-holding')).toHaveText('No holding');
+
+  await page.getByLabel('Buy').check();
+  await expect(page.locator('.order-holding')).toHaveCount(0);
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('3');
+  await page.getByLabel('Price').fill('70000');
+  await page
+    .getByRole('button', { name: 'Order ticket — Place order' })
+    .click();
+  await expect(page.locator('.toast-region')).toContainText('3 filled');
+
+  await page.getByLabel('Sell').check();
+  await expect(page.locator('.order-holding')).toHaveText(
+    '3 available to sell',
+  );
+
+  // A resting sell order holds part of the position, and the line says which
+  // part — otherwise the ticket refusing the full quantity has no explanation.
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Price').fill('80000');
+  await page
+    .getByRole('button', { name: 'Order ticket — Place order' })
+    .click();
+  await expect(page.locator('.order-holding')).toHaveText(
+    '1 available to sell · 2 reserved',
+  );
+});

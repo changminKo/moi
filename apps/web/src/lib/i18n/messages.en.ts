@@ -185,6 +185,14 @@ export const en = {
   // whether the order is now done. The price is bare — neither the fill row
   // nor the order row states a currency, and `lib/currency.ts` refuses to
   // derive one from `market`.
+  // The sell side of the ticket. `available` is what the ledger will actually
+  // accept; `reserved` is named whenever there is any, because otherwise the
+  // gap between what the reader owns and what the ticket takes is invisible.
+  'holding.available': '{{available}} available to sell',
+  'holding.availableReserved':
+    '{{available}} available to sell · {{reserved}} reserved',
+  'holding.none': 'No holding',
+
   'fillToast.regionAria': 'Fill notifications',
   'fillToast.complete':
     '{{symbol}} {{side}} {{quantity}} filled · {{price}} · order complete',

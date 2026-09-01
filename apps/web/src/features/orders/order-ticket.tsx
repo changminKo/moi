@@ -9,6 +9,11 @@ import { capFractionDigits, formatDecimal } from '../../lib/format-number';
 import { type MessageKey, useAppLocale } from '../../lib/i18n';
 import { presentationForReason } from '../system/system-status-provider';
 import {
+  describeHolding,
+  type HoldingNotice,
+  type PositionRow,
+} from './holding';
+import {
   bookForEstimate,
   estimateOrderNotional,
   type OrderEstimate,
@@ -83,6 +88,7 @@ export function OrderTicket({
   capability = { canPlace: true, reasonCodes: [] },
   quote = null,
   currency,
+  position,
 }: {
   market?: 'KR' | 'US';
   symbol?: string;
@@ -97,6 +103,12 @@ export function OrderTicket({
   quote?: QuoteSnapshot | null;
   /** Resolved by `resolveQuoteCurrency`; the estimate stays bare without it. */
   currency?: Currency | undefined;
+  /**
+   * This instrument's row from the portfolio snapshot the page already holds,
+   * or nothing when the reader has no position in it. Read only on the sell
+   * side; see `holding.ts` for which of its numbers is shown and why.
+   */
+  position?: PositionRow;
 }) {
   const [kind, setKind] = useState<OrderDraft['kind']>('MARKET');
   const [side, setSide] = useState<Side>('BUY');
@@ -140,6 +152,18 @@ export function OrderTicket({
   };
   const estimateShown = estimateText();
   const estimateAnnounced = useSettled(estimateShown, ANNOUNCE_DELAY_MS);
+  // Only on the sell side. Buying is already answered twice over — by the
+  // estimate above the button and by the wallet panel below the ticket — and a
+  // third balance would be noise, not help.
+  const holding = side === 'SELL' ? describeHolding(position) : undefined;
+  // One literal key per call: a union of keys, one of which takes no
+  // interpolation, is not something i18next's typed `t` will accept.
+  const holdingText = (notice: HoldingNotice): string =>
+    notice.key === 'holding.none'
+      ? t('holding.none')
+      : notice.key === 'holding.available'
+        ? t('holding.available', notice.values)
+        : t('holding.availableReserved', notice.values);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const value = draft();
@@ -226,12 +250,29 @@ export function OrderTicket({
         </select>
       </fieldset>
       <label htmlFor="order-quantity">{t('ticket.quantity')}</label>
+      {/* Not a live region. Three already speak in this form — the rejection
+          alert, the acceptance status and the estimate — and a fourth would
+          compete with them for the same announcement queue. This is standing
+          information about the field below it, so it is wired to that field
+          with `aria-describedby` and read when the reader arrives there. */}
+      {holding !== undefined && (
+        <p className="order-holding" id="order-holding">
+          {holdingText(holding)}
+        </p>
+      )}
       <GroupedNumberInput
         id="order-quantity"
         inputMode="numeric"
         value={quantity}
         onValueChange={setQuantity}
-        aria-describedby={outcome?.kind === 'error' ? 'order-error' : undefined}
+        aria-describedby={
+          [
+            outcome?.kind === 'error' ? 'order-error' : undefined,
+            holding === undefined ? undefined : 'order-holding',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined
+        }
       />
       {kind !== 'MARKET' && (
         <>

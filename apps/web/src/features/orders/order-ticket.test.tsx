@@ -348,3 +348,63 @@ describe('OrderTicket outcome', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });
+
+describe('OrderTicket holding', () => {
+  const sell = () => screen.getByLabelText('Sell');
+  const holding = () => document.querySelector('.order-holding');
+  const position = (overrides: Record<string, unknown> = {}) => ({
+    market: 'US',
+    symbol: 'AAPL',
+    total: '3',
+    available: '3',
+    reserved: '0',
+    averageCost: '325.26',
+    ...overrides,
+  });
+
+  it('says nothing about a holding while the reader is buying', () => {
+    // The estimate already answers what buying costs, and the wallet panel
+    // below states the cash. A second balance here would only repeat it.
+    renderTicket({ position: position() });
+
+    expect(holding()).toBeNull();
+  });
+
+  it('says how much can be sold once the side is sell', () => {
+    renderTicket({ position: position() });
+
+    fireEvent.click(sell());
+
+    expect(holding()).toHaveTextContent('3 available to sell');
+  });
+
+  it('names the reserved shares that cannot be sold yet', () => {
+    renderTicket({ position: position({ available: '1', reserved: '2' }) });
+
+    fireEvent.click(sell());
+
+    expect(holding()).toHaveTextContent('1 available to sell · 2 reserved');
+  });
+
+  it('says so plainly when the reader holds none of it', () => {
+    renderTicket();
+
+    fireEvent.click(sell());
+
+    expect(holding()).toHaveTextContent('No holding');
+  });
+
+  it('describes the quantity field rather than announcing itself', () => {
+    // A fourth live region in this form would compete with the three already
+    // here (rejection, acceptance, estimate). The reader meets this line when
+    // they reach the field it is about.
+    renderTicket({ position: position() });
+
+    fireEvent.click(sell());
+
+    expect(holding()).not.toHaveAttribute('aria-live');
+    expect(quantity().getAttribute('aria-describedby')).toContain(
+      'order-holding',
+    );
+  });
+});
