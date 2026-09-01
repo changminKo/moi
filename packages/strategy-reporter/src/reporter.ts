@@ -157,15 +157,24 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
     return { payload, body: JSON.stringify(payload), held };
   };
 
+  /**
+   * A diagnostic goes to the runner's log, which AGENTS.md hard rule 2 covers
+   * as surely as the Discord channel does — and the event name it carries is
+   * caller-supplied text. It is masked with the held secrets like everything
+   * else, never with the injected `mask`: the tripwire's whole purpose is to
+   * report that `mask` let something through.
+   */
+  const diagnose = (event: ReportEvent, detail: string): void => {
+    onDiagnostic(`reporter: ${maskOutbound(event.kind, secrets())} ${detail}`);
+  };
+
   const deliver = async (event: ReportEvent, note: string): Promise<void> => {
     const { payload, body, held } = renderPayload(event, note);
     // The tripwire. Masking is a moving target — a new secret shape, a new
     // rule — so the finished bytes are checked, and a survivor is never sent.
     if (containsSecret(body, held)) {
       blocked += 1;
-      onDiagnostic(
-        `reporter: dropped a ${event.kind} payload; a masked secret survived rendering`,
-      );
+      diagnose(event, 'was dropped: a masked secret survived rendering');
       return;
     }
     if (transport === undefined) return;
@@ -175,7 +184,7 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
       return;
     }
     failed += 1;
-    onDiagnostic(`reporter: ${event.kind} not delivered (${result.reason})`);
+    diagnose(event, `was not delivered (${result.reason})`);
   };
 
   const drainOnce = async (): Promise<void> => {

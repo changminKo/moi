@@ -107,6 +107,46 @@ describe('createReporter', () => {
     expect(reporter.stats().failed).toBe(1);
   });
 
+  /**
+   * The diagnostic sink is the runner's logger, so AGENTS.md hard rule 2
+   * covers it too. A diagnostic names the event and a status — and the event
+   * name is caller-supplied text, which is exactly where a secret arrives.
+   */
+  it('masks the diagnostics it emits, both the delivery one and the tripwire one', async () => {
+    await reporter.close();
+    const diagnostics: string[] = [];
+
+    reporter = build({
+      onDiagnostic: (line: string) => diagnostics.push(line),
+    });
+    discord.answerAlways({ status: 503 });
+    reporter.report({
+      level: 'warn',
+      kind: `resumed moi_session=${SESSION_COOKIE}`,
+      title: 'resumed',
+    });
+    await reporter.flush();
+
+    await reporter.close();
+    reporter = build({
+      mask: (text: string) => text,
+      onDiagnostic: (line: string) => diagnostics.push(line),
+    });
+    reporter.report({
+      level: 'fail',
+      kind: `key ${ADMIN_API_KEY}`,
+      title: 'x',
+    });
+    await reporter.flush();
+
+    expect(diagnostics).toHaveLength(2);
+    const text = diagnostics.join('\n');
+    expect(text).not.toContain(SESSION_COOKIE);
+    expect(text).not.toContain(ADMIN_API_KEY);
+    expect(text).toContain('not delivered');
+    expect(text).toContain('survived rendering');
+  });
+
   it('is a silent no-op without a webhook, the way notify.sh is', async () => {
     await reporter.close();
     reporter = build({ webhookUrl: '' });
