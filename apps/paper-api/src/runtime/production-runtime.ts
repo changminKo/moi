@@ -14,8 +14,8 @@ import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
 import { StartupCoordinator } from '../lifecycle/startup-coordinator.js';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
+import { projectQuote } from '../market-data/quote-projection.js';
 import {
-  quotePrice,
   referencePrice,
   type SymbolQuoteState,
 } from '../market-data/symbol-quote-state.js';
@@ -1215,18 +1215,27 @@ export class ProductionRuntime {
       | undefined;
   }
 
+  /**
+   * The quote a client paints the panel from — `projectQuote`, the same
+   * builder `MarketRuntime.#publishQuote` puts on the wire, so this snapshot
+   * and the frames that follow it are **one shape**
+   * (`docs/api/quote-contract.md`, spec §16.36). That is the discipline
+   * `#enrichPayload` already states for portfolio: a snapshot and a patch of
+   * the same thing must not be two different shapes, because that divergence
+   * is how the SDK and this API drifted apart (§16.32). It also means the
+   * order book has depth on first paint instead of reading "호가 없음" until
+   * the first live frame lands.
+   */
   #quote(market: Market, symbol: string): Record<string, unknown> {
     const store = this.#stores.get(market);
-    const health = this.markets.get(market)?.health.state ?? 'RECOVERING';
-    return {
+    return projectQuote({
       market,
       symbol,
-      price: quotePrice(this.#symbolState(market, symbol)) ?? null,
-      asOf: new Date().toISOString(),
-      health,
-      recoveryEpoch: store?.recoveryEpoch.toString() ?? '0',
-      marketDataVersion: store?.currentVersion.toString() ?? '0',
-    };
+      state: this.#symbolState(market, symbol),
+      health: this.markets.get(market)?.health.state ?? 'RECOVERING',
+      recoveryEpoch: store?.recoveryEpoch ?? 0n,
+      marketDataVersion: store?.currentVersion ?? 0n,
+    });
   }
 
   #fxService(): FxService {

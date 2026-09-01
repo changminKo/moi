@@ -1029,6 +1029,11 @@ describe('ProductionRuntime', () => {
           symbol: 'AAPL',
           price: '190.30',
           health: 'HEALTHY',
+          // The same shape the stream's `quote` frame carries, so the panel
+          // has depth on first paint and REST/stream cannot disagree (§16.36).
+          currency: 'USD',
+          asks: [{ price: '190.30', volume: '100' }],
+          bids: [{ price: '190.20', volume: '100' }],
         });
       });
       const quote = await json(`${waiting.origin}/api/v1/fx/quotes`, {
