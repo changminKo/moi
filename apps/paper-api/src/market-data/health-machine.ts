@@ -22,6 +22,15 @@ export interface IncidentPort {
     version: bigint;
     recoveryEpoch: bigint;
   }): Promise<boolean>;
+  /**
+   * Resolves every automatically-resolvable ACTIVE incident this market owns
+   * in the ledger — including rows a previous process opened — and answers
+   * with the cause codes a healthy feed is not allowed to clear (§16.35).
+   */
+  resolveMarketIncidents?(input: {
+    market: Market;
+    recoveryEpoch: bigint;
+  }): Promise<readonly string[]>;
 }
 
 export interface HealthMachineOptions {
@@ -40,6 +49,7 @@ export class MarketHealthMachine {
   #state: HealthState = 'HEALTHY';
   #misses = 0;
   #incident: { incidentId: string; version: bigint } | undefined;
+  #activating: Promise<{ incidentId: string; version: bigint }> | undefined;
 
   constructor(options: HealthMachineOptions) {
     this.market = options.market;
@@ -74,7 +84,27 @@ export class MarketHealthMachine {
   beginRecovery(): void {
     if (this.#state !== 'HEALTHY') this.#state = 'RECOVERING';
   }
+  /**
+   * The feed is back at `epoch`. Answers whether this market's own incidents
+   * are all clear; a GLOBAL incident can still gate placement and is reported
+   * by `marketHealthView`, not here. The feed state always returns to HEALTHY
+   * — it is what decides whether to close the transport, so an unrelated
+   * incident must not make a healthy pong look like a failing one.
+   */
   async markHealthy(epoch: bigint): Promise<boolean> {
+    const resolveMarket = this.#incidents.resolveMarketIncidents;
+    if (resolveMarket !== undefined) {
+      // The ledger rows outlive this process, so a recovery resolves what the
+      // market owns rather than only what this instance happens to remember.
+      const remaining = await resolveMarket.call(this.#incidents, {
+        market: this.market,
+        recoveryEpoch: epoch,
+      });
+      this.#incident = undefined;
+      this.#state = 'HEALTHY';
+      this.#misses = 0;
+      return remaining.length === 0;
+    }
     if (!this.#incident || !this.#incidents.resolveCas) {
       this.#state = 'HEALTHY';
       this.#misses = 0;
@@ -95,11 +125,22 @@ export class MarketHealthMachine {
   private async degrade(causeCode: string): Promise<void> {
     // A failed recovery attempt drops RECOVERING back to DEGRADED (§6.2).
     if (this.#state !== 'DEGRADED') this.#state = 'DEGRADED';
-    if (!this.#incident)
-      this.#incident = await this.#incidents.activate({
-        market: this.market,
-        causeCode,
-        recoveryEpoch: null,
-      });
+    if (this.#incident) return;
+    // The keepalive ping and the event loop degrade the same market from
+    // different tasks. Checking `#incident` and assigning it across an await
+    // let both through, and the loser's row was then tracked by nobody and
+    // stayed ACTIVE forever; the second caller joins the first activation
+    // instead (one incident per degrade, §8.4).
+    this.#activating ??= this.#incidents.activate({
+      market: this.market,
+      causeCode,
+      recoveryEpoch: null,
+    });
+    const activating = this.#activating;
+    try {
+      this.#incident = await activating;
+    } finally {
+      if (this.#activating === activating) this.#activating = undefined;
+    }
   }
 }

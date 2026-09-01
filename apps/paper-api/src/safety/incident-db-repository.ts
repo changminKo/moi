@@ -79,10 +79,10 @@ export function createDbIncidentRepository(
               incident.scope.id === scope.id),
         );
     },
-    async resolveCas({ incidentId, version, recoveryEpoch }) {
+    async resolveCas({ incidentId, version, recoveryEpoch, resolvedBy }) {
       const result = await sql<Row>`
         update safety_incidents
-        set status = 'RESOLVED', resolved_at = now(), resolved_by = 'runtime', version = version + 1
+        set status = 'RESOLVED', resolved_at = now(), resolved_by = ${resolvedBy ?? 'runtime'}, version = version + 1
         where id = ${incidentId} and status = 'ACTIVE' and version = ${version}
           and (${recoveryEpoch === null} or recovery_epoch = ${recoveryEpoch ?? 0n})
         returning *

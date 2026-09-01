@@ -63,6 +63,7 @@ export class IncidentService {
     incidentId: string;
     version: bigint;
     recoveryEpoch: bigint | null;
+    resolvedBy?: string;
   }): Promise<SafetyIncident | undefined> {
     const current = (await this.#repository.active()).find(
       (incident) => incident.incidentId === input.incidentId,
