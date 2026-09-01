@@ -38,14 +38,7 @@ export interface MarketIncidentPort {
     readonly causeCode: string;
     readonly symbol?: string;
     readonly recoveryEpoch: bigint | null;
-    readonly manual?: boolean;
   }): Promise<unknown>;
-  /**
-   * Resolves this market's `RECOVERY_RETRY_EXHAUSTED` hold once the supervisor
-   * recovers on its own (§16.34). Without it the incident that announced the
-   * hold would keep the market in `CANCEL_ONLY` after the feed came back.
-   */
-  resolveRetryExhausted?(market: Market): Promise<void>;
 }
 
 export interface MarketEngine {
@@ -172,7 +165,6 @@ export class MarketRuntime {
           market: deps.market,
           causeCode: 'RECOVERY_RETRY_EXHAUSTED',
           recoveryEpoch: null,
-          manual: true,
         });
         deps.log('recovery.exhausted', { market: deps.market });
       },
@@ -254,7 +246,7 @@ export class MarketRuntime {
       this.#startLoop();
       this.#startKeepalive();
       this.#d.onTransport?.('connected');
-      if (wasExhausted) await this.#clearRetryHold();
+      if (wasExhausted) this.#clearRetryHold();
       return true;
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
@@ -277,20 +269,16 @@ export class MarketRuntime {
     }
   }
 
-  /** The feed is back on its own; the hold that announced it must go too. */
-  async #clearRetryHold(): Promise<void> {
+  /**
+   * The feed is back on its own, so the retry hold goes with it. The
+   * `RECOVERY_RETRY_EXHAUSTED` row that announced the hold is resolved by the
+   * general policy in §16.35 — `markHealthy` clears every automatically
+   * resolvable row this market owns, whichever process opened it, which also
+   * covers the restarted process this in-memory path cannot reach.
+   */
+  #clearRetryHold(): void {
     this.supervisor.resume();
-    try {
-      await this.#d.incidents.resolveRetryExhausted?.(this.#d.market);
-      this.#d.log('recovery.hold_cleared', { market: this.#d.market });
-    } catch (error) {
-      // The feed recovered either way; an unresolved incident is an operator
-      // problem, not a reason to fail the recovery that just succeeded.
-      this.#d.log('recovery.hold_clear_failed', {
-        market: this.#d.market,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    this.#d.log('recovery.hold_cleared', { market: this.#d.market });
   }
 
   async #applyRecovery(outcome: RecoveryOutcome): Promise<void> {

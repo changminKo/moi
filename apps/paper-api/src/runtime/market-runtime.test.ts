@@ -44,7 +44,6 @@ function build(
       input,
     })),
     resolveCas: vi.fn(async () => true),
-    resolveRetryExhausted: vi.fn(async () => undefined),
   };
   const health = new MarketHealthMachine({ market: 'US', incidents });
   const stateStore = new MarketStateStore();
@@ -218,11 +217,10 @@ describe('MarketRuntime', () => {
     // The health machine holds one MARKET incident per degrade; every failed attempt is logged.
     expect(codes.filter((c) => c === 'PROVIDER_AUTH_FAILED')).toHaveLength(1);
     expect(connectSpy).toHaveBeenCalledTimes(3);
+    // The MANUAL label is applied by `MANUAL_CAUSES` in the incident
+    // repository, from the cause code — the port carries no `manual` flag.
     expect(incidents.activate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        causeCode: 'RECOVERY_RETRY_EXHAUSTED',
-        manual: true,
-      }),
+      expect.objectContaining({ causeCode: 'RECOVERY_RETRY_EXHAUSTED' }),
     );
     expect(health.state).toBe('DEGRADED');
     expect(runtime.supervisor.exhausted).toBe(true);
@@ -282,7 +280,11 @@ describe('MarketRuntime', () => {
       timeout: 3_000,
     });
     expect(runtime.supervisor.exhausted).toBe(false);
-    expect(incidents.resolveRetryExhausted).toHaveBeenCalledWith('US');
+    expect(logs.some((l) => l.event === 'recovery.hold_cleared')).toBe(true);
+    // Resolving the `RECOVERY_RETRY_EXHAUSTED` row itself is §16.35's job, not
+    // this runtime's: `markHealthy` clears every automatically resolvable row
+    // the market owns. Covered by `production-runtime.integration.test.ts`
+    // "incident resolution and the placement gate".
     await runtime.close();
   });
 
