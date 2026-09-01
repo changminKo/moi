@@ -5,6 +5,15 @@ import {
   ReconnectSupervisor,
 } from './reconnect-supervisor.js';
 
+/** Deterministic stand-in for `Math.random`, so a jittered delay is exact. */
+const lcg = (seed: number) => {
+  let state = seed;
+  return () => {
+    state = (state * 1664525 + 1013904223) % 4294967296;
+    return state / 4294967296;
+  };
+};
+
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
@@ -76,6 +85,7 @@ describe('ReconnectSupervisor (§8.3)', () => {
     const supervisor = new ReconnectSupervisor({
       delayMs: () => 10,
       onExhausted,
+      random: () => 1,
     });
     const run = vi.fn(async () => {
       supervisor.recordFailure();
@@ -97,13 +107,7 @@ describe('ReconnectSupervisor (§8.3)', () => {
     expect(onExhausted).toHaveBeenCalledTimes(1);
   });
 
-  it('caps the re-arm backoff at its ceiling instead of hot-looping', async () => {
-    const rearms: number[] = [];
-    const supervisor = new ReconnectSupervisor({
-      delayMs: () => 10,
-      onExhausted: vi.fn(async () => undefined),
-      onRearm: (delayMs) => rearms.push(delayMs),
-    });
+  const exhaust = async (supervisor: ReconnectSupervisor) => {
     const run = vi.fn(async () => {
       supervisor.recordFailure();
       return false;
@@ -112,19 +116,66 @@ describe('ReconnectSupervisor (§8.3)', () => {
       supervisor.schedule(run);
       await vi.advanceTimersByTimeAsync(10);
     }
-    for (let i = 0; i < 6; i += 1) {
+    expect(supervisor.exhausted).toBe(true);
+    return run;
+  };
+
+  it.each([
+    [
+      'the top of the jitter band',
+      () => 1,
+      [30_000, 60_000, 120_000, 240_000, REARM_CEILING_MS, REARM_CEILING_MS],
+    ],
+    [
+      'the bottom of the jitter band',
+      () => 0,
+      [15_000, 30_000, 60_000, 120_000, 150_000, 150_000],
+    ],
+  ])(
+    'caps the re-arm backoff at its ceiling instead of hot-looping — %s',
+    async (_label, random, expected) => {
+      const rearms: number[] = [];
+      const supervisor = new ReconnectSupervisor({
+        delayMs: () => 10,
+        onExhausted: vi.fn(async () => undefined),
+        onRearm: (delayMs) => rearms.push(delayMs),
+        random,
+      });
+      const run = await exhaust(supervisor);
+      for (let i = 0; i < 6; i += 1) {
+        supervisor.schedule(run);
+        await vi.advanceTimersByTimeAsync(REARM_CEILING_MS);
+      }
+      expect(rearms).toEqual(expected);
+      expect(run).toHaveBeenCalledTimes(9);
+    },
+  );
+
+  it('decorrelates two scopes that exhausted on the same event', async () => {
+    // KR and US hold in separate supervisors but fail on one provider event.
+    // A fixed delay would line their retries up for as long as both are down,
+    // and they share one OAuthTokenProvider with a 10 s reissue floor.
+    const drawn: number[] = [];
+    const supervisors = [lcg(1), lcg(9_999)].map(
+      (random) =>
+        new ReconnectSupervisor({
+          delayMs: () => 10,
+          onExhausted: vi.fn(async () => undefined),
+          onRearm: (delayMs) => drawn.push(delayMs),
+          random,
+        }),
+    );
+    for (const supervisor of supervisors) {
+      const run = await exhaust(supervisor);
       supervisor.schedule(run);
-      await vi.advanceTimersByTimeAsync(REARM_CEILING_MS);
+      supervisor.cancel();
     }
-    expect(rearms).toEqual([
-      30_000,
-      60_000,
-      120_000,
-      240_000,
-      REARM_CEILING_MS,
-      REARM_CEILING_MS,
-    ]);
-    expect(run).toHaveBeenCalledTimes(9);
+    const [kr, us] = drawn as [number, number];
+    expect(kr).not.toBe(us);
+    for (const delay of drawn) {
+      expect(delay).toBeGreaterThanOrEqual(REARM_BASE_MS / 2);
+      expect(delay).toBeLessThanOrEqual(REARM_BASE_MS);
+    }
   });
 
   it('clears the hold when a re-armed attempt finally succeeds', async () => {

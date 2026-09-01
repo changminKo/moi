@@ -4,9 +4,12 @@ export interface ReconnectSupervisorOptions {
   readonly onExhausted: () => Promise<void> | void;
   /**
    * Delay before the n-th attempt made *after* the window was exhausted
-   * (n starts at 1). Defaults to `rearmDelayMs`.
+   * (n starts at 1). Defaults to `rearmDelayMs`; a caller that supplies its
+   * own owns its jitter.
    */
   readonly rearmDelayMs?: (rearm: number) => number;
+  /** Jitter source for the default re-arm delay. */
+  readonly random?: () => number;
   /** Observability seam: the delay chosen for a re-armed attempt. */
   readonly onRearm?: (delayMs: number, rearm: number) => void;
   readonly windowMs?: number;
@@ -26,14 +29,31 @@ const SERVER_SHUTDOWN_DELAY_MS = 1_000;
 
 export const REARM_BASE_MS = 30_000;
 export const REARM_CEILING_MS = 300_000;
+/** The jitter band's lower edge, as a fraction of the step. */
+export const REARM_JITTER_FLOOR = 0.5;
 
 /**
- * Delay before a retry attempted while the failure window is exhausted:
- * 30 s doubling to a 5 min ceiling. No jitter — the scope is already alone in
- * holding, and a predictable interval is what an operator reads off the log.
+ * Delay before a retry attempted while the failure window is exhausted: 30 s
+ * doubling to a 5 min ceiling, drawn uniformly from the top half of that step.
+ *
+ * Half-jitter, not the full jitter `reconnectDelayMs` uses. Full jitter's lower
+ * edge is ~0, which would let an exhausted hold collapse into the hot loop the
+ * ceiling exists to prevent. The band still matters: KR and US hold in separate
+ * supervisors but exhaust on the same provider event, and a fixed delay would
+ * line their retries up forever. They share one `OAuthTokenProvider`, whose
+ * `TOKEN_MIN_REISSUE_INTERVAL_MS` floor answers the second caller in a 10 s
+ * window with `AUTH_THROTTLED` — a lock-step retry manufactures a failure on
+ * the second market out of the first market's.
  */
-export const rearmDelayMs = (rearm: number): number =>
-  Math.min(REARM_CEILING_MS, REARM_BASE_MS * 2 ** Math.max(0, rearm - 1));
+export const rearmDelayMs = (rearm: number, random = Math.random): number => {
+  const step = Math.min(
+    REARM_CEILING_MS,
+    REARM_BASE_MS * 2 ** Math.max(0, rearm - 1),
+  );
+  return Math.floor(
+    step * (REARM_JITTER_FLOOR + (1 - REARM_JITTER_FLOOR) * random()),
+  );
+};
 
 /**
  * Bounded retry scheduler: one pending attempt at a time, a sliding failure
@@ -44,6 +64,7 @@ export const rearmDelayMs = (rearm: number): number =>
  */
 export class ReconnectSupervisor {
   readonly #o: ReconnectSupervisorOptions;
+  readonly #rearmDelay: (rearm: number) => number;
   readonly #failures: number[] = [];
   #attempt = 0;
   #rearm = 0;
@@ -52,6 +73,8 @@ export class ReconnectSupervisor {
 
   constructor(options: ReconnectSupervisorOptions) {
     this.#o = options;
+    this.#rearmDelay =
+      options.rearmDelayMs ?? ((rearm) => rearmDelayMs(rearm, options.random));
   }
 
   get exhausted(): boolean {
@@ -142,7 +165,7 @@ export class ReconnectSupervisor {
    */
   #nextRearmDelay(): number {
     this.#rearm += 1;
-    const delay = (this.#o.rearmDelayMs ?? rearmDelayMs)(this.#rearm);
+    const delay = this.#rearmDelay(this.#rearm);
     this.#o.onRearm?.(delay, this.#rearm);
     return delay;
   }
