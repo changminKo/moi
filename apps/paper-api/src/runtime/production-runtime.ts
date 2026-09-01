@@ -14,6 +14,11 @@ import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
 import { StartupCoordinator } from '../lifecycle/startup-coordinator.js';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
+import {
+  quotePrice,
+  referencePrice,
+  type SymbolQuoteState,
+} from '../market-data/symbol-quote-state.js';
 import { registerAdminRoutes } from '../modules/admin/admin-routes.js';
 import { registerFxRoutes } from '../modules/fx/fx-routes.js';
 import { FxService } from '../modules/fx/fx-service.js';
@@ -888,10 +893,11 @@ export class ProductionRuntime {
     const placement = new OrderPlacementService({
       unitOfWork: this.#uow,
       engine: (market) => this.#engines.get(market),
-      referencePrice: (market, symbol) => {
-        const price = this.#quote(market, symbol).price;
-        return typeof price === 'string' ? price : undefined;
-      },
+      // Sized from the ask, not the displayed quote price: a MARKET BUY pays
+      // the ask, and the two must not drift apart just because a trade frame
+      // happened to arrive after the book.
+      referencePrice: (market, symbol) =>
+        referencePrice(this.#symbolState(market, symbol)),
       feeModel: (market): FeeModel => feeModelFor(this.#o.config.fees, market),
     });
     const orderService = new OrderService({
@@ -1180,16 +1186,19 @@ export class ProductionRuntime {
     };
   }
 
+  #symbolState(market: Market, symbol: string): SymbolQuoteState | undefined {
+    return this.#stores.get(market)?.get(symbol) as
+      | SymbolQuoteState
+      | undefined;
+  }
+
   #quote(market: Market, symbol: string): Record<string, unknown> {
     const store = this.#stores.get(market);
-    const book = store?.get(symbol) as
-      | { asks?: { price: string }[]; bids?: { price: string }[] }
-      | undefined;
     const health = this.markets.get(market)?.health.state ?? 'RECOVERING';
     return {
       market,
       symbol,
-      price: book?.asks?.[0]?.price ?? book?.bids?.[0]?.price ?? null,
+      price: quotePrice(this.#symbolState(market, symbol)) ?? null,
       asOf: new Date().toISOString(),
       health,
       recoveryEpoch: store?.recoveryEpoch.toString() ?? '0',

@@ -18,6 +18,11 @@ import {
   type RecoveryOutcome,
   type SubscriptionDeclaration,
 } from '../market-data/recovery-coordinator.js';
+import {
+  type SymbolQuoteState,
+  withBook,
+  withTrade,
+} from '../market-data/symbol-quote-state.js';
 import type { MetricsRegistry } from '../observability/metrics.js';
 import { ReconnectSupervisor } from './reconnect-supervisor.js';
 
@@ -344,9 +349,21 @@ export class MarketRuntime {
     const store = this.#d.stateStore;
     try {
       if (event.kind === 'trade') {
+        // The slot keeps both shapes (`SymbolQuoteState`); the engine keeps
+        // receiving the trade on its own, as its envelope contract expects.
         const envelope = store.applyEvent({
           symbol: event.symbol,
           version: store.currentVersion + 1n,
+          payload: withTrade(
+            store.get(event.symbol) as SymbolQuoteState | undefined,
+            {
+              price: event.price,
+              sourceTimestamp: event.sourceTimestamp,
+            },
+          ),
+        });
+        await this.#d.engine.onTrade({
+          ...envelope,
           payload: {
             market: event.market,
             symbol: event.symbol,
@@ -354,13 +371,19 @@ export class MarketRuntime {
             sourceTimestamp: event.sourceTimestamp,
           },
         });
-        await this.#d.engine.onTrade(envelope);
       } else if (event.kind === 'orderBook') {
-        const envelope = store.applyEvent({
+        const stored = store.applyEvent({
           symbol: event.symbol,
           version: store.currentVersion + 1n,
+          payload: withBook(
+            store.get(event.symbol) as SymbolQuoteState | undefined,
+            event.book,
+          ),
+        });
+        const envelope = {
+          ...stored,
           payload: event.book,
-        }) as MarketEnvelope<OrderBookSnapshot>;
+        } as MarketEnvelope<OrderBookSnapshot>;
         await this.#d.engine.onOrderBook(envelope);
         this.#d.hub.publishQuote({
           market: event.market,

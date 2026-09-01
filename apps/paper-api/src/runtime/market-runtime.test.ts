@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import type { LeaderLease } from '../market-data/leader-lease.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
+import {
+  quotePrice,
+  referencePrice,
+  type SymbolQuoteState,
+} from '../market-data/symbol-quote-state.js';
 import { MetricsRegistry } from '../observability/metrics.js';
 import {
   KEEPALIVE_INTERVAL_MS,
@@ -458,6 +463,76 @@ describe('MarketRuntime', () => {
     expect(transports).toEqual(['connected']);
     stream.emitTransportClosed('gone');
     await vi.waitFor(() => expect(transports).toContain('closed'));
+    await runtime.close();
+  });
+
+  // One symbol slot used to hold whichever frame arrived last, so a trade
+  // erased the book (and a book erased the trade). The quote then reported a
+  // price or `null` depending on frame timing, and MARKET BUY placement was
+  // rejected with MARKET_DATA_DEGRADED about half the time.
+  it('keeps the book and the last trade in one slot whatever the frame order', async () => {
+    const { runtime, stream, stateStore, engine } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(1));
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onTrade).toHaveBeenCalledTimes(1));
+
+    const afterTrade = stateStore.get('AAPL') as SymbolQuoteState;
+    expect(quotePrice(afterTrade)).toBe('100.25');
+    expect(referencePrice(afterTrade)).toBe('101');
+    // The recovery path reads `.book` off the same slot (#applyRecovery).
+    expect(afterTrade.book).toMatchObject({ asks: BOOK.asks });
+
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: { ...BOOK, asks: [{ price: '102', volume: '10' }] },
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(2));
+    const afterBook = stateStore.get('AAPL') as SymbolQuoteState;
+    expect(quotePrice(afterBook)).toBe('100.25');
+    expect(referencePrice(afterBook)).toBe('102');
+    await runtime.close();
+  });
+
+  it('hands the engine the raw trade and book payloads, not the merged slot', async () => {
+    const { runtime, stream, engine } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(1));
+    const trade = (engine.onTrade.mock.calls as unknown[][])[0]?.[0] as {
+      payload: { symbol: string; price: string };
+    };
+    expect(trade.payload).toMatchObject({ symbol: 'AAPL', price: '100.25' });
+    const book = (engine.onOrderBook.mock.calls as unknown[][])[0]?.[0] as {
+      payload: { asks: unknown[] };
+    };
+    expect(book.payload).toMatchObject({ asks: BOOK.asks });
     await runtime.close();
   });
 });
