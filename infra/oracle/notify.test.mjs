@@ -11,7 +11,9 @@
  */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { accessSync, constants, mkdtempSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +69,80 @@ function post(level, title, description) {
     );
   });
 }
+
+/** Finds `name` on the real PATH, the way `command -v` would. */
+function onPath(name) {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; keep looking.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A PATH holding exactly `names` — everything `notify.sh` needs except the one
+ * dependency under test. `notify.sh` masks with perl, so perl missing must mean
+ * no message rather than an unmasked one: delivery fails open, a secret does
+ * not. This takes the dependency away without touching the host.
+ */
+function pathWithout(names) {
+  const dir = mkdtempSync(join(tmpdir(), 'moi-notify-path-'));
+  for (const name of names) {
+    const target = onPath(name);
+    assert.ok(target, `${name} is missing from the test host's PATH`);
+    symlinkSync(target, join(dir, name));
+  }
+  return dir;
+}
+
+const WITHOUT_PERL = ['bash', 'jq', 'curl', 'sed', 'hostname', 'date'];
+
+describe('notify.sh dependencies', () => {
+  it('refuses to post at all when perl, the masker, is missing', async () => {
+    bodies.length = 0;
+    const bin = pathWithout(WITHOUT_PERL);
+    const result = await new Promise((resolve) => {
+      execFile(
+        notify,
+        ['fail', 'unit failed', 'Bearer SUPERSECRETTOKENVALUE12345'],
+        {
+          encoding: 'utf8',
+          env: { PATH: bin, DISCORD_WEBHOOK_URL: webhookUrl },
+        },
+        (error, _stdout, stderr) => resolve({ code: error?.code ?? 0, stderr }),
+      );
+    });
+
+    assert.match(result.stderr, /perl missing/);
+    assert.deepEqual(bodies, [], 'notify.sh posted without a masker');
+  });
+
+  it('exits non-zero for a missing masker under NOTIFY_STRICT', async () => {
+    const bin = pathWithout(WITHOUT_PERL);
+    const code = await new Promise((resolve) => {
+      execFile(
+        notify,
+        ['fail', 'unit failed'],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: bin,
+            DISCORD_WEBHOOK_URL: webhookUrl,
+            NOTIFY_STRICT: '1',
+          },
+        },
+        (error) => resolve(error?.code ?? 0),
+      );
+    });
+
+    assert.equal(code, 1);
+  });
+});
 
 describe('notify.sh masking', () => {
   it('posts an embed for a well-formed call', async () => {

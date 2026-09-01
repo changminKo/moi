@@ -26,9 +26,12 @@ esac
 soft_fail() { echo "notify: $1" >&2; [ "$strict" = 1 ] && exit 1; exit 0; }
 command -v jq >/dev/null 2>&1 || soft_fail "jq missing, nothing posted (${level}: ${title})"
 command -v curl >/dev/null 2>&1 || soft_fail "curl missing, nothing posted (${level}: ${title})"
-# perl is the masker. A missing masker must mean no message, never an
-# unmasked one: delivery fails open, a secret does not.
-command -v perl >/dev/null 2>&1 || soft_fail "perl missing, nothing posted unmasked (${level}: ${title})"
+# perl is the masker. Without it the mask pipeline yields nothing, so every
+# field comes out empty and the alert posts as a blank embed — measured, not
+# assumed. That is not a leak, but a silently blank alert is worse than a named
+# refusal: an operator reads "nothing is wrong" from a message that means the
+# host lost its masker. So say so and post nothing.
+command -v perl >/dev/null 2>&1 || soft_fail "perl missing, nothing posted (${level}: ${title})"
 
 # Masking (AGENTS.md rule 2: secrets never reach chat). Applied to every
 # outbound field; the journal tail sent by alert-unit-failed.sh can carry

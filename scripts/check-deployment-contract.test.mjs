@@ -308,4 +308,32 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('fails when the alerting path needs a tool the host never installs', () => {
+    const dir = copyRepo((d) => {
+      for (const [file, from, to] of [
+        ['infra/oracle/bootstrap.sh', 'gnupg jq perl age', 'gnupg jq age'],
+        [
+          'infra/oracle/deploy.sh',
+          'for tool in jq perl; do',
+          'for tool in jq; do',
+        ],
+      ]) {
+        const path = join(d, file);
+        const before = readFileSync(path, 'utf8');
+        assert.ok(
+          before.includes(from),
+          `${file} no longer contains "${from}"`,
+        );
+        writeFileSync(path, before.replace(from, to));
+      }
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /notify\.sh requires perl/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

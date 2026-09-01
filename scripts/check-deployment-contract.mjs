@@ -549,6 +549,49 @@ check('no committed secrets', () => {
   );
 });
 
+/**
+ * Everything `notify.sh` needs must actually be on the host.
+ *
+ * The alerting path is fail-closed by design: a missing dependency means no
+ * message rather than a wrong one. That is the right trade, and it is also why
+ * this check exists — a host that has quietly stopped alerting looks exactly
+ * like a host with nothing to report. `perl` is the live example: it masks
+ * every outbound field, and it arrived in the alerting path long after
+ * bootstrap.sh's package list was written.
+ *
+ * Rather than pin today's list, this reads the guards out of `notify.sh` and
+ * requires each one to be provisioned by `bootstrap.sh` (a fresh host) or by
+ * `deploy.sh` (a host bootstrapped before the tool joined the list). Adding a
+ * dependency to the alerting path without provisioning it fails the build.
+ */
+check('host alerting dependencies are provisioned', () => {
+  const guards = [
+    ...read('infra/oracle/notify.sh').matchAll(
+      /command -v (\S+) >\/dev\/null 2>&1 \|\| soft_fail/g,
+    ),
+  ].map(([, tool]) => tool);
+  assert.ok(
+    guards.length > 0,
+    'cannot locate notify.sh dependency guards; the parser or the script changed',
+  );
+
+  const words = (text, pattern) =>
+    [...text.matchAll(pattern)].flatMap(([, list]) => list.trim().split(/\s+/));
+  const provisioned = new Set([
+    ...words(
+      read('infra/oracle/bootstrap.sh'),
+      /apt-get install -y -qq ([^\n]*)/g,
+    ),
+    ...words(read('infra/oracle/deploy.sh'), /for tool in ([^;\n]*);/g),
+  ]);
+
+  for (const tool of guards)
+    assert.ok(
+      provisioned.has(tool),
+      `notify.sh requires ${tool}, but neither bootstrap.sh nor deploy.sh installs it; alerting would fail closed and the host would look quiet`,
+    );
+});
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(

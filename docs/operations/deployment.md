@@ -429,7 +429,13 @@ chat, or a shell history line that echoes it.
    webhook URLs, `Bearer` values, `moi_session=`, `X-CSRF-Token`,
    `Set-Cookie` and `Idempotency-Key`) and capped at 1,500 characters.
    `infra/oracle/notify.test.mjs` posts to a loopback server and asserts on the
-   bytes that crossed the socket. The deployment-contract checker scans
+   bytes that crossed the socket. Masking is done by `perl` (`-0777`, so a rule
+   matches across the newlines a journal tail is full of), which
+   `bootstrap.sh` and `deploy.sh` install alongside `jq`; without it
+   `notify.sh` posts nothing and says why, and the deployment-contract checker
+   fails if the alerting path gains a dependency neither script provisions.
+   These scripts run **on the host** under systemd, never inside a container,
+   so the stack's images do not need either tool. The deployment-contract checker scans
    `notify.yml` and every `infra/oracle/*.{sh,service,timer}` for a literal
    webhook URL.
 4. **Strategy runner** (`DISCORD_WEBHOOK_TRADE_URL`): a second channel and a

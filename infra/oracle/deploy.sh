@@ -41,9 +41,14 @@ step toolchain
 # Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and
 # an uncapped heap thrashes swap instead of failing fast.
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
-# jq builds the Discord payloads; hosts bootstrapped before it joined the
-# package list get it here.
-command -v jq >/dev/null 2>&1 || apt-get install -y -qq jq >/dev/null
+# jq builds the Discord payloads and perl masks them (infra/oracle/notify.sh);
+# hosts bootstrapped before either joined the package list get them here. The
+# deployment-contract checker reads notify.sh's own `command -v` guards and
+# fails unless every one of them appears here or in bootstrap.sh, so a tool the
+# alerting path needs cannot be added without being provisioned.
+for tool in jq perl; do
+  command -v "$tool" >/dev/null 2>&1 || apt-get install -y -qq "$tool" >/dev/null
+done
 as_owner node "$REPO/scripts/check-runtime.mjs"
 as_owner corepack prepare pnpm@11.22.0 --activate >/dev/null
 as_owner pnpm install --frozen-lockfile --silent
