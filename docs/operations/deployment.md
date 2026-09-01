@@ -342,15 +342,31 @@ docker compose -f infra/compose.yaml --profile bot up -d bot
 Until `apps/strategy-runner/Dockerfile` exists there is nothing for the profile
 to build, which is the intended state while the runner is incomplete.
 
+Before enabling it, write the operator configuration — the runner has no
+default risk limits and refuses to start without one:
+
+```bash
+cp infra/bot/runner.example.json infra/bot/runner.json   # then edit it
+```
+
+It is mounted read-only at `/etc/moi-bot` and is not committed; see
+`infra/bot/README.md`.
+
 What the deployment surface guarantees:
 
-- **It can only reach this deployment's paper API.** `BOT_API_ORIGIN` and
-  `BOT_PUBLIC_ORIGIN` are interpolations of `PUBLIC_API_ORIGIN` and
-  `PUBLIC_ORIGIN` — the values the `web` and `paper-api` services already
-  require — and the preflight **refuses** either as an environment variable.
-  There is no allow-list variable, because an environment-supplied allow list
-  is how the origin check in design §4.1 would get quietly widened; the
-  permitted set comes from those two values and a constant inside the runner.
+- **It can only reach this deployment's paper API.** `BOT_API_ORIGIN` is the
+  committed literal `http://paper-api:3000` — the compose service name, on the
+  internal network, and the host the runner's `ALLOWED_API_HOSTS` constant
+  already permits. It is a literal rather than an interpolation because there
+  is then nothing for an environment to substitute, and the contract checker
+  reads that constant so compose and the allow-list cannot drift. There is no
+  allow-list *variable*: an environment-supplied allow list is how the origin
+  check in design §4.1 would get quietly widened.
+- **The `Origin` header is a different value.** `BOT_PUBLIC_ORIGIN` is
+  `${PUBLIC_ORIGIN}` — the browser app's origin, which is what the paper API's
+  CSRF check compares against. Sending the connect target instead is a `403` on
+  every mutation the bot makes, so the checker asserts the two are not equal.
+  The preflight refuses both as environment variables.
 - **It holds no credential it does not need.** No database URL, no Redis, no
   `CSRF_SECRET`, `SESSION_HASH_KEYS`, `ADMIN_API_KEY` or Toss credential
   reaches it; the contract checker fails if one does. It authenticates as an

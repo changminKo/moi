@@ -9,3 +9,7 @@ test-results/
 .cursor/
 .omc/
 .superpowers/
+
+# The operator writes this from infra/bot/runner.example.json; risk limits are
+# per-deployment and a committed default is one somebody runs by accident.
+infra/bot/runner.json

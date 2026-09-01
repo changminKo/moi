@@ -6,6 +6,11 @@
 #   sops:       sops exec-env infra/secrets.enc.env 'docker compose -f infra/compose.yaml up -d'
 #
 # Rotate by changing the referenced item, then redeploy (stop-then-start).
+# PUBLIC_ORIGIN is also the strategy runner's `Origin` header (BOT_PUBLIC_ORIGIN
+# in infra/compose.yaml, design §4.2). The runner's *connect target*
+# (BOT_API_ORIGIN) is not here and is not a secret: it is the committed literal
+# http://paper-api:3000, the internal service its allow-list permits. Both are
+# refused as environment variables by `pnpm preflight:deploy`.
 PUBLIC_ORIGIN=op://Moi/paper-api/PUBLIC_ORIGIN
 PUBLIC_API_ORIGIN=op://Moi/web/PUBLIC_API_ORIGIN
 DATABASE_URL=op://Moi/postgres/DATABASE_URL

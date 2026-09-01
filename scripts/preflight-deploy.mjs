@@ -65,14 +65,16 @@ const FORBIDDEN = {
   FEE_KR_SELL_TAX_RATE: 'is a committed compose literal',
   FEE_US_COMMISSION_RATE: 'is a committed compose literal',
   FEE_US_SELL_TAX_RATE: 'is a committed compose literal',
-  // Strategy-runner design §4.1. infra/compose.yaml derives the bot's target
-  // and Origin from this deployment's PUBLIC_API_ORIGIN / PUBLIC_ORIGIN. An
-  // environment override is precisely how the bot would end up pointed at a
-  // host that is not this paper API, so the deploy refuses one.
+  // Strategy-runner design §4.1/§4.2. The bot's connect target is a committed
+  // literal in infra/compose.yaml (the internal `paper-api` service, which is
+  // what its ALLOWED_API_HOSTS constant permits), and its Origin header is
+  // derived from PUBLIC_ORIGIN. An environment override of either is precisely
+  // how the bot would end up pointed at, or vouching for, a host that is not
+  // this deployment — so the deploy refuses one rather than honouring it.
   BOT_API_ORIGIN:
-    'is derived from PUBLIC_API_ORIGIN in infra/compose.yaml; the bot may not be aimed elsewhere from the environment',
+    'is a committed compose literal (the internal paper-api service); the bot may not be aimed elsewhere from the environment',
   BOT_PUBLIC_ORIGIN:
-    'is derived from PUBLIC_ORIGIN in infra/compose.yaml; the bot may not be aimed elsewhere from the environment',
+    'is derived from PUBLIC_ORIGIN in infra/compose.yaml; the Origin header may not be set from the environment',
 };
 
 const DISCORD_WEBHOOK =

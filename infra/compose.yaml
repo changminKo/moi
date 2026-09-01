@@ -127,18 +127,30 @@ services:
     image: moi/strategy-runner:local
     environment:
       NODE_ENV: production
-      # §4.1/§4.2: where orders go, and the Origin the CSRF and WS-upgrade
-      # checks require. Both are this deployment's own origins — the same
-      # values web and paper-api already require — so the bot cannot be aimed
-      # at another host without editing this file. There is deliberately no
-      # allow-list variable: an environment-supplied list is exactly how the
-      # §4.1 defence would get quietly widened, so the permitted set is
-      # derived from these two and a constant inside the runner.
-      BOT_API_ORIGIN: "${PUBLIC_API_ORIGIN:?public API origin, e.g. https://api.moi.example}"
+      # §4.1: where the runner connects. A committed literal, not an
+      # interpolation — `paper-api` is the compose service name, reachable only
+      # on this project's internal network, and it is already on the runner's
+      # ALLOWED_API_HOSTS constant. Two consequences worth being explicit
+      # about: the bot never leaves the compose network to place an order, and
+      # no environment variable can move it, because there is nothing here to
+      # substitute. The contract checker reads the runner's allow-list and
+      # fails if this host is not on it, so the two can never drift.
+      BOT_API_ORIGIN: "http://paper-api:3000"
+      # §4.2: the `Origin` **header** value, which is a different thing from
+      # the connect target above and must not be confused with it. The paper
+      # API's CSRF check compares it against its own PUBLIC_ORIGIN — the
+      # browser app's origin — so sending the connect target here would be a
+      # 403 on every mutation the bot ever made. It is deliberately not
+      # allow-listed: a header value reaches nothing.
       BOT_PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.moi.example}"
       # §8.1: append-only NDJSON state on a named volume, so a restart resumes
       # the session, the fill cursor and the kill switch instead of resetting.
       BOT_STATE_DIR: /var/lib/moi-bot
+      # The operator's strategy and risk configuration, mounted read-only. The
+      # runner refuses to start without it (there are no default risk limits),
+      # so copy infra/bot/runner.example.json to infra/bot/runner.json and edit
+      # it before enabling the profile.
+      BOT_CONFIG_PATH: /etc/moi-bot/runner.json
       # §7.4: the runner's own Discord channel. Never DISCORD_WEBHOOK_URL —
       # trading noise must not bury an incident alert, and the contract checker
       # asserts the operational webhook never reaches this service. Optional:
@@ -146,6 +158,7 @@ services:
       DISCORD_WEBHOOK_TRADE_URL: "${DISCORD_WEBHOOK_TRADE_URL:-}"
     volumes:
       - bot-state:/var/lib/moi-bot
+      - ./bot:/etc/moi-bot:ro
     depends_on:
       paper-api:
         condition: service_healthy

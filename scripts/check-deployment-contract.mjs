@@ -329,34 +329,102 @@ check(
     });
 
     // §8.1: append-only state survives a restart, on a declared named volume.
-    const volumes = bot.volumes ?? [];
-    assert.ok(volumes.length > 0, 'bot needs a state volume');
-    for (const volume of volumes) {
-      const source =
-        typeof volume === 'string' ? volume.split(':')[0] : volume.source;
+    // Anything bound in from the host is the operator's configuration, and it
+    // is read-only: the bot reads its limits, it does not get to rewrite them.
+    const mounts = (bot.volumes ?? []).map((volume) => {
+      if (typeof volume !== 'string')
+        return {
+          source: volume.source,
+          target: volume.target,
+          mode: volume.read_only === true ? 'ro' : '',
+        };
+      const [source, target, mode = ''] = volume.split(':');
+      return { source, target, mode };
+    });
+    const isBind = (mount) => /^[./]/.test(mount.source ?? '');
+    const named = mounts.filter((mount) => !isBind(mount));
+    const binds = mounts.filter(isBind);
+    assert.ok(named.length > 0, 'bot needs a state volume');
+    for (const mount of named)
       assert.ok(
-        compose.volumes?.[source],
-        `bot volume ${source} must be a declared named volume`,
+        compose.volumes?.[mount.source],
+        `bot volume ${mount.source} must be a declared named volume`,
       );
-    }
+    for (const mount of binds)
+      assert.equal(
+        mount.mode,
+        'ro',
+        `bot bind mount ${mount.source} must be read-only`,
+      );
 
     const env = bot.environment ?? {};
 
-    // §4.1: the only origins the bot knows are this deployment's own, written
-    // here as interpolations of the variables web and paper-api already require.
-    // No third variable may exist that could redirect it or widen the allow list
-    // — that is what turns "the bot cannot reach a real exchange" from a hope
-    // into a property of the deployment surface.
-    assert.match(
-      String(env.BOT_API_ORIGIN ?? ''),
-      /^\$\{PUBLIC_API_ORIGIN:\?/,
-      "BOT_API_ORIGIN must be the deployment's own PUBLIC_API_ORIGIN",
+    // §4.1: the connect target. A committed literal, so there is nothing here
+    // for an environment to substitute, and the host is the compose service
+    // name — reachable only on this project's internal network. Together those
+    // are what turn "the bot cannot reach a real exchange" from a hope into a
+    // property of the deployment surface. The allow-list it is checked against
+    // is a code constant in the runner; this reads that constant so compose and
+    // it cannot drift, and the bot cannot be handed a host it will refuse.
+    const apiOrigin = String(env.BOT_API_ORIGIN ?? '');
+    assert.ok(
+      apiOrigin.length > 0 && !apiOrigin.includes('${'),
+      'BOT_API_ORIGIN must be a committed literal: an interpolation is a value the environment can move',
     );
+    let apiHost;
+    try {
+      apiHost = new URL(apiOrigin).hostname;
+    } catch {
+      assert.fail(`BOT_API_ORIGIN is not a URL: ${apiOrigin}`);
+    }
+    const originModule = 'apps/strategy-runner/src/api-origin.ts';
+    if (existsSync(path(originModule))) {
+      const block = /ALLOWED_API_HOSTS[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/.exec(
+        read(originModule),
+      );
+      assert.ok(block, `cannot locate ALLOWED_API_HOSTS in ${originModule}`);
+      const allowed = [...block[1].matchAll(/'([^']+)'/g)].map(
+        ([, host]) => host,
+      );
+      assert.ok(
+        allowed.includes(apiHost),
+        `BOT_API_ORIGIN host ${apiHost} is not on the runner's ALLOWED_API_HOSTS (${allowed.join(', ')}); the bot would refuse to start`,
+      );
+    }
+
+    // §4.2: the Origin *header*, which is a different value from the connect
+    // target — the paper API compares it against its own PUBLIC_ORIGIN, the
+    // browser app's origin. Conflating the two is a 403 on every mutation the
+    // bot ever makes, so they are asserted apart.
     assert.match(
       String(env.BOT_PUBLIC_ORIGIN ?? ''),
       /^\$\{PUBLIC_ORIGIN:\?/,
       "BOT_PUBLIC_ORIGIN must be the deployment's own PUBLIC_ORIGIN",
     );
+    assert.notEqual(
+      env.BOT_PUBLIC_ORIGIN,
+      env.BOT_API_ORIGIN,
+      'the Origin header and the connect target are different values (design §4.2)',
+    );
+
+    // The runner has no default risk limits and refuses to start without its
+    // configuration, so the path must be set and must resolve inside one of the
+    // read-only mounts above.
+    const configPath = String(env.BOT_CONFIG_PATH ?? '');
+    assert.ok(configPath.length > 0, 'BOT_CONFIG_PATH must be set');
+    assert.ok(
+      binds.some((mount) => configPath.startsWith(`${mount.target}/`)),
+      `BOT_CONFIG_PATH ${configPath} must live inside a read-only bind mount`,
+    );
+    assert.ok(
+      existsSync(path('infra/bot/runner.example.json')),
+      'infra/bot/runner.example.json must exist for the operator to copy',
+    );
+    assert.ok(
+      !existsSync(path('infra/bot/runner.json')),
+      "infra/bot/runner.json is the operator's file and must not be committed",
+    );
+
     const widening = Object.keys(env).filter((key) =>
       BOT_FORBIDDEN_ENV.test(key),
     );

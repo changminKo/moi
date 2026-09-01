@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -27,6 +29,7 @@ const TRACKED = [
   'docs/runbooks',
   'docs/operations',
   'scripts/check-deployment-contract.mjs',
+  'apps/strategy-runner/src/api-origin.ts',
   'packages/market-data/contracts',
   'packages/market-data/src/toss',
   'apps/paper-api/src/config.ts',
@@ -35,8 +38,12 @@ const TRACKED = [
 
 function copyRepo(mutate) {
   const dir = mkdtempSync(join(tmpdir(), 'moi-contract-'));
-  for (const entry of TRACKED)
+  for (const entry of TRACKED) {
+    // `apps/strategy-runner` arrives in its own phase; the checks that read it
+    // are conditional, so its absence must not break the harness.
+    if (!existsSync(join(root, entry))) continue;
     cpSync(join(root, entry), join(dir, entry), { recursive: true });
+  }
   cpSync(
     join(root, 'node_modules', 'yaml'),
     join(dir, 'node_modules', 'yaml'),
@@ -146,13 +153,36 @@ describe('check-deployment-contract (A8)', () => {
       /bot must sit behind exactly the `bot` profile/,
     ],
     [
-      'the bot can be pointed at an arbitrary host',
+      'the connect target becomes an environment variable',
       (text) =>
         text.replace(
-          /BOT_API_ORIGIN: "\$\{PUBLIC_API_ORIGIN[^"]*"/,
+          'BOT_API_ORIGIN: "http://paper-api:3000"',
           `BOT_API_ORIGIN: "$${'{'}BOT_API_ORIGIN:?where the bot trades}"`,
         ),
-      /BOT_API_ORIGIN must be the deployment's own PUBLIC_API_ORIGIN/,
+      /BOT_API_ORIGIN must be a committed literal/,
+    ],
+    [
+      'the Origin header is conflated with the connect target',
+      (text) =>
+        text.replace(
+          /BOT_PUBLIC_ORIGIN: "\$\{PUBLIC_ORIGIN[^"]*"/,
+          'BOT_PUBLIC_ORIGIN: "http://paper-api:3000"',
+        ),
+      /BOT_PUBLIC_ORIGIN must be the deployment's own PUBLIC_ORIGIN/,
+    ],
+    [
+      'the configuration path leaves the read-only mount',
+      (text) =>
+        text.replace(
+          'BOT_CONFIG_PATH: /etc/moi-bot/runner.json',
+          'BOT_CONFIG_PATH: /var/lib/moi-bot/runner.json',
+        ),
+      /must live inside a read-only bind mount/,
+    ],
+    [
+      'the operator configuration is mounted writable',
+      (text) => text.replace('- ./bot:/etc/moi-bot:ro', '- ./bot:/etc/moi-bot'),
+      /bind mount \.\/bot must be read-only/,
     ],
     [
       'an environment-supplied allow list is added',
@@ -192,8 +222,7 @@ describe('check-deployment-contract (A8)', () => {
     ],
     [
       'the bot keeps its state on no volume at all',
-      (text) =>
-        text.replace('    volumes:\n      - bot-state:/var/lib/moi-bot\n', ''),
+      (text) => text.replace('      - bot-state:/var/lib/moi-bot\n', ''),
       /bot needs a state volume/,
     ],
   ];
@@ -231,6 +260,50 @@ describe('check-deployment-contract (A8)', () => {
       const result = run(dir);
       assert.equal(result.status, 1);
       assert.match(result.stderr, /must reference DISCORD_WEBHOOK_TRADE_URL/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Design §4.1's allow-list is a code constant in the runner, and the compose
+   * connect target has to be on it or the bot fails closed at start-up — a
+   * failure nobody sees until someone enables the profile. These two cases are
+   * the mechanical version of "the compose change and the allow-list go in one
+   * commit": the checker reads the constant, so the pair cannot drift.
+   */
+  const writeAllowList = (dir, hosts) => {
+    const file = join(dir, 'apps/strategy-runner/src/api-origin.ts');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      `export const ALLOWED_API_HOSTS: ReadonlySet<string> = new Set([\n${hosts
+        .map((host) => `  '${host}',`)
+        .join('\n')}\n]);\n`,
+    );
+  };
+
+  it('fails when the connect target is not on the runner allow-list', () => {
+    const dir = copyRepo((d) => writeAllowList(d, ['127.0.0.1', 'localhost']));
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /BOT_API_ORIGIN host paper-api is not on the runner's ALLOWED_API_HOSTS/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('passes once the allow-list names the compose service', () => {
+    const dir = copyRepo((d) =>
+      writeAllowList(d, ['127.0.0.1', 'localhost', '[::1]', 'paper-api']),
+    );
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 0, result.stderr);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
