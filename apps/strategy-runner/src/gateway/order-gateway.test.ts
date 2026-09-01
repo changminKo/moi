@@ -201,7 +201,7 @@ describe('OrderGateway happy path', () => {
 
     gateway.record('samsung', BUY, TICK);
 
-    expect(state.dailyNotional('2026-09-02')).toBe('70000');
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('70000');
   });
 
   it('writes a noop to the log and submits nothing', async () => {
