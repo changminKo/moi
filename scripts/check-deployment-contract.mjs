@@ -383,8 +383,16 @@ check(
         read(originModule),
       );
       assert.ok(block, `cannot locate ALLOWED_API_HOSTS in ${originModule}`);
-      const allowed = [...block[1].matchAll(/'([^']+)'/g)].map(
+      // Comments first: an apostrophe in prose ("the operator's own machine")
+      // reads as a quoted entry otherwise, which puts junk in the parsed list
+      // and would let a host slip in on a comment's wording.
+      const listing = block[1].replace(/\/\/[^\n]*/g, '');
+      const allowed = [...listing.matchAll(/'([^']+)'/g)].map(
         ([, host]) => host,
+      );
+      assert.ok(
+        allowed.length > 0,
+        `parsed no hosts out of ALLOWED_API_HOSTS in ${originModule}; the parser or the constant changed`,
       );
       assert.ok(
         allowed.includes(apiHost),
