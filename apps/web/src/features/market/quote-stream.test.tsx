@@ -304,6 +304,95 @@ describe('the sparkline over streamed ticks', () => {
   });
 });
 
+/**
+ * Tearing down a subscription. Switching instruments closes the old socket,
+ * but a frame it had already queued can still fire its `onmessage` — and the
+ * `quote` guard there compares against the **old** effect's symbol, so it
+ * passes. Every frame below is well formed and states a real price, so
+ * nothing in `applyQuoteFrame` can reject it: only the teardown guard can.
+ *
+ * This is reachable exactly once the frame states the price. While the server
+ * sent book-only frames, `applyQuoteFrame` returned `null` for want of an
+ * `asOf` and the hole stayed latent — so the guard belongs in the same change
+ * that starts stating the price, not a later one.
+ */
+describe('a socket that has been torn down', () => {
+  afterEach(() => {
+    FakeSocket.instances = [];
+  });
+
+  const pricedAaplFrame = () =>
+    quoteFrame({ ...CAPTURED_BOOK, price: '316.65', asOf: 't2' });
+
+  it('never applies a residual frame over the newly selected instrument', async () => {
+    const api = {
+      get: vi
+        .fn()
+        .mockResolvedValueOnce(restSnapshot('316.50', 't0'))
+        .mockResolvedValue({ ...restSnapshot('512.00', 't1'), symbol: 'MSFT' }),
+    };
+    const view = render(<Harness market="US" symbol="AAPL" apiClient={api} />);
+    await screen.findByText('316.50');
+    const aaplSocket = FakeSocket.instances[0];
+
+    view.rerender(<Harness market="US" symbol="MSFT" apiClient={api} />);
+    await screen.findByText('512.00');
+
+    act(() => aaplSocket?.deliver(pricedAaplFrame()));
+
+    expect(screen.getByText('512.00')).toBeVisible();
+    expect(screen.queryByText('316.65')).toBeNull();
+    expect(document.getElementById('quote-title')?.textContent).toContain(
+      'US:MSFT',
+    );
+  });
+
+  /**
+   * The decisive window. Right after a switch the hook has run
+   * `setQuote(null)` and the new snapshot is still in flight, so
+   * `applyQuoteFrame`'s cross-instrument guard has no `current` to compare
+   * against — it would happily build a quote for the *previous* instrument
+   * out of a priced frame, flipping the whole panel back to it.
+   */
+  it('never applies a residual frame while the new instrument is still loading', async () => {
+    const api = {
+      get: vi
+        .fn()
+        .mockResolvedValueOnce(restSnapshot('316.50', 't0'))
+        .mockImplementationOnce(() => new Promise(() => {})),
+    };
+    const view = render(<Harness market="US" symbol="AAPL" apiClient={api} />);
+    await screen.findByText('316.50');
+    const aaplSocket = FakeSocket.instances[0];
+
+    view.rerender(<Harness market="US" symbol="MSFT" apiClient={api} />);
+    await screen.findByText('Select an instrument to see its quote.');
+
+    act(() => aaplSocket?.deliver(pricedAaplFrame()));
+
+    expect(
+      screen.getByText('Select an instrument to see its quote.'),
+    ).toBeVisible();
+    expect(screen.queryByText('316.65')).toBeNull();
+    expect(screen.queryByText('316.44')).toBeNull();
+  });
+
+  it('never applies a residual frame after the panel unmounts', async () => {
+    const api = {
+      get: vi.fn().mockResolvedValue(restSnapshot('316.50', 't0')),
+    };
+    const view = render(<Harness market="US" symbol="AAPL" apiClient={api} />);
+    await screen.findByText('316.50');
+    const socket = FakeSocket.instances[0];
+
+    view.unmount();
+
+    // React warns on a state update from an unmounted tree; the guard means
+    // the update never happens at all.
+    expect(() => act(() => socket?.deliver(pricedAaplFrame()))).not.toThrow();
+  });
+});
+
 describe('QuoteSparkline', () => {
   const ticks = (prices: readonly string[]): TickPoint[] =>
     prices.map((price, index) => ({ asOf: `t${index}`, price }));
