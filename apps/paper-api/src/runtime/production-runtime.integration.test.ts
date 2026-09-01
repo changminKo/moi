@@ -2270,6 +2270,50 @@ describe('ProductionRuntime', () => {
           filledEvents,
           JSON.stringify({ filledEvents, fillRows }),
         ).toHaveLength(2);
+        // A consumer must be able to price a fill from the event alone: before
+        // the fill-history work the payload carried only orderId/status, so a
+        // client could see that something filled but never at what cost.
+        for (const row of filledEvents) {
+          const payload = row.payload as {
+            fills?: {
+              id: string;
+              fillSequence: string;
+              accountSequence: string;
+              market: string;
+              symbol: string;
+              side: string;
+              price: string;
+              quantity: string;
+              fee: string;
+              feeCurrency: string;
+            }[];
+          };
+          expect(payload.fills, JSON.stringify(payload)).toBeDefined();
+          expect(payload.fills?.length).toBeGreaterThan(0);
+          for (const fill of payload.fills ?? []) {
+            expect(fill.market).toMatch(/^(KR|US)$/);
+            expect(fill.symbol.length).toBeGreaterThan(0);
+            expect(fill.side).toMatch(/^(BUY|SELL)$/);
+            // Fee is charged in the market's settlement currency.
+            expect(fill.feeCurrency).toBe(fill.market === 'KR' ? 'KRW' : 'USD');
+            expect(Number(fill.price)).toBeGreaterThan(0);
+            expect(Number(fill.quantity)).toBeGreaterThan(0);
+            expect(Number(fill.fee)).toBeGreaterThanOrEqual(0);
+            // The fill names the event it was published in, so a REST page and
+            // the stream position can be lined up.
+            expect(fill.accountSequence).toBe(String(row.seq));
+            expect(fill.fillSequence).toMatch(/^\d+$/);
+          }
+        }
+        // Every published fill is also readable from the ledger by cursor.
+        const persisted = (
+          await observer.query(
+            'select fill_sequence::text as seq, account_sequence::text as acct from fills where session_id = $1 order by fill_sequence',
+            [s.client.id],
+          )
+        ).rows;
+        expect(persisted.length).toBeGreaterThan(0);
+        expect(persisted.every((r) => r.acct !== null)).toBe(true);
       },
       TEST_TIMEOUT_MS,
     );

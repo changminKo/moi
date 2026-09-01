@@ -419,12 +419,14 @@ describe('ledger migration', () => {
           '001_ledger',
           '002_audit_partitions',
           '003_leader_release',
+          '004_fill_history',
+          '005_fill_history_backfill',
+          '006_fill_history_indexes',
+          '007_fill_history_validate',
         ]);
-        expect(results.map((result) => result.status)).toEqual([
-          'Success',
-          'Success',
-          'Success',
-        ]);
+        expect(results.map((result) => result.status)).toEqual(
+          results.map(() => 'Success'),
+        );
 
         expect(await tableNames(fresh.db)).toEqual(
           expect.arrayContaining([...LEDGER_TABLES]),
@@ -453,6 +455,10 @@ describe('ledger migration', () => {
           '001_ledger',
           '002_audit_partitions',
           '003_leader_release',
+          '004_fill_history',
+          '005_fill_history_backfill',
+          '006_fill_history_indexes',
+          '007_fill_history_validate',
         ]);
       } finally {
         await fresh.destroy();

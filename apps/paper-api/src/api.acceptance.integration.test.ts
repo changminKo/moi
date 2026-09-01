@@ -157,6 +157,7 @@ describe('paper API acceptance vertical slice', () => {
               },
             }),
             listOrders: async () => ({ items: [] }),
+            listFills: async () => ({ items: [] }),
             getOrder: async () => undefined,
           },
         }),

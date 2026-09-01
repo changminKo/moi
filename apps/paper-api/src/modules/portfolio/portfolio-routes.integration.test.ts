@@ -46,6 +46,26 @@ describe('portfolio routes', () => {
             ],
             nextCursor: 'cursor-1',
           }),
+          listFills: async (_sessionId, query) => ({
+            items: [
+              {
+                id: 'fill-1',
+                fillSequence: query.after === undefined ? '1' : '2',
+                accountSequence: '7',
+                orderId: 'order-1',
+                market: 'KR',
+                symbol: '005930',
+                side: 'BUY',
+                quantity: '1',
+                price: '71200',
+                fee: '10.6800',
+                feeCurrency: 'KRW',
+                isRecoveryFill: false,
+                occurredAt: '2026-08-30T00:00:00.000Z',
+              },
+            ],
+            ...(query.after === undefined ? { nextCursor: '1' } : {}),
+          }),
           getOrder: async (_sessionId, id) =>
             id === 'old-1'
               ? { id, status: 'FILLED', quantity: '1', filledQuantity: '1' }
@@ -102,6 +122,102 @@ describe('portfolio routes', () => {
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toEqual(expect.objectContaining({ id: 'old-1' }));
+    await app.close();
+  });
+
+  it('pages fills on the session cursor, caps the limit and never lets a shared cache hold them', async () => {
+    const seen: unknown[] = [];
+    const service = new PortfolioService({
+      runSnapshot: async (work) =>
+        work({
+          snapshot: async () => {
+            throw new Error('not used');
+          },
+          listOrders: async () => ({ items: [] }),
+          getOrder: async () => undefined,
+          listFills: async (sessionId, query) => {
+            seen.push({ sessionId, query });
+            return {
+              items: [
+                {
+                  id: 'fill-1',
+                  fillSequence: '9',
+                  accountSequence: '7',
+                  orderId: 'order-1',
+                  market: 'KR',
+                  symbol: '005930',
+                  side: 'BUY',
+                  quantity: '1',
+                  price: '71200',
+                  fee: '10.6800',
+                  feeCurrency: 'KRW',
+                  isRecoveryFill: false,
+                  occurredAt: '2026-08-30T00:00:00.000Z',
+                },
+              ],
+              nextCursor: '9',
+            };
+          },
+        }),
+    });
+    const app = Fastify();
+    await registerPortfolioRoutes(app, {
+      principal: async () => ({ id: 'session-1', status: 'ACTIVE' }),
+      service,
+    });
+
+    const page = await app.inject({ method: 'GET', url: '/api/v1/fills' });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['cache-control']).toBe('private, no-store');
+    expect(page.json()).toEqual({
+      items: [
+        {
+          id: 'fill-1',
+          fillSequence: '9',
+          accountSequence: '7',
+          orderId: 'order-1',
+          market: 'KR',
+          symbol: '005930',
+          side: 'BUY',
+          quantity: '1',
+          price: '71200',
+          fee: '10.6800',
+          feeCurrency: 'KRW',
+          isRecoveryFill: false,
+          occurredAt: '2026-08-30T00:00:00.000Z',
+        },
+      ],
+      nextCursor: '9',
+    });
+    // The session comes from the principal, never from the query string.
+    expect(seen[0]).toEqual({
+      sessionId: 'session-1',
+      query: { limit: 50 },
+    });
+
+    await app.inject({ method: 'GET', url: '/api/v1/fills?after=9&limit=200' });
+    expect(seen[1]).toEqual({
+      sessionId: 'session-1',
+      query: { after: '9', limit: 200 },
+    });
+
+    for (const url of [
+      '/api/v1/fills?limit=201',
+      '/api/v1/fills?limit=0',
+      '/api/v1/fills?after=abc',
+      '/api/v1/fills?after=-1',
+      // Beyond bigint: unbounded digits reach `::bigint`, which raises 22003
+      // and surfaces as a 500 — a caller's bad cursor must read as a 400, and
+      // must not pollute the deploy verification or the alerting signal.
+      '/api/v1/fills?after=99999999999999999999',
+      '/api/v1/fills?after=9223372036854775808',
+      '/api/v1/fills?sessionId=other',
+    ]) {
+      const rejected = await app.inject({ method: 'GET', url });
+      expect(rejected.statusCode, url).toBe(400);
+      expect(rejected.json().code).toBe('VALIDATION_ERROR');
+    }
+    expect(seen).toHaveLength(2);
     await app.close();
   });
 
