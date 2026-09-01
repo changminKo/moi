@@ -132,4 +132,107 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * The strategy runner's half of the contract (strategy-runner design §4.1,
+   * §7.4, §8.1). Each case is a way the deployment surface could quietly let
+   * the bot start on its own, reach a host that is not this deployment's paper
+   * API, or carry a credential it has no business holding.
+   */
+  const botCases = [
+    [
+      'the bot is no longer profile-gated',
+      (text) => text.replace('    profiles:\n      - bot\n', ''),
+      /bot must sit behind exactly the `bot` profile/,
+    ],
+    [
+      'the bot can be pointed at an arbitrary host',
+      (text) =>
+        text.replace(
+          /BOT_API_ORIGIN: "\$\{PUBLIC_API_ORIGIN[^"]*"/,
+          `BOT_API_ORIGIN: "$${'{'}BOT_API_ORIGIN:?where the bot trades}"`,
+        ),
+      /BOT_API_ORIGIN must be the deployment's own PUBLIC_API_ORIGIN/,
+    ],
+    [
+      'an environment-supplied allow list is added',
+      (text) =>
+        text.replace(
+          '      BOT_STATE_DIR: /var/lib/moi-bot',
+          `      BOT_ORIGIN_ALLOWLIST: "$${'{'}BOT_ORIGIN_ALLOWLIST:-}"\n      BOT_STATE_DIR: /var/lib/moi-bot`,
+        ),
+      /no allow-list override/,
+    ],
+    [
+      'the bot is handed a ledger credential',
+      (text) =>
+        text.replace(
+          '      BOT_STATE_DIR: /var/lib/moi-bot',
+          `      ADMIN_API_KEY: "$${'{'}ADMIN_API_KEY:?admin key}"\n      BOT_STATE_DIR: /var/lib/moi-bot`,
+        ),
+      /no ledger credential/,
+    ],
+    [
+      'the bot posts into the operational Discord channel',
+      (text) =>
+        text.replace(
+          /DISCORD_WEBHOOK_TRADE_URL: "\$\{DISCORD_WEBHOOK_TRADE_URL:-\}"/,
+          `DISCORD_WEBHOOK_URL: "$${'{'}DISCORD_WEBHOOK_URL:-}"`,
+        ),
+      /operational Discord webhook must never reach the bot/,
+    ],
+    [
+      'the bot publishes a port',
+      (text) =>
+        text.replace(
+          '    volumes:\n      - bot-state:/var/lib/moi-bot',
+          '    ports:\n      - "9000:9000"\n    volumes:\n      - bot-state:/var/lib/moi-bot',
+        ),
+      /bot must not publish a port/,
+    ],
+    [
+      'the bot keeps its state on no volume at all',
+      (text) =>
+        text.replace('    volumes:\n      - bot-state:/var/lib/moi-bot\n', ''),
+      /bot needs a state volume/,
+    ],
+  ];
+  for (const [label, mutate, expected] of botCases) {
+    it(`fails when ${label}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, 'infra/compose.yaml');
+        const before = readFileSync(file, 'utf8');
+        const after = mutate(before);
+        assert.notEqual(after, before, `mutation "${label}" matched nothing`);
+        writeFileSync(file, after);
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 1, result.stdout);
+        assert.match(result.stderr, expected);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it('fails when the trade webhook is missing from the secret template', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/secrets.env.tpl');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /^DISCORD_WEBHOOK_TRADE_URL=.*$/m,
+          '',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /must reference DISCORD_WEBHOOK_TRADE_URL/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

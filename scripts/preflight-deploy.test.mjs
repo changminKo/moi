@@ -96,6 +96,77 @@ describe('validateEnvironment', () => {
   });
 });
 
+describe('strategy runner variables', () => {
+  const TRADE = 'https://discord.com/api/webhooks/900000000000000000/trade-tok';
+  const OPS = 'https://discord.com/api/webhooks/800000000000000000/ops-token1';
+
+  it('accepts an environment with no bot variables at all', () => {
+    assert.deepEqual(validateEnvironment(goodEnv()), []);
+  });
+
+  it('accepts a well-formed trade webhook on its own channel', () => {
+    assert.deepEqual(
+      validateEnvironment({
+        ...goodEnv(),
+        DISCORD_WEBHOOK_URL: OPS,
+        DISCORD_WEBHOOK_TRADE_URL: TRADE,
+      }),
+      [],
+    );
+  });
+
+  // Design §7.4: the bot's channel is separate so trading traffic cannot bury
+  // an incident alert. One webhook under both names defeats that silently.
+  it('refuses the operational webhook reused as the trade webhook', () => {
+    const problems = Object.fromEntries(
+      validateEnvironment({
+        ...goodEnv(),
+        DISCORD_WEBHOOK_URL: OPS,
+        DISCORD_WEBHOOK_TRADE_URL: OPS,
+      }).map((f) => [f.variable, f.problem]),
+    );
+    assert.match(problems.DISCORD_WEBHOOK_TRADE_URL, /different channel/);
+  });
+
+  it('refuses a trade webhook that is not an https Discord webhook', () => {
+    for (const value of [
+      'https://example.com/api/webhooks/1/tok',
+      'http://discord.com/api/webhooks/1/tok',
+      'not-a-url',
+    ]) {
+      const problems = validateEnvironment({
+        ...goodEnv(),
+        DISCORD_WEBHOOK_TRADE_URL: value,
+      });
+      assert.equal(problems.length, 1, value);
+      assert.equal(problems[0].variable, 'DISCORD_WEBHOOK_TRADE_URL');
+    }
+  });
+
+  it('never echoes the rejected webhook value', () => {
+    const [failure] = validateEnvironment({
+      ...goodEnv(),
+      DISCORD_WEBHOOK_TRADE_URL: 'https://example.com/leaked-path-abcdef',
+    });
+    assert.ok(!failure.problem.includes('leaked-path'));
+  });
+
+  // §4.1: the compose file derives the bot's origins from this deployment's
+  // own PUBLIC_ORIGIN / PUBLIC_API_ORIGIN. An environment override is how the
+  // bot would get aimed somewhere else, so the deploy refuses one outright.
+  it('refuses environment overrides of the bot origins', () => {
+    const problems = Object.fromEntries(
+      validateEnvironment({
+        ...goodEnv(),
+        BOT_API_ORIGIN: 'https://api.exchange.example',
+        BOT_PUBLIC_ORIGIN: 'https://app.exchange.example',
+      }).map((f) => [f.variable, f.problem]),
+    );
+    assert.match(problems.BOT_API_ORIGIN, /compose/);
+    assert.match(problems.BOT_PUBLIC_ORIGIN, /compose/);
+  });
+});
+
 describe('provider allow list', () => {
   it('parses the committed file into well-formed entries', () => {
     const text = spawnSync(

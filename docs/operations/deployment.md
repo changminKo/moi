@@ -327,12 +327,51 @@ requires, and the artefacts are the same ones the local smoke uses.
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
 
+## Strategy runner (`bot`, opt-in)
+
+The strategy runner is declared in `infra/compose.yaml` as the service `bot`,
+behind the `bot` profile. **A profile-gated service does not start**: neither
+`docker compose up -d` nor `infra/oracle/deploy.sh` brings it up, and a release
+that changes nothing else leaves a running stack exactly as it was. Starting it
+is a separate, deliberate command:
+
+```bash
+docker compose -f infra/compose.yaml --profile bot up -d bot
+```
+
+Until `apps/strategy-runner/Dockerfile` exists there is nothing for the profile
+to build, which is the intended state while the runner is incomplete.
+
+What the deployment surface guarantees:
+
+- **It can only reach this deployment's paper API.** `BOT_API_ORIGIN` and
+  `BOT_PUBLIC_ORIGIN` are interpolations of `PUBLIC_API_ORIGIN` and
+  `PUBLIC_ORIGIN` — the values the `web` and `paper-api` services already
+  require — and the preflight **refuses** either as an environment variable.
+  There is no allow-list variable, because an environment-supplied allow list
+  is how the origin check in design §4.1 would get quietly widened; the
+  permitted set comes from those two values and a constant inside the runner.
+- **It holds no credential it does not need.** No database URL, no Redis, no
+  `CSRF_SECRET`, `SESSION_HASH_KEYS`, `ADMIN_API_KEY` or Toss credential
+  reaches it; the contract checker fails if one does. It authenticates as an
+  ordinary anonymous session through the public API.
+- **It publishes no port** and its state lives on the named volume
+  `bot-state`, so a restart resumes the session, the fill cursor and the kill
+  switch (design §8.1) instead of starting over.
+- **It cannot take the stack with it** (`restart: unless-stopped`, design
+  §7.3). The ledger is the source of truth; the bot's state is a cache and an
+  audit trail.
+
 ## Alerting (Discord)
 
-One Discord channel webhook carries CI results, deploys and host status. The
-webhook URL is a secret: it goes into the GitHub repository secrets and the
-host's sops file — never into the repository, chat, or a shell history line
-that echoes it.
+Two channels, two webhooks. `DISCORD_WEBHOOK_URL` carries CI results, deploys
+and host status — the operational channel described below.
+`DISCORD_WEBHOOK_TRADE_URL` carries the strategy runner's own reports and must
+point at a **different** channel, so trading traffic cannot bury an incident
+alert (strategy-runner design §7.4); `pnpm preflight:deploy` refuses a deploy
+that gives both names the same webhook. Both URLs are secrets: they go into the
+GitHub repository secrets and the host's sops file — never into the repository,
+chat, or a shell history line that echoes it.
 
 1. **Channel webhook.** Discord → channel → *Edit channel* → *Integrations* →
    *Webhooks* → *New webhook* → *Copy URL*.
@@ -371,10 +410,22 @@ that echoes it.
    can never fail a deploy; only the status check runs it with `NOTIFY_STRICT=1`
    to drive its retry. Titles and descriptions are masked before leaving the
    host (credentials in URLs, `KEY|TOKEN|SECRET|PASSWORD=…` assignments,
-   webhook URLs) and capped at 1,500 characters. The deployment-contract
-   checker scans `notify.yml` and every `infra/oracle/*.{sh,service,timer}` for
-   a literal webhook URL.
-4. **Test**: `sudo SOPS_AGE_KEY_FILE=/etc/moi/age.key sops exec-env /etc/moi/secrets.enc.env '/opt/moi/infra/oracle/notify.sh info test'`.
+   webhook URLs, `Bearer` values, `moi_session=`, `X-CSRF-Token`,
+   `Set-Cookie` and `Idempotency-Key`) and capped at 1,500 characters.
+   `infra/oracle/notify.test.mjs` posts to a loopback server and asserts on the
+   bytes that crossed the socket. The deployment-contract checker scans
+   `notify.yml` and every `infra/oracle/*.{sh,service,timer}` for a literal
+   webhook URL.
+4. **Strategy runner** (`DISCORD_WEBHOOK_TRADE_URL`): a second channel and a
+   second webhook, added to the same sops file. The `bot` service reads it and
+   never reads `DISCORD_WEBHOOK_URL`; the contract checker asserts the
+   operational webhook is not in the bot's environment. Absent, the runner's
+   reporter is a silent no-op and the runner still starts — reporting is never
+   a reason a trading decision fails. Its masking rules are the host's, plus
+   exact-value masking for the session cookie and CSRF token the runner holds;
+   a secret that survives masking means the message is dropped rather than
+   posted (`packages/strategy-reporter`).
+5. **Test**: `sudo SOPS_AGE_KEY_FILE=/etc/moi/age.key sops exec-env /etc/moi/secrets.enc.env '/opt/moi/infra/oracle/notify.sh info test'`.
 
 What each alert means and the first response: `docs/runbooks/alerting.md`.
 Host-down detection needs an external probe (the timer cannot report a dead

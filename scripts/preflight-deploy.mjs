@@ -44,6 +44,15 @@ const RULES = [
   ['TOSS_CLIENT_SECRET', minLength(MIN_TOSS_SECRET_BYTES)],
 ];
 
+/**
+ * Optional variables: absent is fine, malformed is not. The strategy runner's
+ * Discord channel is the only one so far — the reporter is a silent no-op
+ * without it (like `infra/oracle/notify.sh`), but a webhook that is wrong, or
+ * that is the operational channel wearing the trade name, must be caught here
+ * rather than discovered as trading noise on top of an incident alert.
+ */
+const OPTIONAL_RULES = [['DISCORD_WEBHOOK_TRADE_URL', tradeWebhook]];
+
 /** Variables that must NOT be set: the compose file owns them as literals. */
 const FORBIDDEN = {
   MARKET_DATA_ADAPTER:
@@ -56,7 +65,31 @@ const FORBIDDEN = {
   FEE_KR_SELL_TAX_RATE: 'is a committed compose literal',
   FEE_US_COMMISSION_RATE: 'is a committed compose literal',
   FEE_US_SELL_TAX_RATE: 'is a committed compose literal',
+  // Strategy-runner design §4.1. infra/compose.yaml derives the bot's target
+  // and Origin from this deployment's PUBLIC_API_ORIGIN / PUBLIC_ORIGIN. An
+  // environment override is precisely how the bot would end up pointed at a
+  // host that is not this paper API, so the deploy refuses one.
+  BOT_API_ORIGIN:
+    'is derived from PUBLIC_API_ORIGIN in infra/compose.yaml; the bot may not be aimed elsewhere from the environment',
+  BOT_PUBLIC_ORIGIN:
+    'is derived from PUBLIC_ORIGIN in infra/compose.yaml; the bot may not be aimed elsewhere from the environment',
 };
+
+const DISCORD_WEBHOOK =
+  /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/;
+
+/**
+ * Validated against the whole environment, because the rule that matters is a
+ * relation: the runner's channel must not be the operational one. Never
+ * returns the value — a problem line is printed.
+ */
+function tradeWebhook(value, env) {
+  if (!DISCORD_WEBHOOK.test(value))
+    return 'must be an https Discord webhook URL';
+  if (value === env.DISCORD_WEBHOOK_URL?.trim())
+    return 'must be a different channel from DISCORD_WEBHOOK_URL, or trading traffic buries incident alerts';
+  return undefined;
+}
 
 function httpsOrigin(value) {
   let url;
@@ -126,6 +159,16 @@ export function validateEnvironment(env) {
       continue;
     }
     const problem = rule(value);
+    if (problem !== undefined) failures.push({ variable, problem });
+  }
+  for (const [variable, rule] of OPTIONAL_RULES) {
+    const value = env[variable]?.trim();
+    if (value === undefined || value.length === 0) continue;
+    if (PLACEHOLDER.test(value)) {
+      failures.push({ variable, problem: 'still holds a placeholder value' });
+      continue;
+    }
+    const problem = rule(value, env);
     if (problem !== undefined) failures.push({ variable, problem });
   }
   for (const [variable, problem] of Object.entries(FORBIDDEN)) {

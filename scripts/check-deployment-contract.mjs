@@ -26,6 +26,15 @@ const NODE_VERSION = '24.19.0';
 const PNPM_VERSION = '11.22.0';
 const PUBLIC_SERVICES = ['web', 'paper-api'];
 const PRIVATE_SERVICES = ['postgres', 'redis'];
+/**
+ * Declared in compose but gated behind a profile, so `docker compose up` and
+ * infra/oracle/deploy.sh leave it alone. The strategy runner is here because a
+ * service outside the contract is a service nobody checks.
+ */
+const OPT_IN_SERVICES = ['bot'];
+/** Nothing on this list may reach the bot: it trades through the public API. */
+const BOT_FORBIDDEN_ENV =
+  /TOSS|DATABASE|REDIS|POSTGRES|SECRET|ADMIN|SESSION|CSRF|MARKET_DATA|FEE_|ALLOW_?LIST/i;
 const BOUNDED_ALERT_LABELS = new Set([
   'severity',
   'market',
@@ -207,14 +216,25 @@ let compose;
 check('compose topology', () => {
   compose = readYaml('infra/compose.yaml');
   const services = compose.services ?? {};
-  for (const name of [...PUBLIC_SERVICES, ...PRIVATE_SERVICES]) {
+  for (const name of [
+    ...PUBLIC_SERVICES,
+    ...PRIVATE_SERVICES,
+    ...OPT_IN_SERVICES,
+  ]) {
     assert.ok(services[name], `compose must define service ${name}`);
   }
   assert.deepEqual(
     Object.keys(services).sort(),
-    [...PUBLIC_SERVICES, ...PRIVATE_SERVICES].sort(),
-    'compose must define exactly web, paper-api, postgres, redis',
+    [...PUBLIC_SERVICES, ...PRIVATE_SERVICES, ...OPT_IN_SERVICES].sort(),
+    'compose must define exactly web, paper-api, postgres, redis, bot',
   );
+  for (const name of [...PUBLIC_SERVICES, ...PRIVATE_SERVICES]) {
+    assert.equal(
+      services[name].profiles,
+      undefined,
+      `${name} must start by default; only ${OPT_IN_SERVICES.join(', ')} is opt-in`,
+    );
+  }
   for (const name of PRIVATE_SERVICES) {
     assert.equal(
       services[name].ports,
@@ -285,6 +305,90 @@ check('compose topology', () => {
   assert.deepEqual(api.depends_on?.postgres, { condition: 'service_healthy' });
   assert.deepEqual(api.depends_on?.redis, { condition: 'service_healthy' });
 });
+
+check(
+  'strategy runner is declared, gated, and cannot be aimed elsewhere',
+  () => {
+    const bot = compose?.services?.bot;
+    assert.ok(bot, 'compose must define the bot service');
+
+    // Opt-in only. The runner is incomplete; a release must not start it.
+    assert.deepEqual(
+      bot.profiles,
+      ['bot'],
+      'bot must sit behind exactly the `bot` profile so no default up starts it',
+    );
+    assert.equal(bot.ports, undefined, 'bot must not publish a port');
+    assert.equal(
+      bot.restart,
+      'unless-stopped',
+      'design §7.3: the bot restarts on its own and never takes the stack with it',
+    );
+    assert.deepEqual(bot.depends_on?.['paper-api'], {
+      condition: 'service_healthy',
+    });
+
+    // §8.1: append-only state survives a restart, on a declared named volume.
+    const volumes = bot.volumes ?? [];
+    assert.ok(volumes.length > 0, 'bot needs a state volume');
+    for (const volume of volumes) {
+      const source =
+        typeof volume === 'string' ? volume.split(':')[0] : volume.source;
+      assert.ok(
+        compose.volumes?.[source],
+        `bot volume ${source} must be a declared named volume`,
+      );
+    }
+
+    const env = bot.environment ?? {};
+
+    // §4.1: the only origins the bot knows are this deployment's own, written
+    // here as interpolations of the variables web and paper-api already require.
+    // No third variable may exist that could redirect it or widen the allow list
+    // — that is what turns "the bot cannot reach a real exchange" from a hope
+    // into a property of the deployment surface.
+    assert.match(
+      String(env.BOT_API_ORIGIN ?? ''),
+      /^\$\{PUBLIC_API_ORIGIN:\?/,
+      "BOT_API_ORIGIN must be the deployment's own PUBLIC_API_ORIGIN",
+    );
+    assert.match(
+      String(env.BOT_PUBLIC_ORIGIN ?? ''),
+      /^\$\{PUBLIC_ORIGIN:\?/,
+      "BOT_PUBLIC_ORIGIN must be the deployment's own PUBLIC_ORIGIN",
+    );
+    const widening = Object.keys(env).filter((key) =>
+      BOT_FORBIDDEN_ENV.test(key),
+    );
+    assert.deepEqual(
+      widening,
+      [],
+      'the bot receives no ledger credential, no provider credential, and no allow-list override',
+    );
+
+    // §7.4: its own channel, and never the operational one notify.sh posts to.
+    assert.equal(
+      env.DISCORD_WEBHOOK_URL,
+      undefined,
+      'the operational Discord webhook must never reach the bot (design §7.4)',
+    );
+    assert.match(
+      String(env.DISCORD_WEBHOOK_TRADE_URL ?? ''),
+      /^\$\{DISCORD_WEBHOOK_TRADE_URL:-\}$/,
+      'DISCORD_WEBHOOK_TRADE_URL must be an optional interpolation, never a literal',
+    );
+
+    // The image is the runner's own. Its Dockerfile arrives with the runner; the
+    // moment it does it answers to the same rules as web and paper-api.
+    const dockerfile = bot.build?.dockerfile;
+    assert.equal(
+      dockerfile,
+      'apps/strategy-runner/Dockerfile',
+      'bot must build from the strategy runner Dockerfile',
+    );
+    if (existsSync(path(dockerfile))) checkDockerfile(dockerfile);
+  },
+);
 
 check('shutdown grace exceeds drain deadline', () => {
   const source = read('apps/paper-api/src/lifecycle/shutdown-coordinator.ts');
@@ -438,6 +542,10 @@ check('secret-manager template holds references only', () => {
     'ADMIN_API_KEY',
     'TOSS_CLIENT_ID',
     'TOSS_CLIENT_SECRET',
+    // The runner's own Discord channel (design §7.4). Optional at run time,
+    // but the operator must be told it exists and that it is not the
+    // operational DISCORD_WEBHOOK_URL.
+    'DISCORD_WEBHOOK_TRADE_URL',
   ])
     assert.ok(declared.has(key), `secrets.env.tpl must reference ${key}`);
   assert.ok(

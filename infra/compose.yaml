@@ -105,6 +105,59 @@ services:
       moi.liveness-path: /health/live
       moi.readiness-path: /health/ready
 
+  # The strategy runner (자동매매 봇) — strategy-runner design §3, §7.3, §8.1.
+  #
+  # Declared here so the deployment contract covers it, and gated behind the
+  # `bot` profile so it does NOT start on `docker compose up` or on
+  # infra/oracle/deploy.sh: the runner is incomplete, and an unfinished trader
+  # is not something a routine release should quietly bring up. Starting it is
+  # an explicit act:
+  #
+  #     docker compose -f infra/compose.yaml --profile bot up -d bot
+  #
+  # The image is built from apps/strategy-runner/Dockerfile, which the runner's
+  # own phase adds together with the strategy configuration mount; until then
+  # the profile has nothing to start.
+  bot:
+    profiles:
+      - bot
+    build:
+      context: ..
+      dockerfile: apps/strategy-runner/Dockerfile
+    image: moi/strategy-runner:local
+    environment:
+      NODE_ENV: production
+      # §4.1/§4.2: where orders go, and the Origin the CSRF and WS-upgrade
+      # checks require. Both are this deployment's own origins — the same
+      # values web and paper-api already require — so the bot cannot be aimed
+      # at another host without editing this file. There is deliberately no
+      # allow-list variable: an environment-supplied list is exactly how the
+      # §4.1 defence would get quietly widened, so the permitted set is
+      # derived from these two and a constant inside the runner.
+      BOT_API_ORIGIN: "${PUBLIC_API_ORIGIN:?public API origin, e.g. https://api.moi.example}"
+      BOT_PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.moi.example}"
+      # §8.1: append-only NDJSON state on a named volume, so a restart resumes
+      # the session, the fill cursor and the kill switch instead of resetting.
+      BOT_STATE_DIR: /var/lib/moi-bot
+      # §7.4: the runner's own Discord channel. Never DISCORD_WEBHOOK_URL —
+      # trading noise must not bury an incident alert, and the contract checker
+      # asserts the operational webhook never reaches this service. Optional:
+      # absent, the reporter is a silent no-op and the runner still starts.
+      DISCORD_WEBHOOK_TRADE_URL: "${DISCORD_WEBHOOK_TRADE_URL:-}"
+    volumes:
+      - bot-state:/var/lib/moi-bot
+    depends_on:
+      paper-api:
+        condition: service_healthy
+    # §7.3: the bot dying may not touch paper-api, web or the ledger. The
+    # ledger is the source of truth; this state is a cache and an audit trail.
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    labels:
+      moi.role: strategy-runner
+
   postgres:
     image: postgres:17.5-alpine
     environment:
@@ -140,3 +193,4 @@ services:
 volumes:
   postgres-data: {}
   redis-data: {}
+  bot-state: {}
