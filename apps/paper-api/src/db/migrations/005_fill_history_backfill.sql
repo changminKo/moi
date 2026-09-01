@@ -1,9 +1,15 @@
--- Fill history, part 2 of 2: data and indexes.
+-- Fill history, part 2 of 4: the backfill.
 --
--- Split from 004 so the slow work runs without an AccessExclusiveLock on
--- `fills`: this migration only writes rows, taking RowExclusiveLock, which
--- readers ignore. The old release keeps serving `GET /api/v1/portfolio` — which
--- reads `fills` twice — throughout. Indexes and constraints are 006 and 007.
+-- Split from 004 so the slow work issues no AccessExclusiveLock of its own:
+-- these statements only write rows, taking RowExclusiveLock, which readers
+-- ignore. Indexes and constraints are 006 and 007.
+--
+-- This does not mean readers run free during the first deploy — 004's lock is
+-- still held across this file, because the whole set shares one transaction
+-- (see 004's header, spec §16.37, issue #47). What the split does buy: the
+-- weakest possible lock per statement, so the policy fix in #47
+-- (`disableTransactions`) makes these files individually cheap without
+-- rewriting them.
 set lock_timeout = '3s';
 
 update fills f set session_id = o.session_id

@@ -1,11 +1,15 @@
--- Fill history, part 3: indexes and constraints.
+-- Fill history, part 3 of 4: indexes and constraints.
 --
--- Separate from the backfill so that migration takes no AccessExclusiveLock:
+-- Separate from the backfill so that file issues no AccessExclusiveLock:
 -- `create index` blocks writers but not readers, and the constraint statements
 -- here are catalog-only. The foreign key is added NOT VALID on purpose — the
 -- validating scan runs in 007, where it takes ShareUpdateExclusiveLock and
--- blocks nobody, instead of scanning under the AccessExclusiveLock this
--- transaction holds until it commits.
+-- blocks nobody, instead of scanning under the AccessExclusiveLock that adding
+-- the constraint takes.
+--
+-- Note this file does take AccessExclusiveLock on `orders`, not just `fills`,
+-- to attach the unique constraint. It is catalog-only and brief, but on the
+-- first deploy it is held to the end of 007 with the rest (spec §16.37).
 set lock_timeout = '3s';
 
 create unique index fills_sequence_idx on fills (fill_sequence);

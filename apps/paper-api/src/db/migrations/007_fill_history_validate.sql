@@ -1,4 +1,4 @@
--- Fill history, part 4: validate the pairing.
+-- Fill history, part 4 of 4: validate the pairing.
 --
 -- `validate constraint` scans the table under ShareUpdateExclusiveLock, which
 -- blocks neither readers nor writers. Doing it here rather than in 006 keeps

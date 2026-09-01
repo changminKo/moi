@@ -1,11 +1,20 @@
--- Fill history, part 1 of 2: catalog-only DDL.
+-- Fill history, part 1 of 4: catalog-only DDL.
 --
 -- Everything here is a catalog change — no table rewrite, no full-table scan,
--- no data. Kysely runs a migration file in one transaction, and every `alter
--- table` holds AccessExclusiveLock until that transaction commits, so anything
--- slow in this file would block readers of `fills` for its whole duration. The
--- backfill and the index builds therefore live in 005, which takes no
--- AccessExclusiveLock while it works.
+-- no data. That is what keeps this file's AccessExclusiveLock brief: the slow
+-- work (backfill, index builds, constraint validation) lives in 005-007, each
+-- chosen to take the weakest lock that statement can take.
+--
+-- Read the split as per-statement lock strength, NOT as lock duration within
+-- one deploy. Kysely's Migrator runs every pending migration in a SINGLE
+-- transaction (`migrator.js:442-445`; `disableTransactions` is not set), so on
+-- the deploy that first applies 004-007 the AccessExclusiveLock taken here is
+-- held until 007 commits, and splitting the files cannot shorten it. Measured
+-- reader stall = total migration time, linear in rows: 100 rows 10 ms, 30k
+-- 0.67 s, 300k 7.6 s. Production `fills` is ~100 rows, so ~10 ms today. See
+-- spec §16.37 and issue #47 — moving to `disableTransactions` or to
+-- one-heavy-migration-per-release is a policy call for every future migration,
+-- deliberately not made here.
 --
 -- `lock_timeout` bounds the wait for the locks below: a migration that cannot
 -- get them promptly fails the deploy instead of queueing ahead of live traffic
