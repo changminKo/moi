@@ -810,33 +810,40 @@ export class ProductionRuntime {
         resolveMarketIncidents: async ({ recoveryEpoch }) => {
           const resolved: string[] = [];
           const remaining: string[] = [];
-          for (const incident of await this.#incidents.active()) {
-            if (
-              incident.scope.type !== 'MARKET' ||
-              incident.scope.id !== market
-            )
-              continue;
-            if (OPERATOR_ONLY_CAUSES.has(incident.causeCode)) {
-              remaining.push(incident.causeCode);
-              continue;
+          try {
+            const scope = { type: 'MARKET', id: market } as const;
+            for (const incident of await this.#incidents.active(scope)) {
+              if (OPERATOR_ONLY_CAUSES.has(incident.causeCode)) {
+                remaining.push(incident.causeCode);
+                continue;
+              }
+              const outcome = await this.#incidents.resolveCas({
+                incidentId: incident.incidentId,
+                version: incident.version,
+                recoveryEpoch: incident.recoveryEpoch,
+              });
+              (outcome === undefined ? remaining : resolved).push(
+                incident.causeCode,
+              );
             }
-            const outcome = await this.#incidents.resolveCas({
-              incidentId: incident.incidentId,
-              version: incident.version,
-              recoveryEpoch: incident.recoveryEpoch,
-            });
-            (outcome === undefined ? remaining : resolved).push(
-              incident.causeCode,
-            );
-          }
-          await this.#refreshIncidents();
-          if (resolved.length > 0 || remaining.length > 0)
-            this.#log('incident.recovery_resolved', {
+            await this.#refreshIncidents();
+            if (resolved.length > 0 || remaining.length > 0)
+              this.#log('incident.recovery_resolved', {
+                market,
+                recoveryEpoch: recoveryEpoch.toString(),
+                resolved,
+                remaining,
+              });
+          } catch (error) {
+            // The feed recovered either way. A ledger hiccup while clearing
+            // rows must not turn a good recovery into another degrade — the
+            // rows stay ACTIVE, the market keeps reporting DEGRADED, and the
+            // next recovery tries again.
+            this.#log('incident.recovery_resolve_failed', {
               market,
-              recoveryEpoch: recoveryEpoch.toString(),
-              resolved,
-              remaining,
+              error: error instanceof Error ? error.message : String(error),
             });
+          }
           // The retry budget this market spent is no longer spent, the same
           // hold the admin resolve path lifts.
           const runtime = this.markets.get(market);
