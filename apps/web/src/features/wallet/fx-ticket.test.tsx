@@ -5,7 +5,9 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
+import i18next from 'i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../lib/i18n';
 import { FxTicket, formatKrwPerUsd } from './fx-ticket';
 
 afterEach(cleanup);
@@ -42,8 +44,11 @@ describe('FxTicket', () => {
     expect(await screen.findByText(/1 USD ≈ 1,428\.57 KRW/)).toBeVisible();
     // Amounts are grouped and carry their currency, matching the input field
     // right above the quote block and the wallet panel's ₩/$ convention.
+    // The fraction is capped to 2 places for display ("0.6993" -> "0.70",
+    // shown without a trailing zero) — the exact wire value is untouched;
+    // only the FX ticket's own render trims it.
     expect(screen.getByText(/₩1,000/)).toBeVisible();
-    expect(screen.getByText(/\$0\.6993/)).toBeVisible();
+    expect(screen.getByText(/\$0\.7$/)).toBeVisible();
     const submit = screen.getByRole('button', { name: /convert/i });
     fireEvent.click(submit);
     fireEvent.click(submit);
@@ -69,7 +74,8 @@ describe('FxTicket', () => {
     fireEvent.click(screen.getByRole('button', { name: /quote/i }));
     expect(await screen.findByText(/₩333,333/)).toBeVisible();
     expect(screen.getByText(/₩0/)).toBeVisible();
-    expect(screen.getByText(/\$233\.3331/)).toBeVisible();
+    // "233.3331" caps to 2 fraction digits for display, not 4.
+    expect(screen.getByText(/\$233\.33$/)).toBeVisible();
   });
 
   it('rejects non-positive amounts', () => {
@@ -124,6 +130,38 @@ describe('FxTicket', () => {
       await screen.findByText(new RegExp(tinyRate.replaceAll('.', '\\.'))),
     ).toBeVisible();
     expect(screen.queryByText(/≈/)).not.toBeInTheDocument();
+  });
+});
+
+describe('FxTicket in Korean', () => {
+  afterEach(async () => {
+    // Global test setup forces 'en'; other describes in this file assume it.
+    await i18next.changeLanguage('en');
+  });
+
+  it('renders the reworded send/receive labels, not the old jargon', async () => {
+    await i18next.changeLanguage('ko');
+    const api = {
+      post: vi.fn().mockResolvedValueOnce({
+        quoteId: 'q6',
+        rate: '0.0007',
+        fee: '0',
+        sourceAmount: '333333',
+        destinationAmount: '233.3331',
+        expiresAt: '2099-01-01T00:00:00Z',
+      }),
+    };
+    render(<FxTicket apiClient={api as never} />);
+    fireEvent.change(screen.getByLabelText('금액'), {
+      target: { value: '333333' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '환율 조회' }));
+    expect(await screen.findByText(/보내는 금액.*₩333,333/)).toBeVisible();
+    expect(screen.getByText(/받는 금액.*\$233\.33$/)).toBeVisible();
+    expect(screen.getByText(/1 USD ≈ 1,428\.57 KRW/)).toBeVisible();
+    // The retired labels must not linger anywhere in the panel.
+    expect(screen.queryByText('출금')).not.toBeInTheDocument();
+    expect(screen.queryByText('수취')).not.toBeInTheDocument();
   });
 });
 
