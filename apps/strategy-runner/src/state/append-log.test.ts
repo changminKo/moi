@@ -136,6 +136,27 @@ describe('AppendLog', () => {
     expect(() => readAppendLog(path)).toThrow(/line 2/u);
   });
 
+  /**
+   * What a spliced line does, pinned because it is easy to assume the worst
+   * about it. Two records run together end with the second one's newline, so the
+   * damage sits in `lines` and takes the strict path — it fails closed, it is
+   * not mistaken for a torn tail. The tail rule only reaches a final line with
+   * no newline at all.
+   *
+   * This is a property of the reader, not a licence for the writer: a spliced
+   * line that happens to land last *would* be discarded, which is why
+   * `AppendLog` refuses to append after an incomplete record rather than relying
+   * on where the damage falls.
+   */
+  it('fails closed on two records spliced into one line', () => {
+    const path = join(scratch(), 'records.ndjson');
+
+    writeFileSync(path, '{"n":1}\n{"n":2{"n":3}\n');
+
+    expect(() => readAppendLog(path)).toThrow(DomainError);
+    expect(() => readAppendLog(path)).toThrow(/line 2/u);
+  });
+
   it('rejects a record that is not a JSON object, on both sides', () => {
     const directory = scratch();
     const path = join(directory, 'records.ndjson');

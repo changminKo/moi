@@ -6,10 +6,10 @@ import {
   readFileSync,
   renameSync,
   unlinkSync,
-  writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { DomainError } from '@moi/trading-core';
+import { writeAll } from './write-all.js';
 
 /**
  * The mutable half of the state store: one JSON object, last writer wins.
@@ -111,11 +111,22 @@ export class JsonCell {
     const fd = openSync(temporary, 'w', this.#mode);
 
     try {
-      writeSync(fd, serialised);
+      // To completion: a short write would truncate the temporary file, and the
+      // rename below would then promote that truncation over a perfectly good
+      // cell. See `writeAll`.
+      writeAll(fd, Buffer.from(serialised, 'utf8'));
       fsyncSync(fd);
-    } finally {
+    } catch (error) {
       closeSync(fd);
+      // The temporary file holds a fragment and the real cell is untouched, so
+      // the previous value still stands. Removing the fragment keeps the next
+      // write from having to reason about what it finds.
+      unlinkSync(temporary);
+
+      throw error;
     }
+
+    closeSync(fd);
 
     try {
       renameSync(temporary, this.#path);

@@ -355,6 +355,71 @@ describe('RiskGate limits, which cap entries only', () => {
       reason: /holding 11 of KR:005930/u,
     });
   });
+
+  /**
+   * The symptom the mixed-side sum produced, at the level an operator sees it:
+   * enter at the daily limit, close the whole position, and a legitimate
+   * re-entry is still refused for the rest of the day — on a budget the round
+   * trip never actually spent.
+   */
+  it('lets a re-entry through after the position was closed the same day', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxDailyNotional: '150000' },
+    });
+
+    state.appendDecision({
+      decisionId: 'd-1',
+      at: '2026-09-02T01:00:00.000Z',
+      strategy: 'samsung',
+      kind: 'place',
+      reason: 'golden-cross',
+      intent: BUY,
+      notional: '70000',
+    });
+    state.appendDecision({
+      decisionId: 'd-2',
+      at: '2026-09-02T01:30:00.000Z',
+      strategy: 'samsung',
+      kind: 'place',
+      reason: 'dead-cross',
+      intent: SELL,
+      notional: '70000',
+    });
+
+    // Entries total 70000, not 140000, so a second 70000 entry fits under the
+    // 150000 limit.
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toStrictEqual({ allowed: true });
+  });
+
+  it('still refuses once the entries themselves reach the limit', async () => {
+    const { gate, state } = gateWith({
+      limits: { maxDailyNotional: '150000' },
+    });
+
+    for (const [index, at] of [
+      '2026-09-02T01:00:00.000Z',
+      '2026-09-02T01:30:00.000Z',
+    ].entries()) {
+      state.appendDecision({
+        decisionId: `d-${index}`,
+        at,
+        strategy: 'samsung',
+        kind: 'place',
+        reason: 'golden-cross',
+        intent: BUY,
+        notional: '70000',
+      });
+    }
+
+    await expect(
+      gate.evaluate({ intent: BUY, tick: TICK, portfolio: PORTFOLIO }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: /210000 would exceed today's notional limit of 150000/u,
+    });
+  });
 });
 
 describe('RiskGate never traps a position', () => {
