@@ -54,6 +54,12 @@ import {
  * `sessionId`, which is the same divergence in the other direction and wants
  * closing when the cache write lands.
  */
+// TODO(rebase): `feat/fill-currency` puts the snapshot's `activeOrders[].fills`
+// through `fillRecord()`, so a fill row widens from six fields to the whole
+// `FillRecord` and `recoveryFill` becomes `isRecoveryFill`. This file's
+// fixtures and this key list have to be re-read against that shape when this
+// branch is rebased onto it — otherwise these stay red for a reason that has
+// nothing to do with the cache.
 const REST_SNAPSHOT_KEYS = [
   'accountSequence',
   'activeOrders',
