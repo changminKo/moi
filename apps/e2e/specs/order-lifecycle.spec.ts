@@ -112,7 +112,19 @@ test('cancels the OCO sibling and releases its reservation', async ({
   await paperSystem.triggerOco({ orderId, price: '210' });
   await expect(page.getByText('AAPL FILLED')).toHaveCount(2);
   await expect(page.getByText('AAPL CANCELLED')).toBeVisible();
-  await expect(page.getByRole('row', { name: /AAPL 0 0 0/ })).toBeVisible();
+  // The ledger keeps the sold-out row (quantity 0, the average cost it was
+  // held at); the screen stops calling it a holding and reports it as closed,
+  // so "held today, now closed" still reads differently from "never held".
+  await expect(
+    page
+      .getByRole('region', { name: 'Positions', exact: true })
+      .getByText('AAPL'),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByRole('region', { name: 'Closed positions' })
+      .getByRole('row', { name: /AAPL/ }),
+  ).toBeVisible();
   const liveReservations = await page.evaluate(async () => {
     const response = await fetch('/api/v1/portfolio');
     const snapshot = (await response.json()) as {
@@ -121,4 +133,74 @@ test('cancels the OCO sibling and releases its reservation', async ({
     return snapshot.reservations;
   });
   expect(liveReservations).toEqual([]);
+});
+
+test('spans both position panels across the two-column portfolio grid', async ({
+  page,
+  paperSystem,
+}) => {
+  // 1024px is the two-column breakpoint in `portfolio-page.css`; pin a wider
+  // viewport here so the measurement below is the same under the desktop and
+  // the mobile project.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/trade');
+  await selectInstrument(page, 'AAPL');
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Price').fill('200');
+  await submitOrder(page);
+  await paperSystem.fill({
+    orderId: await paperSystem.latestOrderId(),
+    quantity: '2',
+    price: '200',
+  });
+  await page.getByLabel('Sell').check();
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Price').fill('200');
+  await submitOrder(page);
+  await paperSystem.fill({
+    orderId: await paperSystem.latestOrderId(),
+    quantity: '2',
+    price: '200',
+  });
+  await page.getByRole('link', { name: 'Portfolio' }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Closed positions' })
+      .getByRole('row', { name: /AAPL/ }),
+  ).toBeVisible();
+
+  // jsdom does no layout, so nothing but a real viewport can see this. The
+  // holdings and closed panels are two sibling sections rather than the single
+  // one the grid rule was written against, and both belong to the same band —
+  // if only the first gets the whole row, the closed table is squeezed into
+  // half a column beside the open orders and the fill history is left alone in
+  // the other half.
+  const widths = await page.evaluate(() => {
+    const width = (selector: string) =>
+      document.querySelector(selector)?.getBoundingClientRect().width ?? null;
+    return {
+      held: width('[aria-labelledby="positions-title"]'),
+      closed: width('[aria-labelledby="closed-positions-title"]'),
+      orders: width('[aria-labelledby="open-orders-title"]'),
+    };
+  });
+  expect(widths.held, 'the portfolio must render a holdings panel').not.toBe(
+    null,
+  );
+  expect(widths.orders, 'the portfolio must render an orders panel').not.toBe(
+    null,
+  );
+  expect(
+    widths.closed,
+    'the closed-position panel must span the row like the holdings panel',
+  ).toBeCloseTo(widths.held ?? 0, 0);
+  // The control for the assertion above: it would also hold in a one-column
+  // grid, where every panel is the full width. A normal panel must be narrower
+  // for the two-column layout to be the thing that was measured.
+  expect(
+    widths.orders ?? 0,
+    'the two-column grid must actually be in force at 1280px',
+  ).toBeLessThan((widths.held ?? 0) - 1);
 });

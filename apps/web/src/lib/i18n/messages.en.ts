@@ -140,6 +140,10 @@ export const en = {
   'positions.reserved': 'Reserved',
   'positions.total': 'Total',
   'positions.avgCost': 'Avg cost',
+  'positions.closedTitle': 'Closed positions',
+  'positions.closedCaption':
+    'Symbols sold in full, with the average cost they were held at',
+  'positions.closedAvgCost': 'Avg cost held at',
 
   'orders.title': 'Open orders',
   'orders.empty': 'No open orders.',
