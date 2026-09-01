@@ -133,7 +133,7 @@ export function TradePage({
           {selected && !selected.tradable && (
             <p role="alert">{t('reason.SYMBOL_NOT_TRADABLE')}</p>
           )}
-          <QuotePanel quote={quote} />
+          <QuotePanel quote={quote} instrument={selected} />
         </div>
         <div className="trade-col trade-col-ticket">
           {selected && (
