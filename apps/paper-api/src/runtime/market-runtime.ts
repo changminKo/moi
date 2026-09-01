@@ -12,12 +12,18 @@ import type {
   MarketEnvelope,
   MarketStateStore,
 } from '../market-data/market-state-store.js';
+import { projectQuote } from '../market-data/quote-projection.js';
 import {
   type RecoveryClock,
   RecoveryCoordinator,
   type RecoveryOutcome,
   type SubscriptionDeclaration,
 } from '../market-data/recovery-coordinator.js';
+import {
+  type SymbolQuoteState,
+  withBook,
+  withTrade,
+} from '../market-data/symbol-quote-state.js';
 import type { MetricsRegistry } from '../observability/metrics.js';
 import { ReconnectSupervisor } from './reconnect-supervisor.js';
 
@@ -33,7 +39,6 @@ export interface MarketIncidentPort {
     readonly causeCode: string;
     readonly symbol?: string;
     readonly recoveryEpoch: bigint | null;
-    readonly manual?: boolean;
   }): Promise<unknown>;
 }
 
@@ -73,6 +78,8 @@ export interface MarketRuntimeDeps {
   readonly log: LogFn;
   readonly clock?: RecoveryClock;
   readonly reconnectDelayMs?: (attempt: number) => number;
+  /** Delay before the n-th retry made while the failure window is exhausted. */
+  readonly rearmDelayMs?: (rearm: number) => number;
   readonly keepaliveIntervalMs?: number;
   readonly pongTimeoutMs?: number;
   /** Fired when this market's provider transport opens or closes (§12.2 gauge). */
@@ -153,15 +160,17 @@ export class MarketRuntime {
     this.supervisor = new ReconnectSupervisor({
       delayMs:
         deps.reconnectDelayMs ?? ((attempt) => reconnectDelayMs(attempt)),
+      ...(deps.rearmDelayMs ? { rearmDelayMs: deps.rearmDelayMs } : {}),
       onExhausted: async () => {
         await deps.incidents.activate({
           market: deps.market,
           causeCode: 'RECOVERY_RETRY_EXHAUSTED',
           recoveryEpoch: null,
-          manual: true,
         });
         deps.log('recovery.exhausted', { market: deps.market });
       },
+      onRearm: (delayMs, rearm) =>
+        deps.log('recovery.rearmed', { market: deps.market, delayMs, rearm }),
     });
   }
 
@@ -206,6 +215,7 @@ export class MarketRuntime {
   async #recoverOnce(): Promise<boolean> {
     if (this.#recovering) return false;
     this.#recovering = true;
+    const wasExhausted = this.supervisor.exhausted;
     const signal = this.#controller.signal;
     const startedAt = Date.now();
     this.#d.health.beginRecovery();
@@ -237,6 +247,7 @@ export class MarketRuntime {
       this.#startLoop();
       this.#startKeepalive();
       this.#d.onTransport?.('connected');
+      if (wasExhausted) this.#clearRetryHold();
       return true;
     } catch (error) {
       if (isAbort(error) || signal.aborted) throw error;
@@ -249,12 +260,26 @@ export class MarketRuntime {
       });
       // The health machine activates the MARKET incident (once per degrade).
       await this.#d.health.onClose(causeCode);
-      const exhausted = this.supervisor.recordFailure();
-      if (!exhausted) this.supervisor.schedule(() => this.#recoverOnce());
+      // An exhausted window slows the retry down to the re-arm interval; it
+      // never stops it. An operator who never comes is not a recovery plan.
+      this.supervisor.recordFailure();
+      this.supervisor.schedule(() => this.#recoverOnce());
       return false;
     } finally {
       this.#recovering = false;
     }
+  }
+
+  /**
+   * The feed is back on its own, so the retry hold goes with it. The
+   * `RECOVERY_RETRY_EXHAUSTED` row that announced the hold is resolved by the
+   * general policy in §16.35 — `markHealthy` clears every automatically
+   * resolvable row this market owns, whichever process opened it, which also
+   * covers the restarted process this in-memory path cannot reach.
+   */
+  #clearRetryHold(): void {
+    this.supervisor.resume();
+    this.#d.log('recovery.hold_cleared', { market: this.#d.market });
   }
 
   async #applyRecovery(outcome: RecoveryOutcome): Promise<void> {
@@ -313,9 +338,21 @@ export class MarketRuntime {
     const store = this.#d.stateStore;
     try {
       if (event.kind === 'trade') {
+        // The slot keeps both shapes (`SymbolQuoteState`); the engine keeps
+        // receiving the trade on its own, as its envelope contract expects.
         const envelope = store.applyEvent({
           symbol: event.symbol,
           version: store.currentVersion + 1n,
+          payload: withTrade(
+            store.get(event.symbol) as SymbolQuoteState | undefined,
+            {
+              price: event.price,
+              sourceTimestamp: event.sourceTimestamp,
+            },
+          ),
+        });
+        await this.#d.engine.onTrade({
+          ...envelope,
           payload: {
             market: event.market,
             symbol: event.symbol,
@@ -323,21 +360,24 @@ export class MarketRuntime {
             sourceTimestamp: event.sourceTimestamp,
           },
         });
-        await this.#d.engine.onTrade(envelope);
+        // A trade moves the displayed price (`quotePrice` prefers the last
+        // trade), so subscribers hear about it too — not only about books.
+        this.#publishQuote(event.symbol, envelope);
       } else if (event.kind === 'orderBook') {
-        const envelope = store.applyEvent({
+        const stored = store.applyEvent({
           symbol: event.symbol,
           version: store.currentVersion + 1n,
-          payload: event.book,
-        }) as MarketEnvelope<OrderBookSnapshot>;
-        await this.#d.engine.onOrderBook(envelope);
-        this.#d.hub.publishQuote({
-          market: event.market,
-          symbol: event.symbol,
-          recoveryEpoch: envelope.recoveryEpoch,
-          marketDataVersion: envelope.marketDataVersion,
-          payload: event.book,
+          payload: withBook(
+            store.get(event.symbol) as SymbolQuoteState | undefined,
+            event.book,
+          ),
         });
+        const envelope = {
+          ...stored,
+          payload: event.book,
+        } as MarketEnvelope<OrderBookSnapshot>;
+        await this.#d.engine.onOrderBook(envelope);
+        this.#publishQuote(event.symbol, envelope);
       }
       this.#rejections = 0;
     } catch (error) {
@@ -374,6 +414,38 @@ export class MarketRuntime {
     await this.#d.health.onClose(causeCode);
     this.supervisor.schedule(() => this.#recoverOnce(), {
       serverShutdown: reason === 'server-shutdown',
+    });
+  }
+
+  /**
+   * The `quote` frame subscribers receive. Its payload is `projectQuote` —
+   * the very same builder the REST answer uses — so the snapshot a browser
+   * paints from and the frames it stays live on cannot be two different
+   * shapes (`docs/api/quote-contract.md`, spec §16.36). The frame used to
+   * carry the bare `OrderBookSnapshot`, with no price and no instant, which
+   * left the web casting the payload onto a shape it was not and left the
+   * panel's chart with a single point forever.
+   */
+  #publishQuote(
+    symbol: string,
+    envelope: {
+      readonly recoveryEpoch: bigint;
+      readonly marketDataVersion: bigint;
+    },
+  ): void {
+    this.#d.hub.publishQuote({
+      market: this.#d.market,
+      symbol,
+      recoveryEpoch: envelope.recoveryEpoch,
+      marketDataVersion: envelope.marketDataVersion,
+      payload: projectQuote({
+        market: this.#d.market,
+        symbol,
+        state: this.#d.stateStore.get(symbol) as SymbolQuoteState | undefined,
+        health: this.#d.health.state,
+        recoveryEpoch: envelope.recoveryEpoch,
+        marketDataVersion: envelope.marketDataVersion,
+      }),
     });
   }
 

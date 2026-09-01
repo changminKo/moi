@@ -60,6 +60,37 @@
   color: var(--color-down);
 }
 
+/* The estimate sits between the fields and the submit button, in the body
+   face and muted: it is context for the order, not a value the reader
+   entered. `:empty` keeps the live region mounted while collapsing its box, so
+   nothing shifts as the estimate appears. */
+.order-estimate {
+  margin: var(--space-4) 0 0;
+  color: var(--color-muted);
+  font-size: var(--type-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.order-estimate:empty {
+  display: none;
+}
+
+/* The support handle under a rejection: kept, but subordinate to the sentence
+   the reader actually reads, and outside the alert so assistive tech
+   announces the reason rather than an opaque id. */
+.order-request-id {
+  margin: var(--space-1) 0 0;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+#order-outcome {
+  margin: var(--space-3) 0 0;
+  color: var(--color-ok);
+  font-size: var(--type-sm);
+}
+
 .order-ticket button[type="submit"] {
   margin-top: var(--space-5);
 }

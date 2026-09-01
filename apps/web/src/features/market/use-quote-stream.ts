@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { QuoteSnapshot } from '../../lib/api-types';
+import { applyQuoteFrame } from '../../lib/quote-frame';
 import { readRuntimeConfig } from '../../lib/runtime-config';
 import { parseUserStreamMessage } from '../../lib/user-stream';
 
@@ -100,6 +101,15 @@ export function useQuoteStream(
         attempt = 0;
       };
       next.onmessage = (event) => {
+        // This effect is gone: the instrument changed or the panel unmounted.
+        // A closed socket can still fire a frame it had already queued, and
+        // the `quote` guard below compares against *this* effect's symbol —
+        // the one the reader has just left — so it would pass. Applying it
+        // would flip the whole panel back to the previous instrument, since
+        // `applyQuoteFrame` takes the market and symbol from the frame. Its
+        // cross-instrument guard cannot help here either: right after a
+        // switch the quote is `null`, so there is nothing to compare against.
+        if (disposed) return;
         let message: ReturnType<typeof parseUserStreamMessage>;
         try {
           message = parseUserStreamMessage(event.data);
@@ -118,7 +128,10 @@ export function useQuoteStream(
         ) {
           // A push always wins over an in-flight snapshot for this symbol.
           request.current += 1;
-          setQuote(message.payload as unknown as QuoteSnapshot);
+          // The frame is narrowed onto the quote on screen, never cast onto
+          // it: the payload is a book, the snapshot is a price, and a frame
+          // that does not narrow is dropped instead of unmounting the panel.
+          setQuote((current) => applyQuoteFrame(current, message) ?? current);
         }
       };
       next.onclose = () => {

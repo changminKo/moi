@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import type { LeaderLease } from '../market-data/leader-lease.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
+import {
+  quotePrice,
+  referencePrice,
+  type SymbolQuoteState,
+} from '../market-data/symbol-quote-state.js';
 import { MetricsRegistry } from '../observability/metrics.js';
 import {
   KEEPALIVE_INTERVAL_MS,
@@ -212,11 +217,10 @@ describe('MarketRuntime', () => {
     // The health machine holds one MARKET incident per degrade; every failed attempt is logged.
     expect(codes.filter((c) => c === 'PROVIDER_AUTH_FAILED')).toHaveLength(1);
     expect(connectSpy).toHaveBeenCalledTimes(3);
+    // The MANUAL label is applied by `MANUAL_CAUSES` in the incident
+    // repository, from the cause code — the port carries no `manual` flag.
     expect(incidents.activate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        causeCode: 'RECOVERY_RETRY_EXHAUSTED',
-        manual: true,
-      }),
+      expect.objectContaining({ causeCode: 'RECOVERY_RETRY_EXHAUSTED' }),
     );
     expect(health.state).toBe('DEGRADED');
     expect(runtime.supervisor.exhausted).toBe(true);
@@ -233,6 +237,54 @@ describe('MarketRuntime', () => {
     expect(
       logs.filter((l) => l.event === 'recovery.failed').length,
     ).toBeGreaterThanOrEqual(3);
+    await runtime.close();
+  });
+
+  it('keeps retrying after the hold and clears it without an operator (A3, §16.34)', async () => {
+    const { runtime, incidents, connectSpy, health, logs, stream } = build({
+      // The production re-arm is 30 s doubling to 5 min; the shape is what is
+      // under test, so the test runs it at millisecond scale.
+      rearmDelayMs: () => 5,
+    });
+    connectSpy.mockRejectedValue(
+      Object.assign(new Error('nope'), { statusCode: 401 }),
+    );
+    await runtime.connect(new AbortController().signal);
+    await vi.waitFor(() => expect(runtime.supervisor.exhausted).toBe(true), {
+      timeout: 3_000,
+    });
+    const attemptsAtHold = connectSpy.mock.calls.length;
+
+    // No operator touches anything: the supervisor re-arms on its own.
+    await vi.waitFor(
+      () =>
+        expect(connectSpy.mock.calls.length).toBeGreaterThan(attemptsAtHold),
+      { timeout: 3_000 },
+    );
+    expect(
+      logs.filter((l) => l.event === 'recovery.rearmed').length,
+    ).toBeGreaterThanOrEqual(1);
+    // The hold is raised once, not once per re-armed failure.
+    expect(
+      incidents.activate.mock.calls.filter(
+        (c) =>
+          (c[0] as { causeCode: string }).causeCode ===
+          'RECOVERY_RETRY_EXHAUSTED',
+      ),
+    ).toHaveLength(1);
+
+    connectSpy.mockImplementation((signal) =>
+      FakeMarketData.prototype.connect.call(stream, signal),
+    );
+    await vi.waitFor(() => expect(health.state).toBe('HEALTHY'), {
+      timeout: 3_000,
+    });
+    expect(runtime.supervisor.exhausted).toBe(false);
+    expect(logs.some((l) => l.event === 'recovery.hold_cleared')).toBe(true);
+    // Resolving the `RECOVERY_RETRY_EXHAUSTED` row itself is §16.35's job, not
+    // this runtime's: `markHealthy` clears every automatically resolvable row
+    // the market owns. Covered by `production-runtime.integration.test.ts`
+    // "incident resolution and the placement gate".
     await runtime.close();
   });
 
@@ -413,6 +465,151 @@ describe('MarketRuntime', () => {
     expect(transports).toEqual(['connected']);
     stream.emitTransportClosed('gone');
     await vi.waitFor(() => expect(transports).toContain('closed'));
+    await runtime.close();
+  });
+
+  // One symbol slot used to hold whichever frame arrived last, so a trade
+  // erased the book (and a book erased the trade). The quote then reported a
+  // price or `null` depending on frame timing, and MARKET BUY placement was
+  // rejected with MARKET_DATA_DEGRADED about half the time.
+  it('keeps the book and the last trade in one slot whatever the frame order', async () => {
+    const { runtime, stream, stateStore, engine } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(1));
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onTrade).toHaveBeenCalledTimes(1));
+
+    const afterTrade = stateStore.get('AAPL') as SymbolQuoteState;
+    expect(quotePrice(afterTrade)).toBe('100.25');
+    expect(referencePrice(afterTrade)).toBe('101');
+    // The recovery path reads `.book` off the same slot (#applyRecovery).
+    expect(afterTrade.book).toMatchObject({ asks: BOOK.asks });
+
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: { ...BOOK, asks: [{ price: '102', volume: '10' }] },
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(2));
+    const afterBook = stateStore.get('AAPL') as SymbolQuoteState;
+    expect(quotePrice(afterBook)).toBe('100.25');
+    expect(referencePrice(afterBook)).toBe('102');
+    await runtime.close();
+  });
+
+  /**
+   * The browser paints the quote panel from `GET …/quote` and then keeps it
+   * live from this frame, so the frame has to state the same things the REST
+   * projection does. It used to carry the bare `OrderBookSnapshot` — no
+   * price, no instant — which is why the panel's chart never collected a
+   * second point and why the web had to cast the payload to a shape it was
+   * not (spec §16.36).
+   */
+  it('states the price and the instant on the quote frame, not just the book', async () => {
+    const { runtime, stream, hub } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(hub.publishQuote).toHaveBeenCalledTimes(2));
+
+    const frames = (hub.publishQuote.mock.calls as unknown[][]).map(
+      (call) =>
+        call[0] as {
+          market: string;
+          symbol: string;
+          recoveryEpoch: bigint;
+          payload: Record<string, unknown>;
+        },
+    );
+    for (const frame of frames) {
+      expect(frame.market).toBe('US');
+      expect(frame.symbol).toBe('AAPL');
+      expect(frame.recoveryEpoch).toBe(3n);
+      // Decimal strings, never JS numbers.
+      expect(typeof frame.payload.price).toBe('string');
+      expect(new Date(frame.payload.asOf as string).getTime()).not.toBeNaN();
+    }
+    // A trade moves the displayed price, so it has to reach subscribers.
+    expect(frames[0]?.payload).toMatchObject({ price: '100.25' });
+    // The book frame keeps the last trade as the price (`quotePrice`) and
+    // carries the depth the panel draws.
+    expect(frames[1]?.payload).toMatchObject({
+      price: '100.25',
+      currency: 'USD',
+      bids: BOOK.bids,
+      asks: BOOK.asks,
+    });
+  });
+
+  it('publishes a quote frame per trade even with no book yet', async () => {
+    const { runtime, stream, hub } = build();
+    await runtime.connect(new AbortController().signal);
+    for (const price of ['100.25', '100.30', '100.10']) {
+      stream.emitTrade({
+        market: 'US',
+        symbol: 'AAPL',
+        price,
+        volume: '5',
+        sourceTimestamp: null,
+      });
+    }
+    await vi.waitFor(() => expect(hub.publishQuote).toHaveBeenCalledTimes(3));
+
+    const prices = (hub.publishQuote.mock.calls as unknown[][]).map(
+      (call) => (call[0] as { payload: { price: string } }).payload.price,
+    );
+    expect(prices).toEqual(['100.25', '100.30', '100.10']);
+  });
+
+  it('hands the engine the raw trade and book payloads, not the merged slot', async () => {
+    const { runtime, stream, engine } = build();
+    await runtime.connect(new AbortController().signal);
+    stream.emitTrade({
+      market: 'US',
+      symbol: 'AAPL',
+      price: '100.25',
+      volume: '5',
+      sourceTimestamp: null,
+    });
+    stream.emitOrderBook({
+      market: 'US',
+      symbol: 'AAPL',
+      book: BOOK,
+      sourceTimestamp: null,
+    });
+    await vi.waitFor(() => expect(engine.onOrderBook).toHaveBeenCalledTimes(1));
+    const trade = (engine.onTrade.mock.calls as unknown[][])[0]?.[0] as {
+      payload: { symbol: string; price: string };
+    };
+    expect(trade.payload).toMatchObject({ symbol: 'AAPL', price: '100.25' });
+    const book = (engine.onOrderBook.mock.calls as unknown[][])[0]?.[0] as {
+      payload: { asks: unknown[] };
+    };
+    expect(book.payload).toMatchObject({ asks: BOOK.asks });
     await runtime.close();
   });
 });

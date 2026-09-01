@@ -7,9 +7,15 @@ import {
 } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { queryClient } from '../lib/query-client';
 import { TradePage } from './trade-page';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // The page reads the wallets from the shared query cache; without this a
+  // later test would render the balances an earlier one had cached.
+  queryClient.clear();
+});
 
 const api = {
   get: vi.fn(async (path: string) => {
@@ -17,6 +23,7 @@ const api = {
       return [
         { market: 'US', symbol: 'AAPL', name: 'Apple', tradable: true },
         { market: 'US', symbol: 'XYZ', name: 'Private', tradable: false },
+        { market: 'KR', symbol: '005930', name: '005930', tradable: true },
       ];
     if (path.includes('/quote'))
       return {
@@ -60,6 +67,19 @@ function WithHistoryControls({ children }: { children: React.ReactNode }) {
 }
 
 describe('TradePage', () => {
+  it('omits the duplicate parenthesized symbol for a fallback name', async () => {
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade']}>{children}</MemoryRouter>
+      ),
+    });
+
+    expect(
+      await screen.findByRole('button', { name: /^005930$/ }),
+    ).toBeVisible();
+    expect(screen.queryByText('(005930)')).not.toBeInTheDocument();
+  });
+
   it('renders search results, quote depth, and separate wallet amounts', async () => {
     render(<TradePage apiClient={api as never} />, {
       wrapper: ({ children }) => (
@@ -203,5 +223,119 @@ describe('TradePage', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /order/i })).toBeDisabled(),
     );
+  });
+});
+
+/**
+ * The wallet panel on this page used to hold a private, one-shot copy of the
+ * portfolio: an effect read `/api/v1/portfolio` once into local state, and the
+ * `invalidateQueries` the FX ticket was handed fired a request whose answer
+ * nobody kept. So a conversion could never move the balances on screen. The
+ * wallets now read from the shared `PORTFOLIO_QUERY_KEY` cache, the one the FX
+ * ticket and `useOrderMutations` already invalidate.
+ */
+describe('TradePage wallet after a conversion', () => {
+  // Distinct reserved/total, so the available figure asserted below is the
+  // only node carrying that text.
+  const wallets = (usd: string, total: string) => ({
+    wallets: [
+      { currency: 'KRW', available: '1000', reserved: '3', total: '1003' },
+      { currency: 'USD', available: usd, reserved: '2', total },
+    ],
+  });
+
+  function fakeApi() {
+    let conversions = 0;
+    return {
+      conversions: () => conversions,
+      get: vi.fn(async (path: string) => {
+        if (path.startsWith('/api/v1/instruments')) return [];
+        if (path === '/api/v1/portfolio')
+          return conversions === 0
+            ? wallets('20', '22')
+            : wallets('720.7', '722.7');
+        return [];
+      }),
+      post: vi.fn(async (path: string) => {
+        if (path === '/api/v1/fx/quotes')
+          return {
+            quoteId: 'q1',
+            rate: '0.0007',
+            fee: '1',
+            sourceAmount: '1000',
+            destinationAmount: '700.7',
+            expiresAt: '2099-01-01T00:00:00Z',
+          };
+        conversions += 1;
+        return { ok: true };
+      }),
+    };
+  }
+
+  it('refetches the portfolio so the new balances are on screen', async () => {
+    const api = fakeApi();
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade']}>{children}</MemoryRouter>
+      ),
+    });
+    expect(await screen.findByText('$20')).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText('Amount'), {
+      target: { value: '1000' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Get quote' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Convert' }));
+
+    expect(await screen.findByText('$720.7')).toBeVisible();
+    expect(api.conversions()).toBe(1);
+  });
+});
+
+describe('TradePage order estimate', () => {
+  it('hands the selected instrument quote and currency to the ticket', async () => {
+    const api = {
+      get: vi.fn(async (path: string) => {
+        if (path.startsWith('/api/v1/instruments'))
+          return [
+            {
+              market: 'US',
+              symbol: 'AAPL',
+              name: 'Apple',
+              tradable: true,
+              currency: 'USD',
+            },
+          ];
+        if (path.includes('/quote'))
+          return {
+            market: 'US',
+            symbol: 'AAPL',
+            price: '326.30',
+            asOf: '2026-09-01T00:00:00Z',
+            health: 'HEALTHY',
+            currency: 'USD',
+            bids: [{ price: '326.31', volume: '10' }],
+            asks: [{ price: '326.35', volume: '4' }],
+          };
+        if (path === '/api/v1/portfolio') return { wallets: [] };
+        return [];
+      }),
+      post: vi.fn(),
+    };
+    render(<TradePage apiClient={api as never} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={['/trade?symbol=AAPL']}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+    // The panel prices in dollars now that the instrument states its currency.
+    expect(await screen.findByText('$326.30')).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText('Quantity'), {
+      target: { value: '3' },
+    });
+
+    expect(screen.getByText('Estimated ≈ $979.05')).toBeVisible();
   });
 });

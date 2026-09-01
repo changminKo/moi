@@ -8,6 +8,14 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./strategy": {
+      "types": "./dist/strategy.d.ts",
+      "default": "./dist/strategy.js"
+    },
+    "./strategies/sma-crossover": {
+      "types": "./dist/strategies/sma-crossover.d.ts",
+      "default": "./dist/strategies/sma-crossover.js"
+    },
     "./testing": {
       "types": "./dist/broker-contract.d.ts",
       "default": "./dist/broker-contract.js"

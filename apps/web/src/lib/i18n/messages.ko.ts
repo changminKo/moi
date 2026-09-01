@@ -27,6 +27,7 @@ export const ko: Record<MessageKey, string> = {
   'quote.empty': '종목을 선택하면 시세가 표시됩니다.',
   'quote.timestamp': '기준 시각',
   'quote.bookTitle': '호가',
+  'quote.bookTitleWithCurrency': '호가 · {{currency}}',
   'quote.asks': '매도 호가',
   'quote.bids': '매수 호가',
   'quote.ask': '매도',
@@ -35,6 +36,10 @@ export const ko: Record<MessageKey, string> = {
   'quote.noBids': '매수 호가 없음',
   'quote.sparklineCollecting': '차트 데이터 수집 중…',
   'quote.sparklineSummary': '최근 {{count}}틱, 최고 {{high}}, 최저 {{low}}',
+  'quote.sparklineSummaryPartial':
+    '{{window}}틱 중 {{count}}틱 수집, 최고 {{high}}, 최저 {{low}}',
+  'quote.chartWindow': '차트 구간',
+  'quote.chartWindowOption': '{{count}}틱',
 
   'ticket.title': '주문',
   'ticket.side': '구분',
@@ -51,10 +56,19 @@ export const ko: Record<MessageKey, string> = {
   'ticket.price': '가격',
   'ticket.triggerPrice': '트리거 가격',
   'ticket.stopPrice': '스탑 가격',
+  'ticket.estimate': '예상 금액 ≈ {{amount}}',
+  'ticket.estimateRange': '예상 금액 ≈ {{low}} ~ {{high}}',
+  'ticket.estimateUnavailable': '예상 금액 — 계산할 시세가 없습니다',
   'ticket.place': '주문하기',
   'ticket.placeAria': '주문 — 주문하기',
   'ticket.invalidOrder': '잘못된 주문입니다',
   'ticket.rejected': '주문이 거부되었습니다',
+  'ticket.placedOpen':
+    '주문이 접수되었습니다 — 체결되는 대로 포트폴리오에 반영됩니다',
+  'ticket.placedPendingTrigger':
+    '주문이 접수되었습니다 — 트리거 가격에 도달하면 실행됩니다',
+  'ticket.rejectedWithCode': '주문이 거부되었습니다 (코드: {{code}})',
+  'ticket.requestId': '요청 ID: {{requestId}}',
 
   'validation.quantity': '수량은 양의 정수여야 합니다',
   'validation.limitPrice': '지정가를 입력하세요',
@@ -62,6 +76,39 @@ export const ko: Record<MessageKey, string> = {
   'validation.triggerPrice': '트리거 가격을 입력하세요',
   'validation.takeProfitPrice': '익절 가격을 입력하세요',
   'validation.ocoTriggersDiffer': 'OCO 트리거 가격은 서로 달라야 합니다',
+
+  // `POST /api/v1/orders` 공개 오류 코드 (docs/api/error-contract.md). 아래
+  // `reason.*` 와는 별도의 목록이다: reason 은 거래가 왜 제한되는지를,
+  // 여기 있는 문장은 이 주문이 왜 거부되었는지를 말한다.
+  'orderError.SYMBOL_NOT_TRADABLE': '거래할 수 없는 종목입니다',
+  'orderError.MARKET_CLOSED': '장이 열려 있지 않습니다',
+  'orderError.MARKET_DATA_DEGRADED': '시세가 지연되어 주문을 받을 수 없습니다',
+  'orderError.RECOVERY_IN_PROGRESS':
+    '시세 복구 중입니다 — 잠시 후 다시 시도하세요',
+  'orderError.CANCEL_ONLY': '안전 모드: 취소만 가능합니다',
+  'orderError.ACCOUNT_READ_ONLY': '계정이 보호 잠금 상태입니다',
+  'orderError.SERVICE_UNAVAILABLE':
+    '서비스를 이용할 수 없습니다 — 잠시 후 다시 시도하세요',
+  'orderError.INSUFFICIENT_AVAILABLE_CASH': '주문 가능 금액이 부족합니다',
+  'orderError.INSUFFICIENT_AVAILABLE_POSITION':
+    '매도할 수 있는 수량이 부족합니다',
+  'orderError.PRICE_PROTECTION':
+    '가격 보호로 거부되었습니다 — 시세가 너무 많이 벌어졌습니다',
+  'orderError.IDEMPOTENCY_CONFLICT': '이미 보낸 요청과 충돌합니다',
+  'orderError.RATE_LIMITED': '요청이 너무 많습니다 — 잠시 후 다시 시도하세요',
+  'orderError.CAPACITY_REACHED':
+    '미체결 주문이 너무 많습니다 — 먼저 하나를 취소하세요',
+  'orderError.INVALID_QUANTITY': '수량이 올바르지 않습니다',
+  'orderError.INVALID_PRICE': '가격이 올바르지 않습니다',
+  'orderError.INVALID_ORDER': '주문 내용이 올바르지 않습니다',
+  'orderError.VALIDATION_ERROR': '입력한 내용으로는 주문을 받을 수 없습니다',
+  'orderError.SESSION_EXPIRED': '세션이 만료되었습니다 — 새 세션을 시작하세요',
+  'orderError.FORBIDDEN': '허용되지 않은 동작입니다',
+  'orderError.PAYLOAD_TOO_LARGE': '요청이 너무 큽니다',
+  'orderError.INVARIANT_VIOLATION':
+    '주문을 처리할 수 없었습니다 — 주문은 접수되지 않았습니다',
+  'orderError.INTERNAL_ERROR':
+    '문제가 발생했습니다 — 주문은 접수되지 않았습니다',
 
   'wallet.title': '지갑',
   'wallet.available': '주문 가능',
@@ -73,9 +120,10 @@ export const ko: Record<MessageKey, string> = {
   'fx.getQuote': '환율 조회',
   'fx.convert': '환전하기',
   'fx.rate': '환율',
+  'fx.rateValue': '1 {{to}} ≈ {{krw}} {{from}}',
   'fx.fee': '수수료',
-  'fx.source': '출금',
-  'fx.destination': '수취',
+  'fx.source': '보내는 금액',
+  'fx.destination': '받는 금액',
   'fx.amountPositive': '금액은 0보다 커야 합니다',
   'fx.quoteExpired': '환율이 만료되었습니다. 다시 조회하세요.',
   'fx.insufficient': '주문 가능 금액이 부족합니다',

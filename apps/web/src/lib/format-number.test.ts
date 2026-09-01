@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capFractionDigits,
   caretForSignificant,
   formatDecimal,
   formatDecimalInput,
@@ -30,6 +31,29 @@ describe('formatDecimal', () => {
     expect(formatDecimal('')).toBe('');
     expect(formatDecimal('—')).toBe('—');
     expect(formatDecimal('n/a')).toBe('n/a');
+  });
+});
+
+describe('capFractionDigits', () => {
+  it('rounds a longer fraction down to the cap', () => {
+    expect(capFractionDigits('233.3331', 2)).toBe('233.33');
+    expect(capFractionDigits('0.6993', 2)).toBe('0.7');
+  });
+
+  it('never pads a fraction that is already shorter than the cap', () => {
+    expect(capFractionDigits('233.3', 2)).toBe('233.3');
+    expect(capFractionDigits('333333', 2)).toBe('333333');
+    expect(capFractionDigits('0', 2)).toBe('0');
+  });
+
+  it('carries a round-up across the decimal point', () => {
+    expect(capFractionDigits('2.005', 2)).toBe('2.01');
+  });
+
+  it('passes through anything that is not a plain decimal', () => {
+    expect(capFractionDigits('', 2)).toBe('');
+    expect(capFractionDigits('abc', 2)).toBe('abc');
+    expect(capFractionDigits('—', 2)).toBe('—');
   });
 });
 

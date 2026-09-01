@@ -14,12 +14,25 @@ import { ShutdownCoordinator } from '../lifecycle/shutdown-coordinator.js';
 import { StartupCoordinator } from '../lifecycle/startup-coordinator.js';
 import { MarketHealthMachine } from '../market-data/health-machine.js';
 import { MarketStateStore } from '../market-data/market-state-store.js';
+import { projectQuote } from '../market-data/quote-projection.js';
+import {
+  referencePrice,
+  type SymbolQuoteState,
+} from '../market-data/symbol-quote-state.js';
 import { registerAdminRoutes } from '../modules/admin/admin-routes.js';
 import { registerFxRoutes } from '../modules/fx/fx-routes.js';
 import { FxService } from '../modules/fx/fx-service.js';
 import { registerHealthRoutes } from '../modules/health/health-routes.js';
+import {
+  INSTRUMENT_NAME_SNAPSHOT,
+  instrumentSearchAliases,
+  loadInstrumentNames,
+} from '../modules/instruments/instrument-names.js';
 import { registerInstrumentRoutes } from '../modules/instruments/instrument-routes.js';
-import { InstrumentService } from '../modules/instruments/instrument-service.js';
+import {
+  type CatalogInstrument,
+  InstrumentService,
+} from '../modules/instruments/instrument-service.js';
 import { calendarPortFromSource } from '../modules/instruments/market-calendar-port.js';
 import { MarketCalendarService } from '../modules/instruments/market-calendar-service.js';
 import { registerMarketSessionRoutes } from '../modules/instruments/market-session-routes.js';
@@ -60,6 +73,7 @@ import { createFillPersistence } from './fill-persistence.js';
 import { leaseAuditPort } from './lease-audit.js';
 import { LeaseRegistry } from './lease-registry.js';
 import { verifyLedgerInvariants } from './ledger-invariants.js';
+import { marketHealthView } from './market-health-view.js';
 import { MarketRuntime } from './market-runtime.js';
 import { createOrderCancellation } from './order-cancellation.js';
 import { createOutboxEventSource } from './outbox-event-source.js';
@@ -107,15 +121,19 @@ const MARKET_DENIED: readonly Capability[] = [
   'MATCH',
   'TRIGGER',
 ];
+/** Recorded as `source = 'MANUAL'`: an operator should see these happened. */
 const MANUAL_CAUSES = new Set([
   'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
   'RECOVERY_RETRY_EXHAUSTED',
 ]);
-const HEALTH_LABEL: Record<string, string> = {
-  HEALTHY: 'NORMAL',
-  DEGRADED: 'DEGRADED',
-  RECOVERING: 'RECOVERING',
-};
+/**
+ * Causes a healthy feed does not speak to, so a recovery never resolves them
+ * (§16.35). `RECOVERY_RETRY_EXHAUSTED` is deliberately absent: it describes a
+ * retry budget that a completed recovery has just disproved, and leaving it
+ * ACTIVE held placement shut on a market whose transport was demonstrably
+ * back. A failed invariant or audit is not cured by a socket, so it stays.
+ */
+const OPERATOR_ONLY_CAUSES = new Set(['STARTUP_INVARIANT_OR_AUDIT_FAILURE']);
 
 export interface ProductionRuntimeOptions {
   readonly config: AppConfig;
@@ -221,6 +239,7 @@ export class ProductionRuntime {
   readonly #stores = new Map<Market, MarketStateStore>();
   #resolveListening: () => void = () => undefined;
   #app: FastifyInstance | undefined;
+  #instruments: InstrumentService | undefined;
   #bridge: StreamUpgradeHandler | undefined;
   #activeIncidents: readonly SafetyIncident[] = [];
   #reelecting: Promise<void> | null = null;
@@ -449,6 +468,7 @@ export class ProductionRuntime {
         acquireLeases: async (signal) => {
           this.state.transition('ACQUIRING_LEASES');
           await this.#acquireBundle(signal);
+          await this.#refreshInstrumentNames(signal);
         },
         recover: async (market, signal) => {
           if (this.state.current !== 'RECOVERING')
@@ -782,21 +802,52 @@ export class ProductionRuntime {
           await this.#refreshIncidents();
           return { incidentId: incident.incidentId, version: incident.version };
         },
-        resolveCas: async ({ incidentId, version }) => {
-          // The health machine activates with a null epoch and resolves with the
-          // recovered epoch; the service's CAS compares the stored epoch, so the
-          // version check carries the optimistic-lock semantics here.
-          const current = (await this.#incidents.active()).find(
-            (i) => i.incidentId === incidentId,
-          );
-          if (current === undefined) return true;
-          const resolved = await this.#incidents.resolveCas({
-            incidentId,
-            version,
-            recoveryEpoch: current.recoveryEpoch,
-          });
-          await this.#refreshIncidents();
-          return resolved !== undefined;
+        // A recovery resolves what this market owns in the ledger, not what
+        // this process remembers opening: the rows gate placement and outlive
+        // the health machine, so a restart must be able to clear them too
+        // (§16.35). The service's CAS compares the stored epoch, so the
+        // version check carries the optimistic-lock semantics here.
+        resolveMarketIncidents: async ({ recoveryEpoch }) => {
+          const resolved: string[] = [];
+          const remaining: string[] = [];
+          try {
+            const scope = { type: 'MARKET', id: market } as const;
+            for (const incident of await this.#incidents.active(scope)) {
+              if (OPERATOR_ONLY_CAUSES.has(incident.causeCode)) {
+                remaining.push(incident.causeCode);
+                continue;
+              }
+              const outcome = await this.#incidents.resolveCas({
+                incidentId: incident.incidentId,
+                version: incident.version,
+                recoveryEpoch: incident.recoveryEpoch,
+                resolvedBy: 'RECOVERY',
+              });
+              (outcome === undefined ? remaining : resolved).push(
+                incident.causeCode,
+              );
+            }
+            await this.#refreshIncidents();
+            if (resolved.length > 0 || remaining.length > 0)
+              this.#log('incident.recovery_resolved', {
+                market,
+                recoveryEpoch: recoveryEpoch.toString(),
+                resolved,
+                remaining,
+              });
+          } catch (error) {
+            // The feed recovered either way. A ledger hiccup while clearing
+            // rows must not turn a good recovery into another degrade — the
+            // rows stay ACTIVE, the market keeps reporting DEGRADED, and the
+            // next recovery tries again.
+            this.#log('incident.recovery_resolve_failed', {
+              market,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          // Lifting the market's retry hold belongs to the supervisor's own
+          // success path (`MarketRuntime.#clearRetryHold`, §16.34), not here.
+          return remaining;
         },
       },
     });
@@ -864,10 +915,11 @@ export class ProductionRuntime {
     const placement = new OrderPlacementService({
       unitOfWork: this.#uow,
       engine: (market) => this.#engines.get(market),
-      referencePrice: (market, symbol) => {
-        const price = this.#quote(market, symbol).price;
-        return typeof price === 'string' ? price : undefined;
-      },
+      // Sized from the ask, not the displayed quote price: a MARKET BUY pays
+      // the ask, and the two must not drift apart just because a trade frame
+      // happened to arrive after the book.
+      referencePrice: (market, symbol) =>
+        referencePrice(this.#symbolState(market, symbol)),
       feeModel: (market): FeeModel => feeModelFor(this.#o.config.fees, market),
     });
     const orderService = new OrderService({
@@ -884,6 +936,15 @@ export class ProductionRuntime {
         (this.#o.symbols ?? this.#o.bundle.symbols)[m].map((s) => `${m}:${s}`),
       ),
     );
+    const instrumentService = this.#instrumentService(
+      new Map(
+        INSTRUMENT_NAME_SNAPSHOT.map((row) => [
+          `${row.market}:${row.symbol}`,
+          row.name,
+        ]),
+      ),
+    );
+    this.#instruments = instrumentService;
     const app = await buildApp(config, {
       clock: { now: () => Date.now() },
       registerIngress: (instance) => this.#gate.register(instance),
@@ -927,7 +988,7 @@ export class ProductionRuntime {
         });
         await registerInstrumentRoutes(
           instance,
-          this.#instrumentService(),
+          instrumentService,
           (market, symbol) => this.#quote(market, symbol),
         );
         await registerMarketSessionRoutes(instance, {
@@ -967,6 +1028,7 @@ export class ProductionRuntime {
                   body.recoveryEpoch == null
                     ? null
                     : BigInt(body.recoveryEpoch),
+                resolvedBy: 'ADMIN_API',
               });
               await this.#refreshIncidents();
               for (const runtime of this.markets.values())
@@ -1080,19 +1142,41 @@ export class ProductionRuntime {
     return app;
   }
 
-  #instrumentService(): InstrumentService {
+  #instrumentCatalog(
+    names: ReadonlyMap<string, string>,
+  ): readonly CatalogInstrument[] {
     const symbols = this.#o.symbols ?? this.#o.bundle.symbols;
-    return new InstrumentService({
-      catalog: MARKETS.flatMap((market) =>
-        symbols[market].map((symbol) => ({
+    const aliases = instrumentSearchAliases(symbols);
+    return MARKETS.flatMap((market) =>
+      symbols[market].map((symbol) => {
+        const instrumentKey = `${market}:${symbol}` as const;
+        const searchAliases = aliases.get(instrumentKey);
+        return {
           market,
           symbol,
-          name: symbol,
+          name: names.get(instrumentKey) ?? symbol,
           tradable: true,
           currency: market === 'US' ? ('USD' as const) : ('KRW' as const),
-        })),
-      ),
+          ...(searchAliases === undefined ? {} : { aliases: searchAliases }),
+        };
+      }),
+    );
+  }
+
+  #instrumentService(names: ReadonlyMap<string, string>): InstrumentService {
+    return new InstrumentService({
+      catalog: this.#instrumentCatalog(names),
     });
+  }
+
+  async #refreshInstrumentNames(signal: AbortSignal): Promise<void> {
+    const names = await loadInstrumentNames({
+      source: this.#o.bundle.instruments,
+      symbols: this.#o.symbols ?? this.#o.bundle.symbols,
+      signal,
+      log: this.#log,
+    });
+    this.#instruments?.replaceCatalog(this.#instrumentCatalog(names));
   }
 
   /** Current book-derived quote from this leader's market state (never invented). */
@@ -1125,21 +1209,33 @@ export class ProductionRuntime {
     };
   }
 
+  #symbolState(market: Market, symbol: string): SymbolQuoteState | undefined {
+    return this.#stores.get(market)?.get(symbol) as
+      | SymbolQuoteState
+      | undefined;
+  }
+
+  /**
+   * The quote a client paints the panel from — `projectQuote`, the same
+   * builder `MarketRuntime.#publishQuote` puts on the wire, so this snapshot
+   * and the frames that follow it are **one shape**
+   * (`docs/api/quote-contract.md`, spec §16.36). That is the discipline
+   * `#enrichPayload` already states for portfolio: a snapshot and a patch of
+   * the same thing must not be two different shapes, because that divergence
+   * is how the SDK and this API drifted apart (§16.32). It also means the
+   * order book has depth on first paint instead of reading "호가 없음" until
+   * the first live frame lands.
+   */
   #quote(market: Market, symbol: string): Record<string, unknown> {
     const store = this.#stores.get(market);
-    const book = store?.get(symbol) as
-      | { asks?: { price: string }[]; bids?: { price: string }[] }
-      | undefined;
-    const health = this.markets.get(market)?.health.state ?? 'RECOVERING';
-    return {
+    return projectQuote({
       market,
       symbol,
-      price: book?.asks?.[0]?.price ?? book?.bids?.[0]?.price ?? null,
-      asOf: new Date().toISOString(),
-      health,
-      recoveryEpoch: store?.recoveryEpoch.toString() ?? '0',
-      marketDataVersion: store?.currentVersion.toString() ?? '0',
-    };
+      state: this.#symbolState(market, symbol),
+      health: this.markets.get(market)?.health.state ?? 'RECOVERING',
+      recoveryEpoch: store?.recoveryEpoch ?? 0n,
+      marketDataVersion: store?.currentVersion ?? 0n,
+    });
   }
 
   #fxService(): FxService {
@@ -1266,13 +1362,14 @@ export class ProductionRuntime {
         };
         continue;
       }
-      const health = runtime?.health;
-      const reasons = this.#activeIncidents
-        .filter((i) => i.scope.type === 'MARKET' && i.scope.id === market)
-        .map((i) => i.causeCode);
+      const view = marketHealthView({
+        market,
+        feedState: runtime?.health.state,
+        incidents: this.#activeIncidents,
+      });
       body[market] = {
-        state: HEALTH_LABEL[health?.state ?? 'RECOVERING'] ?? 'RECOVERING',
-        reasons,
+        state: view.state,
+        reasons: view.reasons,
         leaderEpoch: epoch,
       };
     }

@@ -86,8 +86,15 @@ export function InstrumentSearch({
               <span className="instrument-market" aria-hidden="true">
                 {instrument.market}
               </span>
-              <span className="instrument-name">{instrument.name}</span>{' '}
-              <span className="instrument-symbol">({instrument.symbol})</span>
+              <span className="instrument-name">{instrument.name}</span>
+              {instrument.name !== instrument.symbol && (
+                <>
+                  {' '}
+                  <span className="instrument-symbol">
+                    ({instrument.symbol})
+                  </span>
+                </>
+              )}
             </button>
             {!instrument.tradable && (
               <span className="status-badge">

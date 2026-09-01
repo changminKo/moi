@@ -665,6 +665,38 @@ describe('ProductionRuntime', () => {
   );
 
   it(
+    'aborts a stalled instrument-name lookup without entering recovery',
+    async () => {
+      const bundle = createFakeProviderBundle();
+      const lookupStarted = new Deferred();
+      vi.spyOn(bundle.instruments, 'searchInstruments').mockImplementation(
+        async (_query, signal) => {
+          lookupStarted.resolve();
+          return await new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        },
+      );
+      const { runtime, logs } = await start({
+        bundle,
+        awaitServing: false,
+      });
+      await lookupStarted.promise;
+
+      const result = await runtime.stop();
+
+      expect(result.forced).toBe(false);
+      expect(bundle.connectCalls()).toBe(0);
+      expect(logs.filter((log) => log.event === 'recovery.complete')).toEqual(
+        [],
+      );
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
     'A4b: losing a lease while RECOVERING re-elects once, aborts the in-flight recovery, then reaches SERVING',
     async () => {
       const { runtime, bundle, logs, phases, deferSnapshots } = await start({
@@ -925,14 +957,29 @@ describe('ProductionRuntime', () => {
         'idempotency-key': randomUUID(),
         ...extra,
       });
-      const search = await json(`${waiting.origin}/api/v1/instruments?q=AAPL`);
+      const search = await json(
+        `${waiting.origin}/api/v1/instruments?q=${encodeURIComponent('ㅅㅅㅈㅈ')}`,
+      );
       expect(search.status).toBe(200);
       expect(search.body).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
+            market: 'KR',
+            symbol: '005930',
+            name: '삼성전자',
+            tradable: true,
+          }),
+        ]),
+      );
+      const englishSearch = await json(
+        `${waiting.origin}/api/v1/instruments?q=apple`,
+      );
+      expect(englishSearch.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
             market: 'US',
             symbol: 'AAPL',
-            tradable: true,
+            name: '애플',
           }),
         ]),
       );
@@ -947,6 +994,18 @@ describe('ProductionRuntime', () => {
       await vi.waitFor(
         () => expect(waiting.runtime.state.current).toBe('SERVING'),
         { timeout: 15_000 },
+      );
+      const refreshedEnglishSearch = await json(
+        `${waiting.origin}/api/v1/instruments?q=apple`,
+      );
+      expect(refreshedEnglishSearch.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            market: 'US',
+            symbol: 'AAPL',
+            name: '애플',
+          }),
+        ]),
       );
 
       waiting.bundle.streamFor('US').emitOrderBook({
@@ -970,6 +1029,11 @@ describe('ProductionRuntime', () => {
           symbol: 'AAPL',
           price: '190.30',
           health: 'HEALTHY',
+          // The same shape the stream's `quote` frame carries, so the panel
+          // has depth on first paint and REST/stream cannot disagree (§16.36).
+          currency: 'USD',
+          asks: [{ price: '190.30', volume: '100' }],
+          bids: [{ price: '190.20', volume: '100' }],
         });
       });
       const quote = await json(`${waiting.origin}/api/v1/fx/quotes`, {
@@ -2587,6 +2651,193 @@ describe('ProductionRuntime', () => {
             )
           ).rows[0]?.n,
         ).toBe(1);
+      },
+      TEST_TIMEOUT_MS,
+    );
+  });
+
+  describe('incident resolution and the placement gate', () => {
+    const MARKET_DENIED = '{PLACE,AMEND,MATCH,TRIGGER}';
+    const seedIncident = async (
+      market: string,
+      causeCode: string,
+      source: 'AUTOMATIC' | 'MANUAL' = 'AUTOMATIC',
+    ) => {
+      const id = randomUUID();
+      await observer.query(
+        `insert into safety_incidents
+           (id, scope_type, scope_id, source, cause_code, reason, blocked_capabilities, recovery_epoch, status, version)
+         values ($1, 'MARKET', $2, $3, $4, $4, $5::text[], 0, 'ACTIVE', 1)`,
+        [id, market, source, causeCode, MARKET_DENIED],
+      );
+      return id;
+    };
+    const activeIncidents = async () =>
+      (
+        await observer.query(
+          "select scope_id, cause_code, source from safety_incidents where status = 'ACTIVE' order by scope_id, cause_code",
+        )
+      ).rows as { scope_id: string; cause_code: string; source: string }[];
+
+    it(
+      'E: a restart with incident rows open reopens placement once the feed is healthy',
+      async () => {
+        // The 34-hour outage: five ACTIVE rows outlived the process that wrote
+        // them, so a restart came up with both feeds healthy and placement shut.
+        const first = await start();
+        await first.runtime.stop();
+        await seedIncident('KR', 'TRANSPORT_CLOSED');
+        await seedIncident('KR', 'RECOVERY_RETRY_EXHAUSTED', 'MANUAL');
+        await seedIncident('US', 'PONG_FAILED');
+        await seedIncident('US', 'TRANSPORT_CLOSED');
+        await seedIncident('US', 'RECOVERY_RETRY_EXHAUSTED', 'MANUAL');
+        const { origin } = await start();
+        const market = await json(`${origin}/health/market-data`);
+        expect(market.body).toMatchObject({
+          KR: { state: 'NORMAL', reasons: [] },
+          US: { state: 'NORMAL', reasons: [] },
+        });
+        const trading = await json(`${origin}/api/v1/health/trading`);
+        expect(trading.body).toMatchObject({ placement: true, reasons: [] });
+        expect(await activeIncidents()).toEqual([]);
+        // A row opened MANUAL and closed without an operator has to say so:
+        // `source` records who raised it, `resolved_by` who cleared it.
+        expect(
+          (
+            await observer.query(
+              "select scope_id, cause_code, source, resolved_by from safety_incidents where status = 'RESOLVED' order by scope_id, cause_code",
+            )
+          ).rows,
+        ).toEqual([
+          {
+            scope_id: 'KR',
+            cause_code: 'RECOVERY_RETRY_EXHAUSTED',
+            source: 'MANUAL',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'KR',
+            cause_code: 'TRANSPORT_CLOSED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'PONG_FAILED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'RECOVERY_RETRY_EXHAUSTED',
+            source: 'MANUAL',
+            resolved_by: 'RECOVERY',
+          },
+          {
+            scope_id: 'US',
+            cause_code: 'TRANSPORT_CLOSED',
+            source: 'AUTOMATIC',
+            resolved_by: 'RECOVERY',
+          },
+        ]);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'D: a recovery clears every ACTIVE row the market owns, not just the tracked one',
+      async () => {
+        const { origin, bundle } = await start();
+        const gate = new Deferred();
+        bundle.snapshots.gate = gate.promise;
+        bundle.streamFor('KR').emitTransportClosed('provider closed');
+        await vi.waitFor(async () => {
+          const health = await json(`${origin}/health/market-data`);
+          expect(health.body.KR).toMatchObject({
+            state: expect.stringMatching(/DEGRADED|RECOVERING/),
+          });
+        });
+        // A second cause degrades the same market while it is already
+        // degraded; that row is nothing the machine's single slot tracks.
+        await seedIncident('KR', 'PONG_FAILED');
+        gate.resolve();
+        await vi.waitFor(
+          async () => {
+            const health = await json(`${origin}/health/market-data`);
+            expect(health.body.KR).toMatchObject({
+              state: 'NORMAL',
+              reasons: [],
+            });
+          },
+          { timeout: 15_000 },
+        );
+        expect(await activeIncidents()).toEqual([]);
+        const trading = await json(`${origin}/api/v1/health/trading`);
+        expect(trading.body.placement).toBe(true);
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'a market reporting NORMAL never hides a row that denies placement',
+      async () => {
+        const { origin } = await start();
+        // An operator-owned GLOBAL incident is not something a healthy feed
+        // may clear, so it has to be visible where the operator is looking.
+        await observer.query(
+          `insert into safety_incidents
+             (id, scope_type, scope_id, source, cause_code, reason, blocked_capabilities, recovery_epoch, status, version)
+           values ($1, 'GLOBAL', null, 'MANUAL', 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
+             'seeded', $2::text[], 0, 'ACTIVE', 1)`,
+          [randomUUID(), MARKET_DENIED],
+        );
+        const admin = {
+          authorization: 'Bearer runtime-admin-key-at-least-32-bytes!',
+          'idempotency-key': randomUUID(),
+          'content-type': 'application/json',
+        };
+        const pinned = await json(`${origin}/admin/incidents`, {
+          method: 'POST',
+          headers: admin,
+          body: JSON.stringify({
+            scope: { type: 'MARKET', id: 'US' },
+            denied: ['PLACE'],
+            causeCode: 'OPERATOR_PIN',
+            reason: 'pinning US CANCEL_ONLY',
+          }),
+        });
+        const market = await json(`${origin}/health/market-data`);
+        const trading = await json(`${origin}/api/v1/health/trading`);
+        expect(trading.body.placement).toBe(false);
+        for (const code of ['KR', 'US']) {
+          const body = market.body[code] as {
+            state: string;
+            reasons: string[];
+          };
+          expect(body.state).toBe('DEGRADED');
+          expect(body.reasons.length).toBeGreaterThan(0);
+        }
+        expect((market.body.US as { reasons: string[] }).reasons).toContain(
+          'OPERATOR_PIN',
+        );
+        // The operator's own resolve is distinguishable from a recovery's.
+        const resolve = await json(
+          `${origin}/admin/incidents/${pinned.body.incidentId}/resolve`,
+          {
+            method: 'POST',
+            headers: admin,
+            body: JSON.stringify({ expectedVersion: pinned.body.version }),
+          },
+        );
+        expect(resolve.status, JSON.stringify(resolve.body)).toBe(200);
+        expect(
+          (
+            await observer.query(
+              'select resolved_by from safety_incidents where id = $1',
+              [pinned.body.incidentId],
+            )
+          ).rows[0],
+        ).toEqual({ resolved_by: 'ADMIN_API' });
       },
       TEST_TIMEOUT_MS,
     );

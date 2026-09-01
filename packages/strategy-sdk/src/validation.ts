@@ -2,7 +2,9 @@ import {
   type DecimalString,
   DomainError,
   decimal,
+  type Market,
   type Quantity,
+  type Side,
 } from '@moi/trading-core';
 
 /**
@@ -12,6 +14,12 @@ import {
  */
 
 export const MAX_IDENTIFIER_LENGTH = 200;
+
+// Keyed by the domain union rather than listed, so adding a `Market` or a
+// `Side` in trading-core breaks this build until the new member is given a rule
+// wherever these are used.
+export const MARKETS: Readonly<Record<Market, true>> = { KR: true, US: true };
+export const SIDES: Readonly<Record<Side, true>> = { BUY: true, SELL: true };
 
 // An identifier reaches an HTTP header or a URL path segment, so a control
 // character in one is a request-splitting shape rather than a name.
@@ -242,6 +250,25 @@ export function projectOptionalField(
   return supplied ? { [field]: value } : {};
 }
 
+/**
+ * Narrows a value to a member of a keyed set. `Object.hasOwn` rather than a
+ * property read, so `__proto__` and `constructor` are rejected like any other
+ * unknown member. The set is keyed by a domain union at every call site, so
+ * adding a member in trading-core breaks the build until it is given a rule.
+ */
+export function assertMember<T extends string>(
+  value: unknown,
+  allowed: Readonly<Record<T, unknown>>,
+  field: string,
+): asserts value is T {
+  if (typeof value !== 'string' || !Object.hasOwn(allowed, value)) {
+    throw new DomainError(
+      'INVALID_ORDER',
+      `${field} must be one of ${Object.keys(allowed).join(', ')}`,
+    );
+  }
+}
+
 export function assertIdentifier(
   value: unknown,
   field: string,
@@ -250,6 +277,22 @@ export function assertIdentifier(
     throw new DomainError(
       'INVALID_ORDER',
       `${field} must be a non-empty identifier of at most ${MAX_IDENTIFIER_LENGTH} printable characters`,
+    );
+  }
+}
+
+/**
+ * A price that has to be strictly positive and inside the money domain: an
+ * order's limit or stop price, and a tick price an indicator is about to sum.
+ */
+export function assertPositivePrice(
+  value: unknown,
+  field: string,
+): asserts value is DecimalString {
+  if (!isPositiveMoneyAmount(value)) {
+    throw new DomainError(
+      'INVALID_PRICE',
+      `${field} must be a positive plain decimal string inside the money domain`,
     );
   }
 }
