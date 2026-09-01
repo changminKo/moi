@@ -12,6 +12,10 @@
       "types": "./dist/strategy.d.ts",
       "default": "./dist/strategy.js"
     },
+    "./strategies/grid": {
+      "types": "./dist/strategies/grid.d.ts",
+      "default": "./dist/strategies/grid.js"
+    },
     "./strategies/sma-crossover": {
       "types": "./dist/strategies/sma-crossover.d.ts",
       "default": "./dist/strategies/sma-crossover.js"

@@ -30,6 +30,7 @@ export {
   type ParameterField,
   type ParameterFieldDescription,
   type ParameterSchema,
+  priceParameter,
   quantityParameter,
   symbolParameter,
 } from './parameter-schema.js';
