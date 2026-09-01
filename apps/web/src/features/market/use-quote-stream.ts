@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { QuoteSnapshot } from '../../lib/api-types';
+import { applyQuoteFrame } from '../../lib/quote-frame';
 import { readRuntimeConfig } from '../../lib/runtime-config';
 import { parseUserStreamMessage } from '../../lib/user-stream';
 
@@ -118,7 +119,10 @@ export function useQuoteStream(
         ) {
           // A push always wins over an in-flight snapshot for this symbol.
           request.current += 1;
-          setQuote(message.payload as unknown as QuoteSnapshot);
+          // The frame is narrowed onto the quote on screen, never cast onto
+          // it: the payload is a book, the snapshot is a price, and a frame
+          // that does not narrow is dropped instead of unmounting the panel.
+          setQuote((current) => applyQuoteFrame(current, message) ?? current);
         }
       };
       next.onclose = () => {
