@@ -25,7 +25,7 @@ export interface IncidentPort {
   /**
    * Resolves every automatically-resolvable ACTIVE incident this market owns
    * in the ledger — including rows a previous process opened — and answers
-   * with the cause codes a healthy feed is not allowed to clear (§16.33).
+   * with the cause codes a healthy feed is not allowed to clear (§16.35).
    */
   resolveMarketIncidents?(input: {
     market: Market;

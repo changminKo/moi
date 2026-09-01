@@ -128,7 +128,7 @@ const MANUAL_CAUSES = new Set([
 ]);
 /**
  * Causes a healthy feed does not speak to, so a recovery never resolves them
- * (§16.33). `RECOVERY_RETRY_EXHAUSTED` is deliberately absent: it describes a
+ * (§16.35). `RECOVERY_RETRY_EXHAUSTED` is deliberately absent: it describes a
  * retry budget that a completed recovery has just disproved, and leaving it
  * ACTIVE held placement shut on a market whose transport was demonstrably
  * back. A failed invariant or audit is not cured by a socket, so it stays.
@@ -805,7 +805,7 @@ export class ProductionRuntime {
         // A recovery resolves what this market owns in the ledger, not what
         // this process remembers opening: the rows gate placement and outlive
         // the health machine, so a restart must be able to clear them too
-        // (§16.33). The service's CAS compares the stored epoch, so the
+        // (§16.35). The service's CAS compares the stored epoch, so the
         // version check carries the optimistic-lock semantics here.
         resolveMarketIncidents: async ({ recoveryEpoch }) => {
           const resolved: string[] = [];
@@ -846,7 +846,7 @@ export class ProductionRuntime {
             });
           }
           // Lifting the market's retry hold belongs to the supervisor's own
-          // success path (`MarketRuntime.#clearRetryHold`, §16.33), not here.
+          // success path (`MarketRuntime.#clearRetryHold`, §16.34), not here.
           return remaining;
         },
       },

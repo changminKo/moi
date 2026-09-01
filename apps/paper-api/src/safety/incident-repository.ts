@@ -11,7 +11,7 @@ export interface IncidentRepository {
      * What closed the row, recorded in `resolved_by`. A row raised as
      * `source = 'MANUAL'` can now close without an operator, so the pair
      * `(source, resolved_by)` is what tells a later reader which happened
-     * (§16.34). Defaults to `'runtime'` for callers that do not say.
+     * (§16.35). Defaults to `'runtime'` for callers that do not say.
      */
     resolvedBy?: string;
   }): Promise<SafetyIncident | undefined>;

@@ -20,7 +20,7 @@ function appliesTo(incident: SafetyIncident, market: Market): boolean {
 }
 
 /**
- * The reported state of one market (§16.33). Feed health lives in memory and
+ * The reported state of one market (§16.35). Feed health lives in memory and
  * dies with the process; the ACTIVE incident rows decide whether orders can be
  * placed and survive a restart. Reporting the first while placement follows
  * the second is what let `state=NORMAL` sit next to `placement=false` with no
