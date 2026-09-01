@@ -63,10 +63,9 @@ export const ko: Record<MessageKey, string> = {
   'ticket.placeAria': '주문 — 주문하기',
   'ticket.invalidOrder': '잘못된 주문입니다',
   'ticket.rejected': '주문이 거부되었습니다',
-  'ticket.placedOpen':
-    '주문이 접수되었습니다 — 체결되는 대로 포트폴리오에 반영됩니다',
+  'ticket.placedOpen': '주문이 접수되었습니다.',
   'ticket.placedPendingTrigger':
-    '주문이 접수되었습니다 — 트리거 가격에 도달하면 실행됩니다',
+    '주문이 접수되었습니다. 트리거 가격에 도달하면 실행됩니다.',
   'ticket.rejectedWithCode': '주문이 거부되었습니다 (코드: {{code}})',
   'ticket.requestId': '요청 ID: {{requestId}}',
 

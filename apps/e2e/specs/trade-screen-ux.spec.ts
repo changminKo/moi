@@ -168,10 +168,8 @@ test('reports an accepted order and empties the quantity', async ({
     .click();
 
   // The endpoint answers OPEN with nothing filled, so the wording says
-  // accepted rather than done.
-  await expect(page.getByRole('status')).toHaveText(
-    'Order accepted — fills appear in your portfolio as they happen',
-  );
+  // accepted rather than done. What happens next is the fill toast's job.
+  await expect(page.getByRole('status')).toHaveText('Order accepted.');
   await expect(page.getByLabel('Quantity')).toHaveValue('');
   await expect(page.getByLabel('Price')).toHaveValue('150');
 });

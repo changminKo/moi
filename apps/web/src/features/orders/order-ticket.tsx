@@ -47,10 +47,13 @@ const displayAmount = (currency: Currency | undefined, value: string) =>
  * A rejection stays an `alert` — the ticket already spoke that way for
  * validation, and an e2e journey asserts it — while an acceptance is a
  * `status` (polite): it is news, not a problem, and it must not interrupt a
- * reader who has already moved on to the next field. This is deliberately not
- * a toast: the app has no toast infrastructure, and inventing a portal,
- * timers and a dismissal contract for one sentence that belongs beside the
- * button that produced it would be a notification system, not a fix.
+ * reader who has already moved on to the next field.
+ *
+ * Still deliberately not a toast, and the toast the app has since grown does
+ * not change that. This sentence answers a button the reader just pressed and
+ * belongs beside it. A fill has no such anchor — it lands moments later, from
+ * the stream, with the reader possibly on another page — which is exactly the
+ * gap `features/notifications/toast-region.tsx` exists to fill.
  */
 type Outcome =
   | Readonly<{ kind: 'error'; text: string; requestId?: string }>

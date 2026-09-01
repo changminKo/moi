@@ -48,8 +48,10 @@ test('announces a partial fill on the trade screen the reader never left', async
   await selectInstrument(page, '005930');
   await placeLimit(page, '3', '70000');
 
-  // The fill arrives over the stream, with no form to attach to — the
-  // acceptance line beside the button said nothing about this.
+  // The acceptance line stays where it always was, beside the button, and now
+  // says only what it can vouch for.
+  await expect(page.getByRole('status')).toHaveText('Order accepted.');
+  // The fill itself arrives over the stream, with no form to attach to.
   await expect(toasts(page)).toContainText(
     '005930 Buy 2 filled · 70,000 · 2/3',
   );

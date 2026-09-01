@@ -61,10 +61,16 @@ export const en = {
   'ticket.placeAria': 'Order ticket — Place order',
   'ticket.invalidOrder': 'Invalid order',
   'ticket.rejected': 'Order rejected',
-  'ticket.placedOpen':
-    'Order accepted — fills appear in your portfolio as they happen',
+  // Short on purpose. The clause that used to follow ("fills appear in your
+  // portfolio as they happen") was standing in for a notification the app did
+  // not have; the fill toast now says the same thing at the moment it becomes
+  // true, and this line is left with the one fact it can vouch for.
+  'ticket.placedOpen': 'Order accepted.',
+  // A trigger order does not get the same trim. Nothing announces waiting —
+  // there is no event until the trigger is hit, possibly never — so without
+  // this sentence a reader cannot tell a resting order from a broken one.
   'ticket.placedPendingTrigger':
-    'Order accepted — it waits for its trigger price',
+    'Order accepted. It waits for its trigger price.',
   'ticket.rejectedWithCode': 'Order rejected (code: {{code}})',
   'ticket.requestId': 'Request ID: {{requestId}}',
 

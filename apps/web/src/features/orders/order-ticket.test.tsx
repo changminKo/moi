@@ -198,11 +198,9 @@ describe('OrderTicket outcome', () => {
     fireEvent.change(quantity(), { target: { value: '3' } });
     fireEvent.click(place());
 
-    expect(
-      await screen.findByText(
-        'Order accepted — fills appear in your portfolio as they happen',
-      ),
-    ).toBeVisible();
+    // The follow-up the old wording promised in prose is now a job the fill
+    // toast does: this line only has to confirm the request landed.
+    expect(await screen.findByText('Order accepted.')).toBeVisible();
     expect(quantity()).toHaveValue('');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -224,9 +222,11 @@ describe('OrderTicket outcome', () => {
     });
     fireEvent.click(place());
 
+    // A trigger order keeps its second sentence: nothing announces the
+    // waiting, and waiting is the whole difference from a market order.
     expect(
       await screen.findByText(
-        'Order accepted — it waits for its trigger price',
+        'Order accepted. It waits for its trigger price.',
       ),
     ).toBeVisible();
   });
