@@ -100,6 +100,7 @@ if ! sudo test -f /etc/moi/moi.env; then
 WEB_DOMAIN=app.example.com
 API_DOMAIN=api.example.com
 # MOI_IMAGE_TAG=<commit sha>   # pin a published image to roll back
+# COMPOSE_PROFILES=bot          # start the strategy runner with the stack (needs infra/bot/runner.json and DISCORD_WEBHOOK_TRADE_URL)
 ENV
   sudo chmod 0600 /etc/moi/moi.env
 fi
