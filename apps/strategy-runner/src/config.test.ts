@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { SMA_CROSSOVER_ID } from '@moi/strategy-sdk/strategies/sma-crossover';
 import { DomainError } from '@moi/trading-core';
 import { describe, expect, it } from 'vitest';
@@ -322,5 +324,35 @@ describe('loadRunnerConfig timings', () => {
         readFile: () => 'not json',
       }),
     ).toThrow(/could not be read as JSON/u);
+  });
+});
+
+/**
+ * #93: the file an operator copies must be a file the runner accepts. Loaded
+ * for real rather than compared by eye — phase C added two limits after the
+ * example was written, and the example did not follow.
+ */
+describe('infra/bot/runner.example.json', () => {
+  it('loads through loadRunnerConfig unchanged', () => {
+    const example = readFileSync(
+      fileURLToPath(
+        new URL('../../../infra/bot/runner.example.json', import.meta.url),
+      ),
+      'utf8',
+    );
+    const config = loadRunnerConfig({
+      env: {
+        BOT_API_ORIGIN: 'http://paper-api:3000',
+        BOT_CONFIG_PATH: '/etc/moi-bot/runner.json',
+        BOT_STATE_DIR: '/var/lib/moi-bot',
+      },
+      registry: DEFAULT_REGISTRY,
+      readFile: () => example,
+    });
+
+    expect(config.strategies.map((each) => each.name)).toStrictEqual([
+      'samsung-sma',
+    ]);
+    expect(config.risk.maxConsecutiveLosses).toBeGreaterThan(0);
   });
 });
