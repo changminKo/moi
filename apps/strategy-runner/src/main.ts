@@ -3,6 +3,7 @@ import { openTickRecorder } from './backtest/tick-log.js';
 import { loadRunnerConfig } from './config.js';
 import { DEFAULT_REGISTRY } from './registry.js';
 import { createLineReporter } from './reporter.js';
+import { wireReporter } from './runner/reporter-wiring.js';
 import { RunnerSupervisor } from './runner/supervisor.js';
 
 /**
@@ -16,17 +17,35 @@ import { RunnerSupervisor } from './runner/supervisor.js';
  * something it must not act on.
  */
 export async function main(): Promise<void> {
-  const reporter = createLineReporter();
   const config = loadRunnerConfig({
     env: process.env,
     registry: DEFAULT_REGISTRY,
   });
+  let supervisor: RunnerSupervisor | null = null;
+  // Phase D: stdout always, Discord when the trade webhook is set. The session
+  // cell is the runner's own file; it is read lazily because the supervisor
+  // that owns it is built below, and because the cookie and token rotate.
+  const wiring = wireReporter({
+    env: process.env,
+    secrets: () => {
+      const session = supervisor?.state.session.read() as
+        | { readonly cookie?: unknown; readonly csrfToken?: unknown }
+        | null
+        | undefined;
+
+      return [session?.cookie, session?.csrfToken].filter(
+        (value): value is string => typeof value === 'string',
+      );
+    },
+  });
+  const reporter = wiring.reporter;
 
   // Opt-in, and read here rather than in `loadRunnerConfig` because it decides
   // nothing the runner trades on: it is a research artifact, and a bad path
   // fails loudly at `AppendLog.open` before the first cycle either way.
   const tickLog = process.env.BOT_TICK_LOG;
-  const supervisor = new RunnerSupervisor({
+
+  supervisor = new RunnerSupervisor({
     config,
     reporter,
     ...(tickLog === undefined || tickLog.trim().length === 0
@@ -45,6 +64,7 @@ export async function main(): Promise<void> {
   reporter.report('info', 'the strategy runner is starting', {
     origin: config.apiOrigin,
     strategies: config.strategies.map((each) => each.name).join(','),
+    discord: wiring.discord,
   });
 
   try {
@@ -52,6 +72,8 @@ export async function main(): Promise<void> {
     await supervisor.run();
   } finally {
     supervisor.close();
+    // Last: whatever the shutdown said still has to reach the channel.
+    await wiring.close();
   }
 }
 

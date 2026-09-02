@@ -89,7 +89,6 @@ describe('the backtest reaches no network', () => {
       'runner/strategy-host.js',
       'state/append-log.js',
       'state/state-store.js',
-      'transport/redact.js',
     ]);
   });
 });

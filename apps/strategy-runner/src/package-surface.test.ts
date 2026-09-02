@@ -20,8 +20,10 @@ function sourceFiles(directory: string): readonly string[] {
 }
 
 /**
- * Design §3: the bot may reach `@moi/strategy-sdk` and `@moi/trading-core`, and
- * nothing else. Importing `@moi/paper-api` would put the ledger's internals in
+ * Design §3: the bot may reach `@moi/strategy-sdk` and `@moi/trading-core` —
+ * and, since phase D, `@moi/strategy-reporter` (§16.49): a pure text/HTTP
+ * adapter with no dependencies of its own, which reaches neither the ledger
+ * nor a provider. Nothing else. Importing `@moi/paper-api` would put the ledger's internals in
  * the decision path, `@moi/market-data` would put a live provider adapter there,
  * and a database driver would let the runner write to the ledger behind the
  * API's own invariants.
@@ -37,6 +39,7 @@ function sourceFiles(directory: string): readonly string[] {
 describe('dependency boundary', () => {
   it('depends on the strategy SDK and trading-core, and nothing else', () => {
     expect(Object.keys(manifest.dependencies).sort()).toStrictEqual([
+      '@moi/strategy-reporter',
       '@moi/strategy-sdk',
       '@moi/trading-core',
     ]);

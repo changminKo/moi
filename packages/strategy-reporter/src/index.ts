@@ -5,6 +5,13 @@ export {
   TRADE_WEBHOOK_VARIABLE,
 } from './config.js';
 export {
+  createDiscordReporter,
+  type DiscordReporter,
+  type RunnerReporter,
+  type RunnerReportFields,
+  type RunnerReportLevel,
+} from './discord-reporter.js';
+export {
   createDiscordWebhookTransport,
   type DiscordWebhookTransportOptions,
   type ReportTransport,

@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { maskOutbound } from '@moi/strategy-reporter';
 import type { BrokerPortfolio } from '@moi/strategy-sdk';
 import { DomainError } from '@moi/trading-core';
 import type { OrderGateway } from '../gateway/order-gateway.js';
@@ -6,7 +7,6 @@ import type { Reporter, ReportFields } from '../reporter.js';
 import { isOpenOrder } from '../risk/risk-gate.js';
 import type { JsonCell } from '../state/json-cell.js';
 import type { DecisionKind } from '../state/state-store.js';
-import { redact } from '../transport/redact.js';
 
 /**
  * The runner-wide kill switch (design §6, §7.2; the phase-D design document
@@ -207,7 +207,7 @@ export class KillSwitch implements KillSwitchTrigger {
       source,
       // Masked before it can reach the file: the report path masks on its own,
       // the cell does not, and a future trip source may hand over a message.
-      reason: redact(reason),
+      reason: maskOutbound(reason),
     });
 
     // Memory first — the barrier is closed from this line whatever the disk
@@ -422,7 +422,7 @@ export class KillSwitch implements KillSwitchTrigger {
         source: saved.source as KillSwitchSource,
         // The file is not a trusted source either: it was written by a runner,
         // but it could have been edited since.
-        reason: redact(saved.reason),
+        reason: maskOutbound(saved.reason),
       });
     }
 
@@ -437,7 +437,7 @@ export class KillSwitch implements KillSwitchTrigger {
     return Object.freeze({
       engagedAt: new Date(this.#now()).toISOString(),
       source: 'operator',
-      reason: redact(reasonIn(saved)),
+      reason: maskOutbound(reasonIn(saved)),
     });
   }
 

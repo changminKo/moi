@@ -1,4 +1,4 @@
-import { redact } from './transport/redact.js';
+import { maskOutbound } from '@moi/strategy-reporter';
 
 /**
  * Where the runner says what it did. Design §3 names a `Reporter` that posts to
@@ -8,7 +8,9 @@ import { redact } from './transport/redact.js';
  *
  * Redaction is applied by the reporter itself, unconditionally, to the message
  * and to every field value. A masker that only runs where someone remembered to
- * call it is not a masker.
+ * call it is not a masker. It is the same `maskOutbound` the Discord side uses
+ * — one masker, not two (#92): a rule fixed on one side and missed on the
+ * other was the cost of the copy this replaced.
  */
 
 export type ReportLevel = 'info' | 'warn' | 'error';
@@ -31,7 +33,7 @@ export function formatReport(line: ReportLine): string {
     .map(([name, value]) => `${name}=${String(value)}`)
     .join(' ');
 
-  return redact(
+  return maskOutbound(
     `[${line.level}] ${line.message}${fields.length === 0 ? '' : ` ${fields}`}`,
   );
 }

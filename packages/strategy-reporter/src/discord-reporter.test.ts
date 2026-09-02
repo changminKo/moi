@@ -9,23 +9,10 @@ import {
   startFakeDiscord,
 } from './testing/fake-discord-server.js';
 
-const CSRF_TOKEN = '7f3c1a9e5b2d40689c0e2f1b4a6d8e07';
-
-/**
- * The four shapes `apps/strategy-runner/src/transport/redact.ts` masks. Stated
- * here as inputs rather than imported — the runner may not be a dependency of
- * this package — so that a rule the runner has and this masker lacks fails
- * here rather than leaking to Discord.
- */
-const RUNNER_REDACTED = [
-  ['Set-Cookie: moi_session=abcdefghijklmnop; HttpOnly', 'abcdefghijklmnop'],
-  ['Cookie: moi_session=s%3AZm9vYmFy.9xKq; Path=/', 's%3AZm9vYmFy.9xKq'],
-  [`X-CSRF-Token: ${CSRF_TOKEN}`, CSRF_TOKEN],
-  [
-    'Idempotency-Key: 3d0f1c22-0e1a-4a55-b2ad-9c5e1f0a7b31',
-    '3d0f1c22-0e1a-4a55-b2ad-9c5e1f0a7b31',
-  ],
-] as const;
+// The runner uses this package's `maskOutbound` directly since phase D (#92);
+// there is no second masker to drift from, so the drift alarm that used to
+// restate the runner's four shapes here is gone with it. The shapes themselves
+// are pinned in `masking.test.ts`.
 
 describe('createDiscordReporter', () => {
   let discord: FakeDiscordServer;
@@ -78,16 +65,6 @@ describe('createDiscordReporter', () => {
     await reporter.flush();
 
     expect(embeds()[0].color).toBe(15_026_253);
-  });
-
-  it('masks every shape the runner’s own redactor masks', async () => {
-    for (const [line] of RUNNER_REDACTED)
-      reporter.report('error', line, { detail: line });
-    await reporter.flush();
-
-    const wire = discord.bodies().join('\n');
-    for (const [, secret] of RUNNER_REDACTED)
-      expect(wire, secret).not.toContain(secret);
   });
 
   // Masking twice is safe: a line the runner already put through `redact`

@@ -120,6 +120,9 @@ importers:
 
   apps/strategy-runner:
     dependencies:
+      '@moi/strategy-reporter':
+        specifier: workspace:*
+        version: link:../../packages/strategy-reporter
       '@moi/strategy-sdk':
         specifier: workspace:*
         version: link:../../packages/strategy-sdk
