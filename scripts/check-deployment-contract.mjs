@@ -220,7 +220,7 @@ check('api image', () => {
 });
 
 check('image build contexts carry every workspace dependency', () => {
-  for (const app of ['apps/paper-api', 'apps/web']) {
+  for (const app of ['apps/paper-api', 'apps/web', 'apps/strategy-runner']) {
     const instructions = dockerfileInstructions(read(`${app}/Dockerfile`));
     const sources = contextCopySources(instructions);
     const covered = (dir) =>
@@ -247,6 +247,57 @@ check('web image', () => {
   assert.ok(
     existsSync(path('apps/web/server.test.mjs')),
     'apps/web/server.test.mjs missing',
+  );
+});
+
+check('bot image', () => {
+  const instructions = checkDockerfile('apps/strategy-runner/Dockerfile');
+  const cmd = instructions.filter((i) => i.instruction === 'CMD').at(-1);
+  assert.ok(cmd, 'bot Dockerfile needs CMD');
+  assert.match(
+    cmd.args,
+    /apps\/strategy-runner\/dist\/main\.js/,
+    'bot Dockerfile CMD must run apps/strategy-runner/dist/main.js',
+  );
+  assert.match(cmd.args, /"node"/, 'bot CMD must use exec form with node');
+  assert.ok(
+    !instructions.some((i) => i.instruction === 'EXPOSE'),
+    'the bot serves nothing and must not EXPOSE a port',
+  );
+  // The compose volume for BOT_STATE_DIR inherits the image's ownership of the
+  // mount point on first use; without this the read-only runtime cannot write
+  // a single NDJSON line and the runner dies at its first decision.
+  const runs = instructions
+    .filter((i) => i.instruction === 'RUN')
+    .map((i) => i.args);
+  assert.ok(
+    runs.some((r) => /chown node:node \/var\/lib\/moi-bot/.test(r)),
+    'bot image must own /var/lib/moi-bot as node, or the read-only runtime cannot write its state volume',
+  );
+});
+
+check('deploy verifies an enabled bot', () => {
+  const script = read('infra/oracle/deploy.sh');
+  assert.ok(
+    /COMPOSE_PROFILES/.test(script) &&
+      /bot_steady/.test(script) &&
+      /RestartCount/.test(script),
+    'deploy.sh must fail the release when COMPOSE_PROFILES enables the bot but the container is not running steadily (RestartCount 0)',
+  );
+  assert.ok(
+    /com\.docker\.compose\.service=bot/.test(script) &&
+      /rm -sf bot/.test(script),
+    'deploy.sh must fail the release when the bot profile is off but a bot container is still there',
+  );
+  assert.match(
+    read('infra/oracle/deploy-lib.sh'),
+    /bot_steady\(\)/,
+    'deploy-lib.sh must define bot_steady (tested in status-check.test.mjs)',
+  );
+  const status = read('infra/oracle/status-check.sh');
+  assert.ok(
+    /COMPOSE_PROFILES/.test(status) && /bot=\$bot/.test(status),
+    'status-check.sh must report the bot when COMPOSE_PROFILES enables it',
   );
 });
 
@@ -526,6 +577,54 @@ check(
     if (existsSync(path(dockerfile))) checkDockerfile(dockerfile);
   },
 );
+
+check('publish workflow builds every image compose ships', () => {
+  const workflow = readYaml('.github/workflows/publish.yml');
+  const built = (workflow.jobs.images.strategy.matrix.include ?? []).map(
+    (entry) => entry.dockerfile,
+  );
+  for (const [name, service] of Object.entries(compose.services)) {
+    const dockerfile = service.build?.dockerfile;
+    if (!dockerfile) continue;
+    assert.ok(
+      built.includes(dockerfile),
+      `publish.yml must build an image for compose service ${name} (${dockerfile})`,
+    );
+  }
+});
+
+check('production overlay pulls every built image from GHCR', () => {
+  // `!reset null` is a compose-specific tag; read the overlay as text so the
+  // check does not depend on how a generic YAML parser treats it.
+  const overlay = read('infra/oracle/compose.override.yaml');
+  const workflow = readYaml('.github/workflows/publish.yml');
+  const matrix = workflow.jobs.images.strategy.matrix.include ?? [];
+  for (const [name, service] of Object.entries(compose.services)) {
+    const dockerfile = service.build?.dockerfile;
+    if (!dockerfile) continue;
+    // The image a service pulls is the one publish.yml builds from its
+    // Dockerfile — not merely *some* moi-* image.
+    const built = matrix.find((entry) => entry.dockerfile === dockerfile);
+    assert.ok(built, `publish.yml must build ${dockerfile} for ${name}`);
+    const block = overlay.match(
+      new RegExp(`\\n  ${name}:\\n((?:    [^\\n]*\\n)+)`),
+    );
+    assert.ok(block, `overlay must pull ${name} from GHCR`);
+    assert.match(
+      block[1],
+      new RegExp(
+        `^ {4}image: ghcr\\.io/changminko/moi-${built.name}:\\$\\{MOI_IMAGE_TAG:-main\\}$`,
+        'm',
+      ),
+      `overlay must pull ${name} as ghcr.io/changminko/moi-${built.name} under MOI_IMAGE_TAG`,
+    );
+    assert.match(
+      block[1],
+      /^ {4}build: !reset null$/m,
+      `overlay must reset ${name}'s build so the host never builds`,
+    );
+  }
+});
 
 check('shutdown grace exceeds drain deadline', () => {
   const source = read('apps/paper-api/src/lifecycle/shutdown-coordinator.ts');

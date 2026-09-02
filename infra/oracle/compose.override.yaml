@@ -45,6 +45,13 @@ services:
     expose:
       - "3000"
 
+  # The bot (profile `bot`, design §7.3/§8.1). Same rule as the two above: the
+  # host pulls, never builds. It starts only when the host's /etc/moi/moi.env
+  # sets COMPOSE_PROFILES=bot — see docs/operations/deployment.md.
+  bot:
+    image: ghcr.io/changminko/moi-strategy-runner:${MOI_IMAGE_TAG:-main}
+    build: !reset null
+
 volumes:
   caddy-data: {}
   caddy-config: {}

@@ -8,7 +8,9 @@
     "maxPositionQuantity": "50",
     "maxOpenOrders": 2,
     "tradingHoursOnly": true,
-    "maxQuoteAgeMs": 30000
+    "maxQuoteAgeMs": 30000,
+    "maxConsecutiveLosses": 3,
+    "maxDailyLoss": "200000"
   },
   "strategies": [
     {

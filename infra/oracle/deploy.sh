@@ -94,6 +94,33 @@ for _ in $(seq 1 40); do
   if printf %s "$md" | grep -q '"runtime":"SERVING"' \
      && [ "$(printf %s "$md" | grep -o '"state":"NORMAL"' | wc -l)" -ge 2 ] \
      && printf %s "$tr" | grep -q '"placement":true'; then
+    # The bot is opt-in through COMPOSE_PROFILES=bot in /etc/moi/moi.env. When
+    # it is on, a release is not done until the runner is up: a configuration
+    # it refuses (no runner.json, a limit outside exact money) is a container in
+    # a restart loop, and that has to fail the deploy, not hide behind
+    # `restart: unless-stopped`.
+    case ",${COMPOSE_PROFILES:-}," in *,bot,*) bot_enabled=1 ;; *) bot_enabled=0 ;; esac
+    if [ "$bot_enabled" = 1 ]; then
+      # One `running` is not proof: a refused configuration is a container
+      # that lives for a moment between restarts. `bot_steady` (deploy-lib.sh)
+      # wants running with RestartCount 0 for consecutive polls.
+      bot_id="$(withsecrets "${COMPOSE[*]} ps -q bot")"
+      [ -n "$bot_id" ] || { echo "FAIL: COMPOSE_PROFILES enables the bot but no bot container exists"; exit 1; }
+      if ! bot_steady "docker inspect -f '{{.State.Status}} {{.RestartCount}}' $bot_id"; then
+        echo "FAIL: COMPOSE_PROFILES enables the bot but the bot container is not steadily running (a refused configuration is a restart loop):"
+        docker inspect -f 'state={{.State.Status}} restarts={{.RestartCount}}' "$bot_id" || true
+        withsecrets "${COMPOSE[*]} logs --no-color --tail 20 bot" || true
+        exit 1
+      fi
+      echo "bot: running"
+    else
+      # The symmetric mistake: the profile line was removed but the container
+      # was not. Compose no longer sees a disabled service, so `stop` and `up`
+      # leave it running — an old image trading against the new release, with
+      # nothing watching it.
+      stray="$(docker ps -aq --filter label=com.docker.compose.project=moi --filter label=com.docker.compose.service=bot)"
+      [ -z "$stray" ] || { echo "FAIL: COMPOSE_PROFILES does not enable the bot but a bot container exists; remove it first: COMPOSE_PROFILES=bot ${COMPOSE[*]} rm -sf bot"; exit 1; }
+    fi
     sha="$(as_owner git rev-parse --short HEAD)"
     echo "$md"; echo "$tr"; echo "== done (${sha})"
     deploy_verified "$sha"

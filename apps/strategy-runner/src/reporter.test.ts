@@ -29,7 +29,7 @@ describe('reporter', () => {
     });
 
     expect(reporter.lines).toStrictEqual([
-      '[info] reusing moi_session=[redacted] header=x-csrf-token: [redacted]',
+      '[info] reusing moi_session=*** header=x-csrf-token: ***',
     ]);
   });
 

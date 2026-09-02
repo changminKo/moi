@@ -1,8 +1,8 @@
 name: Publish images
 
-# Builds the two runtime images once, for amd64 and arm64, and publishes them
+# Builds the three runtime images once, for amd64 and arm64, and publishes them
 # to GHCR on every push to main. Hosts never build: the Oracle reference host
-# (1 GB Micro or A1) pulls `ghcr.io/changminko/moi-{paper-api,web}:main`.
+# (1 GB Micro or A1) pulls `ghcr.io/changminko/moi-{paper-api,web,strategy-runner}:main`.
 # No secrets or provider settings are baked in — everything arrives through
 # the compose environment at run time.
 #
@@ -35,6 +35,8 @@ jobs:
             dockerfile: apps/paper-api/Dockerfile
           - name: web
             dockerfile: apps/web/Dockerfile
+          - name: strategy-runner
+            dockerfile: apps/strategy-runner/Dockerfile
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3

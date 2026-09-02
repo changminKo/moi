@@ -1,4 +1,4 @@
-import { redact } from '../transport/redact.js';
+import { maskOutbound } from '@moi/strategy-reporter';
 import type { BacktestReport } from './engine.js';
 
 /**
@@ -17,7 +17,7 @@ import type { BacktestReport } from './engine.js';
  * masker and says explicitly that they must not reach a backtest artifact. A
  * report is built from reasons and refusals that came from strategy code and
  * from the gate, so nothing here *should* carry one — and "should" is why the
- * whole rendered document goes through `redact` anyway. A masker that only runs
+ * whole rendered document goes through `maskOutbound` anyway. A masker that only runs
  * where someone remembered to call it is not a masker.
  */
 
@@ -41,7 +41,7 @@ export function formatBacktestReport(report: BacktestReport): string {
       'This plan replayed no ticks, so there is nothing to report.',
     );
 
-    return redact(lines.join('\n'));
+    return maskOutbound(lines.join('\n'));
   }
 
   lines.push(
@@ -133,5 +133,5 @@ export function formatBacktestReport(report: BacktestReport): string {
     );
   }
 
-  return redact(lines.join('\n'));
+  return maskOutbound(lines.join('\n'));
 }

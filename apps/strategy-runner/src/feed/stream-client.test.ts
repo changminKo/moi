@@ -240,7 +240,7 @@ describe('the stream upgrade', () => {
     await settle();
 
     expect(h.reporter.lines.join('\n')).not.toContain('secret-cookie-value');
-    expect(h.reporter.lines.join('\n')).toContain('moi_session=[redacted]');
+    expect(h.reporter.lines.join('\n')).toContain('moi_session=***');
   });
 });
 

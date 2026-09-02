@@ -17,6 +17,7 @@
     "typecheck": "tsc --build --pretty false && tsc --noEmit --pretty false -p tsconfig.test.json"
   },
   "dependencies": {
+    "@moi/strategy-reporter": "workspace:*",
     "@moi/strategy-sdk": "workspace:*",
     "@moi/trading-core": "workspace:*"
   },

@@ -98,4 +98,3 @@ export {
   type FetchLike,
   PaperApiClient,
 } from './transport/paper-api-client.js';
-export { redact } from './transport/redact.js';

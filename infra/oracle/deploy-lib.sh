@@ -27,6 +27,23 @@ notify() {
   fi
 }
 
+# Phase D: is the bot container *steadily* up? A runner that refuses its
+# configuration lives for a moment and is restarted by Docker, so one `running`
+# proves nothing; this wants `running` with a RestartCount of 0 for
+# MOI_BOT_STEADY_POLLS consecutive polls. `$1` is a command that prints
+# "<status> <restartCount>" (docker inspect -f '{{.State.Status}} {{.RestartCount}}').
+bot_steady() {
+  local probe="$1" need="${MOI_BOT_STEADY_POLLS:-5}" max="${MOI_BOT_STEADY_MAX:-20}"
+  local pause="${MOI_BOT_STEADY_SLEEP:-3}" steady=0 state i
+  for ((i = 0; i < max; i++)); do
+    state="$(eval "$probe" 2>/dev/null || echo 'missing -1')"
+    if [ "$state" = "running 0" ]; then steady=$((steady + 1)); else steady=0; fi
+    [ "$steady" -ge "$need" ] && return 0
+    sleep "$pause"
+  done
+  return 1
+}
+
 # The status timer must not report the restart window as an outage.
 status_timer() {
   [ "$MANAGE_TIMER" = 1 ] || return 0
