@@ -32,6 +32,7 @@ class FakeSocket {
 }
 
 const snapshot = (accountSequence: string): PortfolioSnapshot => ({
+  sessionId: 's-1',
   wallets: [],
   positions: [],
   reservations: [],
@@ -40,7 +41,10 @@ const snapshot = (accountSequence: string): PortfolioSnapshot => ({
   market: { health: {}, recoveryFill: {} },
 });
 
-function setup(seed?: PortfolioSnapshot | { accountSequence: string }) {
+function setup(
+  seed?: PortfolioSnapshot | { accountSequence: string },
+  extra: Partial<Parameters<typeof usePortfolioStream>[0]> = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
@@ -53,7 +57,7 @@ function setup(seed?: PortfolioSnapshot | { accountSequence: string }) {
   const factory = vi.fn(
     (url: string) => new FakeSocket(url) as unknown as WebSocket,
   );
-  const options = { webSocketFactory: factory, random: () => 0.5 };
+  const options = { webSocketFactory: factory, random: () => 0.5, ...extra };
   const hook = renderHook(() => usePortfolioStream(options), { wrapper });
   return { hook, factory, queryClient };
 }
@@ -110,13 +114,16 @@ describe('usePortfolioStream stream protocol (§7.5)', () => {
         heartbeatIntervalMs: 30_000,
       }),
     );
+    // A whole snapshot, as `#enrichPayload` sends: a partial payload is
+    // refused and refetched now, so `{ wallets: [] }` would never advance the
+    // sequence this test is about.
     for (const sequence of ['43', '44', '45'])
       act(() =>
         first.receive({
           type: 'event',
           eventId: `e${sequence}`,
           accountSequence: sequence,
-          payload: { wallets: [] },
+          payload: snapshot(sequence),
         }),
       );
     act(() => first.onclose?.({ code: 1006 } as CloseEvent));
@@ -277,5 +284,165 @@ describe('usePortfolioStream fill announcements', () => {
     );
     act(() => socket.receive(filledEvent('99', [fill('f1')])));
     expect(onFill).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The write itself. `portfolio-cache-contract.test.ts` fixes what a snapshot
+ * must look like before it may go into the cache; these fix that it goes there
+ * at all, and that a refused patch does not.
+ *
+ * Red on purpose until the implementation lands — nothing writes the cache
+ * today, which is why the trade page's wallets and sell-side holding sit still
+ * between invalidations while the portfolio page beside them is live.
+ */
+describe('usePortfolioStream writing through to the query cache', () => {
+  const complete = (accountSequence: string, krw: string) =>
+    ({
+      sessionId: 's-1',
+      wallets: [{ currency: 'KRW', total: krw, available: krw, reserved: '0' }],
+      positions: [],
+      reservations: [],
+      activeOrders: [],
+      accountSequence,
+      market: { health: {}, recoveryFill: {} },
+    }) as unknown as PortfolioSnapshot;
+
+  const patch = (accountSequence: string, krw: string) => ({
+    type: 'event',
+    eventId: `e-${accountSequence}`,
+    accountSequence,
+    eventType: 'ORDER_FILLED',
+    payload: {
+      orderId: 'o-1',
+      status: 'FILLED',
+      filledQuantity: '1',
+      ...complete(accountSequence, krw),
+    },
+  });
+
+  it('publishes an applied patch so every cache reader sees it', () => {
+    // The trade page reads its wallets and the sell-side holding straight out
+    // of this cache entry. Patching only the hook's own state leaves that
+    // page a version behind until something happens to invalidate.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('43', '900')));
+
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('43');
+    expect(cached.wallets[0]?.available).toBe('900');
+  });
+
+  it('publishes nothing the REST response would not have answered', () => {
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('43', '900')));
+
+    // The sequence is asserted alongside the key set on purpose. Checking the
+    // keys alone would pass while nothing writes at all — the seeded snapshot
+    // is already REST-shaped — and a test that cannot tell "written correctly"
+    // from "never written" is worse than no test, because it reads as cover.
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('43');
+    expect(Object.keys(cached).sort()).toEqual([
+      'accountSequence',
+      'activeOrders',
+      'market',
+      'positions',
+      'reservations',
+      'sessionId',
+      'wallets',
+    ]);
+  });
+
+  it('never lets a slow refetch land a sequence older than the cache holds', async () => {
+    // The publish guard only governs this hook's own writes. A refetch — an
+    // order invalidating the portfolio, the FX ticket, `requestRefresh` after
+    // a reconnect — lands through react-query's own success path, and one
+    // issued before the stream moved can answer with an older snapshot. The
+    // cache would go backwards, wallets and all, until the next event tripped
+    // the gap check: the very staleness this change exists to remove.
+    const fetchSnapshot = vi.fn(async () => complete('43', '700'));
+    const { queryClient } = setup(complete('42', '1000'), { fetchSnapshot });
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+    act(() => socket.receive(patch('44', '800')));
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: PORTFOLIO_QUERY_KEY });
+    });
+
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('44');
+    expect(cached.wallets[0]?.available).toBe('800');
+  });
+
+  it('still lets a refetch answering the same sequence win', async () => {
+    // The FX conversion case: balances move without the sequence advancing,
+    // so a tie must go to the refetch. Only strictly backwards is refused.
+    const fetchSnapshot = vi.fn(async () => complete('43', '700'));
+    const { queryClient } = setup(complete('42', '1000'), { fetchSnapshot });
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: PORTFOLIO_QUERY_KEY });
+    });
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('700');
+  });
+
+  it('never writes back over a refetch that did not advance the sequence', () => {
+    // An FX conversion moves balances through `invalidateQueries` and is
+    // answered by a refetch that does not advance the account sequence — the
+    // stream carries no event for it. Publishing a snapshot that merely
+    // restates the cached sequence would put the pre-conversion balances back
+    // over that refetch, which is exactly what an e2e journey caught.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+
+    // The refetch answers the same sequence with balances only it knows about.
+    act(() => {
+      queryClient.setQueryData(PORTFOLIO_QUERY_KEY, complete('43', '800'));
+    });
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('800');
+  });
+
+  it('leaves the cache alone when the patch is refused', () => {
+    // A gap means the snapshot in hand is no longer trustworthy. Writing a
+    // half-applied one would hand every reader a state the server never sent,
+    // which is worse than the staleness this whole change is fixing.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+
+    act(() => socket.receive(patch('99', '900')));
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('1000');
   });
 });

@@ -36,34 +36,77 @@ export function createPortfolioState(
   };
 }
 
+/**
+ * Whether an event payload is a whole snapshot rather than a piece of one.
+ *
+ * It asks for every collection and the market object, not just `wallets`.
+ * `applyEvent` spreads the payload over the previous snapshot, so a field the
+ * payload omits is carried forward silently — safe only while
+ * `ProductionRuntime.#enrichPayload` happens to put the entire portfolio on
+ * every event, which is the server's convenience and not a promise. Now that
+ * what this produces is published to the `PORTFOLIO_QUERY_KEY` cache, a
+ * half-applied snapshot stops being one screen's display bug and becomes what
+ * every reader of that cache sees. Anything short of complete refuses to apply
+ * and refetches — the answer this reducer already gave to a payload with no
+ * snapshot shape at all.
+ */
 function isSnapshotPatch(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false;
+  const patch = payload as Record<string, unknown>;
+  const market = patch.market as Record<string, unknown> | undefined;
   return (
-    typeof payload === 'object' &&
-    payload !== null &&
-    Array.isArray((payload as { wallets?: unknown }).wallets)
+    typeof patch.sessionId === 'string' &&
+    patch.sessionId.length > 0 &&
+    Array.isArray(patch.wallets) &&
+    Array.isArray(patch.positions) &&
+    Array.isArray(patch.reservations) &&
+    Array.isArray(patch.activeOrders) &&
+    typeof market === 'object' &&
+    market !== null &&
+    typeof market.health === 'object' &&
+    market.health !== null &&
+    typeof market.recoveryFill === 'object' &&
+    market.recoveryFill !== null
   );
 }
 
+/**
+ * Named field by field rather than spread, because the payload is the
+ * snapshot *plus the event's own fields* — `orderId`, `status`,
+ * `filledQuantity`, `recoveryEpoch`, `recoveryFill`. Spreading carried those
+ * onto the snapshot, which was survivable while the result stayed inside this
+ * store and is not once it is published to the query cache: components that
+ * never saw the event would read them as portfolio state, and they would
+ * linger after the event that explained them.
+ *
+ * The caller has already established the payload is a complete snapshot, so
+ * every collection is taken from it whole. `market` still merges: its two maps
+ * are keyed by market code, and a snapshot naming only the market that moved
+ * must not erase the other one's health.
+ */
 function applyEvent(
   snapshot: PortfolioSnapshot,
   payload: PortfolioEvent,
   accountSequence: string,
 ): PortfolioSnapshot {
-  const patch = payload as Partial<PortfolioSnapshot>;
+  const patch = payload as unknown as PortfolioSnapshot;
   return {
-    ...snapshot,
-    ...patch,
+    // Taken, never inherited. Carrying the previous session's id forward when
+    // a payload omitted it is the same accident this reducer refuses for every
+    // other field — and the gate above has already established it is there.
+    sessionId: patch.sessionId,
+    wallets: patch.wallets,
+    positions: patch.positions,
+    reservations: patch.reservations,
+    activeOrders: patch.activeOrders,
     accountSequence,
-    market: patch.market
-      ? {
-          ...snapshot.market,
-          ...patch.market,
-          recoveryFill: {
-            ...snapshot.market.recoveryFill,
-            ...patch.market.recoveryFill,
-          },
-        }
-      : snapshot.market,
+    market: {
+      health: { ...snapshot.market.health, ...patch.market.health },
+      recoveryFill: {
+        ...snapshot.market.recoveryFill,
+        ...patch.market.recoveryFill,
+      },
+    },
   };
 }
 
