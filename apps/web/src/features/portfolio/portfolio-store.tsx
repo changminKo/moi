@@ -55,6 +55,8 @@ function isSnapshotPatch(payload: unknown): boolean {
   const patch = payload as Record<string, unknown>;
   const market = patch.market as Record<string, unknown> | undefined;
   return (
+    typeof patch.sessionId === 'string' &&
+    patch.sessionId.length > 0 &&
     Array.isArray(patch.wallets) &&
     Array.isArray(patch.positions) &&
     Array.isArray(patch.reservations) &&
@@ -89,7 +91,10 @@ function applyEvent(
 ): PortfolioSnapshot {
   const patch = payload as unknown as PortfolioSnapshot;
   return {
-    sessionId: patch.sessionId ?? snapshot.sessionId,
+    // Taken, never inherited. Carrying the previous session's id forward when
+    // a payload omitted it is the same accident this reducer refuses for every
+    // other field — and the gate above has already established it is there.
+    sessionId: patch.sessionId,
     wallets: patch.wallets,
     positions: patch.positions,
     reservations: patch.reservations,

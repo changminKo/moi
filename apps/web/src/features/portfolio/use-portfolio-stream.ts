@@ -34,6 +34,8 @@ type Options = Readonly<{
    * consumer of the same socket.
    */
   onFill?: (announcement: FillAnnouncement) => void;
+  /** The snapshot read, injectable so a test can drive a refetch's answer. */
+  fetchSnapshot?: () => Promise<PortfolioSnapshot>;
 }>;
 
 const AFTER_SEQUENCE = /^(0|[1-9][0-9]{0,18})$/;
@@ -61,7 +63,30 @@ export function usePortfolioStream(
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: PORTFOLIO_QUERY_KEY,
-    queryFn: () => apiClient.get<PortfolioSnapshot>('/api/v1/portfolio'),
+    // The read is reconciled here rather than trusted, because this is where
+    // a refetch lands. An invalidation issued before the stream moved — an
+    // accepted order, the FX ticket, `requestRefresh` after a reconnect — can
+    // answer with a snapshot older than the one already cached, and
+    // react-query would store it: the cache would go backwards, wallets and
+    // all, until the next event tripped the gap check and asked again. The
+    // publish effect below guards only its own writes, so the rule has to sit
+    // on the path every write shares.
+    //
+    // Strictly backwards only. A tie goes to the read, because a conversion
+    // moves balances without advancing the sequence and the read is the only
+    // thing that carries it.
+    queryFn: async () => {
+      const read = await (
+        options.fetchSnapshot ??
+        (() => apiClient.get<PortfolioSnapshot>('/api/v1/portfolio'))
+      )();
+      const cached =
+        queryClient.getQueryData<PortfolioSnapshot>(PORTFOLIO_QUERY_KEY);
+      return cached !== undefined &&
+        isAhead(cached.accountSequence, read.accountSequence)
+        ? cached
+        : read;
+    },
     enabled: options.enabled !== false,
   });
   const [state, setState] = useState<PortfolioState | undefined>(() =>

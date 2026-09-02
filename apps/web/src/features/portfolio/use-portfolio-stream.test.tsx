@@ -41,7 +41,10 @@ const snapshot = (accountSequence: string): PortfolioSnapshot => ({
   market: { health: {}, recoveryFill: {} },
 });
 
-function setup(seed?: PortfolioSnapshot | { accountSequence: string }) {
+function setup(
+  seed?: PortfolioSnapshot | { accountSequence: string },
+  extra: Partial<Parameters<typeof usePortfolioStream>[0]> = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
@@ -54,7 +57,7 @@ function setup(seed?: PortfolioSnapshot | { accountSequence: string }) {
   const factory = vi.fn(
     (url: string) => new FakeSocket(url) as unknown as WebSocket,
   );
-  const options = { webSocketFactory: factory, random: () => 0.5 };
+  const options = { webSocketFactory: factory, random: () => 0.5, ...extra };
   const hook = renderHook(() => usePortfolioStream(options), { wrapper });
   return { hook, factory, queryClient };
 }
@@ -359,6 +362,50 @@ describe('usePortfolioStream writing through to the query cache', () => {
       'sessionId',
       'wallets',
     ]);
+  });
+
+  it('never lets a slow refetch land a sequence older than the cache holds', async () => {
+    // The publish guard only governs this hook's own writes. A refetch — an
+    // order invalidating the portfolio, the FX ticket, `requestRefresh` after
+    // a reconnect — lands through react-query's own success path, and one
+    // issued before the stream moved can answer with an older snapshot. The
+    // cache would go backwards, wallets and all, until the next event tripped
+    // the gap check: the very staleness this change exists to remove.
+    const fetchSnapshot = vi.fn(async () => complete('43', '700'));
+    const { queryClient } = setup(complete('42', '1000'), { fetchSnapshot });
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+    act(() => socket.receive(patch('44', '800')));
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: PORTFOLIO_QUERY_KEY });
+    });
+
+    const cached = queryClient.getQueryData(
+      PORTFOLIO_QUERY_KEY,
+    ) as PortfolioSnapshot;
+    expect(cached.accountSequence).toBe('44');
+    expect(cached.wallets[0]?.available).toBe('800');
+  });
+
+  it('still lets a refetch answering the same sequence win', async () => {
+    // The FX conversion case: balances move without the sequence advancing,
+    // so a tie must go to the refetch. Only strictly backwards is refused.
+    const fetchSnapshot = vi.fn(async () => complete('43', '700'));
+    const { queryClient } = setup(complete('42', '1000'), { fetchSnapshot });
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: PORTFOLIO_QUERY_KEY });
+    });
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('700');
   });
 
   it('never writes back over a refetch that did not advance the sequence', () => {

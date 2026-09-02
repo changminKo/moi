@@ -162,6 +162,25 @@ describe('what may be written to the portfolio query cache', () => {
     expect(next.sync).toEqual({ status: 'STALE', refreshRequested: true });
   });
 
+  it('refuses a payload that does not name the session it belongs to', () => {
+    // `sessionId` was the one field still carried forward from the previous
+    // snapshot when a payload omitted it — the same "an accident becomes the
+    // truth of the cache" pattern this change refuses for every other field,
+    // on the field added because §16.32 is about exactly that drift.
+    const { sessionId: _omitted, ...withoutSession } = restSnapshot(
+      '43',
+    ) as unknown as Record<string, unknown>;
+
+    const next = reducePortfolio(createPortfolioState(restSnapshot('42')), {
+      type: 'event',
+      eventId: 'e-43',
+      accountSequence: '43',
+      payload: withoutSession,
+    });
+
+    expect(next.sync).toEqual({ status: 'STALE', refreshRequested: true });
+  });
+
   it('refuses a payload whose collections are the wrong shape', () => {
     const malformed = {
       type: 'event' as const,
