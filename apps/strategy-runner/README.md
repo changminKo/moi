@@ -4,8 +4,10 @@ The trading bot's process: it reads the market through the paper API, asks each
 configured strategy what to do, filters that through a risk gate, and places the
 orders that survive. It is the runner of
 [`docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md`](../../docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md),
-at its **phase C** scope, plus **phase D**'s kill-switch core (`src/runner/kill-switch.ts`)
-and **phase E**'s backtest harness in `src/backtest`.
+at its **phase C** scope, plus **phase D** (the kill switch in
+`src/runner/kill-switch.ts`, the image in `Dockerfile`, the Discord channel in
+`src/runner/reporter-wiring.ts`) and **phase E**'s backtest harness in
+`src/backtest`.
 
 ## What is here, and what is not
 
@@ -27,7 +29,7 @@ Deliberately **not** here:
 | Not in C | Where it belongs | Why it is not pulled forward |
 |---|---|---|
 | The kill-switch submission barrier | **here since phase D** — see "The kill switch" | |
-| Discord embeds, the compose service | D (#93) | The `Reporter` seam is here; the wiring is not |
+| Discord embeds, the image, the host lifecycle | **here since phase D** — `runner/reporter-wiring.ts`, `Dockerfile`, `COMPOSE_PROFILES=bot` (docs/operations/deployment.md) | |
 | Escalating a tripped loss limit past "refuse new entries" | **here since phase D** | `RiskGate.lossLimitBreach` feeds the kill switch |
 | Mid-price derivation and its tick-size rounding | nowhere — see below | §5.2's premise no longer holds |
 
@@ -61,6 +63,7 @@ direction `paper-broker-contract.integration.test.ts` already points.
 | `BOT_CONFIG_PATH` | The JSON configuration file |
 | `BOT_STATE_DIR` | Where the state store lives. A compose volume in deployment (§8.1) |
 | `BOT_TICK_LOG` | Optional. An NDJSON path to record every tick to, for a later backtest (§8.2). Off by default: the log does not rotate, and §8.4 makes a recorded series the *only* backtest input there is, so recording is a decision taken before the period you want to replay |
+| `DISCORD_WEBHOOK_TRADE_URL` | Optional. The bot's **own** Discord channel (§7.4). Absent: reports go to stdout only. Present: every report is fanned out to stdout and the channel, with the session cookie and CSRF token masked by value. Malformed, or equal to `DISCORD_WEBHOOK_URL`: the runner refuses to start |
 
 The two origins are separate because in compose the bot reaches
 `http://paper-api:3000` while the public origin is the browser app's — sending

@@ -329,28 +329,45 @@ requires, and the artefacts are the same ones the local smoke uses.
 
 ## Strategy runner (`bot`, opt-in)
 
-The strategy runner is declared in `infra/compose.yaml` as the service `bot`,
-behind the `bot` profile. **A profile-gated service does not start**: neither
-`docker compose up -d` nor `infra/oracle/deploy.sh` brings it up, and a release
-that changes nothing else leaves a running stack exactly as it was. Starting it
-is a separate, deliberate command:
+The strategy runner is the compose service `bot`, behind the `bot` profile, built
+from `apps/strategy-runner/Dockerfile` and published by
+`.github/workflows/publish.yml` as `ghcr.io/changminko/moi-strategy-runner`
+(amd64 + arm64, Trivy-gated, like the other two). The Oracle overlay pulls it
+under the same `MOI_IMAGE_TAG`.
 
-```bash
-docker compose -f infra/compose.yaml --profile bot up -d bot
+**A profile-gated service does not start on its own.** It joins the stack when
+`/etc/moi/moi.env` says so:
+
+```
+COMPOSE_PROFILES=bot
 ```
 
-Until `apps/strategy-runner/Dockerfile` exists there is nothing for the profile
-to build, which is the intended state while the runner is incomplete.
+systemd (`moi.service`) and `infra/oracle/deploy.sh` both read that file, so with
+the line present `pull`, `up` and `stop` include the bot, a release restarts it
+with the stack, and the deploy's verify step **fails unless the bot container is
+running** — a runner that refuses its configuration is a restart loop, and that
+must not hide behind `restart: unless-stopped`. Remove the line and
+`systemctl restart moi` to take it out again.
 
-Before enabling it, write the operator configuration — the runner has no
-default risk limits and refuses to start without one:
+Before enabling it:
 
-```bash
-cp infra/bot/runner.example.json infra/bot/runner.json   # then edit it
-```
+1. `cp infra/bot/runner.example.json infra/bot/runner.json` on the host
+   (`/opt/moi/infra/bot/`) and edit it — the runner has no default risk limits
+   and refuses to start without the file. It is mounted read-only at
+   `/etc/moi-bot` and is not committed (`infra/bot/README.md`).
+2. Put `DISCORD_WEBHOOK_TRADE_URL` in the sops file: the bot's **own** channel,
+   never `DISCORD_WEBHOOK_URL` (the preflight, the contract checker and the
+   runner itself all refuse the same URL under both names; a malformed URL is a
+   refusal to start). Without it the bot still runs and reports to
+   `docker logs` only.
+3. `sudo /opt/moi/infra/oracle/deploy.sh main`.
 
-It is mounted read-only at `/etc/moi-bot` and is not committed; see
-`infra/bot/README.md`.
+The bot's own reports — every decision, refusal, fill, and the kill switch —
+go to that channel and to `docker compose … logs bot`. Clearing the kill switch
+(`apps/strategy-runner/README.md`, "The kill switch"): remove
+`kill-switch.json` from the `bot-state` volume and restart the bot —
+`docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml exec bot rm /var/lib/moi-bot/kill-switch.json`
+then `… restart bot`.
 
 What the deployment surface guarantees:
 

@@ -6,8 +6,14 @@ Mounted read-only at `/etc/moi-bot` in the `bot` service;
 ```bash
 cp infra/bot/runner.example.json infra/bot/runner.json
 $EDITOR infra/bot/runner.json
+# local compose stack:
 docker compose -f infra/compose.yaml --profile bot up -d bot
+# the Oracle reference host: put COMPOSE_PROFILES=bot in /etc/moi/moi.env and
+# run infra/oracle/deploy.sh — see docs/operations/deployment.md.
 ```
+
+`runner.example.json` is loaded by a test (`apps/strategy-runner/src/config.test.ts`),
+so it is always a file the runner accepts.
 
 `runner.json` is **not committed** (`.gitignore`). Risk limits and the symbol
 allow-list are a decision the operator makes for one deployment, and a
@@ -22,6 +28,7 @@ instrument any configured strategy subscribes to, that one instrument is traded
 by exactly one strategy, and that the API allows at most four quote
 subscriptions in total.
 
-Nothing in this directory is a secret. The Discord webhook, the session cookie
-and the CSRF token never appear here — they arrive through the environment and
-the state volume respectively.
+Nothing in this directory is a secret. The Discord webhook
+(`DISCORD_WEBHOOK_TRADE_URL`, the bot's own channel), the session cookie and the
+CSRF token never appear here — they arrive through the environment and the state
+volume respectively.

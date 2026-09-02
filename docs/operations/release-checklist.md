@@ -117,6 +117,7 @@ PostgreSQL, and Redis. Its `finally` path cancelled all test orders and restored
   public Toss OpenAPI response example; no path-wide rule is used.
 - [x] `pnpm audit --prod --audit-level high`: no known vulnerability.
 - [x] Trivy 0.74.0 reports zero HIGH/CRITICAL findings for both final images:
+- [ ] Trivy reports zero HIGH/CRITICAL findings for the third image, `strategy-runner`, on its first publish (phase D, #93) — recorded from the `Publish images` run on `main`.
   paper-api Alpine OS `0`, Node packages `0`; web Alpine OS `0`, language
   packages `0`.
 - [x] Deployment contract, production build, and Playwright verify that browser
