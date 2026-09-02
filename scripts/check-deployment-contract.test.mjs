@@ -23,6 +23,7 @@ const TRACKED = [
   '.github',
   'apps/paper-api/Dockerfile',
   'apps/web/Dockerfile',
+  'apps/strategy-runner/Dockerfile',
   'apps/web/server.mjs',
   'apps/web/server.test.mjs',
   'apps/paper-api/src/lifecycle/shutdown-coordinator.ts',
@@ -42,6 +43,7 @@ const TRACKED = [
   'packages/trading-core/package.json',
   'packages/market-data/package.json',
   'packages/strategy-sdk/package.json',
+  'packages/strategy-reporter/package.json',
 ];
 
 function copyRepo(mutate) {
@@ -256,6 +258,119 @@ describe('check-deployment-contract (A8)', () => {
       /bot needs a state volume/,
     ],
   ];
+  /**
+   * Phase D wires the image (#93). Each of these is a way the three artifacts
+   * that must move together — Dockerfile, publish matrix, GHCR overlay — could
+   * drift apart, plus the host-side promise that an enabled bot is actually up.
+   */
+  it('fails when the publish workflow does not build the strategy runner image', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, '.github/workflows/publish.yml');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /\n\s*- name: strategy-runner\n\s*dockerfile: apps\/strategy-runner\/Dockerfile/,
+          '',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /publish\.yml must build an image for compose service bot/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('fails when the production overlay lets the bot build on the host', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/compose.override.yaml');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /\n {2}bot:\n {4}image: [^\n]+\n {4}build: !reset null\n/,
+          '\n',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /overlay must pull bot from GHCR/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('fails when the bot image runs something other than the runner entry point', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/strategy-runner/Dockerfile');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          'CMD ["node", "apps/strategy-runner/dist/main.js"]',
+          'CMD ["node", "apps/strategy-runner/dist/index.js"]',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /bot Dockerfile CMD must run apps\/strategy-runner\/dist\/main\.js/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('fails when the bot image does not own its state directory', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/strategy-runner/Dockerfile');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          ' \\\n    && mkdir -p /var/lib/moi-bot && chown node:node /var/lib/moi-bot',
+          '',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /bot image must own \/var\/lib\/moi-bot as node/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('fails when deploy.sh stops checking that an enabled bot is running', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /COMPOSE_PROFILES/g,
+          'COMPOSE_PROFILE',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must fail the release when COMPOSE_PROFILES enables the bot/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   for (const [label, mutate, expected] of botCases) {
     it(`fails when ${label}`, () => {
       const dir = copyRepo((d) => {
