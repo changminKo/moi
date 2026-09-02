@@ -278,6 +278,40 @@ describe('StreamHub replay→live barrier (U11)', () => {
     await expect(hub.deliver('sid', E(3))).resolves.toBeUndefined();
   });
 
+  /**
+   * The window between `ready` and LIVE is real: `StreamSession.open` sends
+   * `ready` and then replays account events from the database before the hub
+   * promotes the entry. A client that starts acting on `ready` — the strategy
+   * runner does — must not lose the quotes the market publishes meanwhile:
+   * quotes are not replayed (§5.3), so a quote dropped here is a price the
+   * client never sees until the book next moves. Account events are queued for
+   * that window; quotes for the symbols the client asked for are forwarded.
+   */
+  it('forwards quotes for requested symbols to an OPENING entry instead of dropping them', () => {
+    const hub = new StreamHub();
+    const asked = socket();
+    const other = socket();
+    hub.registerOpening('sid', asked, new Set(['US:AAPL']));
+    hub.registerOpening('sid', other, new Set(['KR:005930']));
+    hub.publishQuote({
+      market: 'US',
+      symbol: 'AAPL',
+      recoveryEpoch: 1n,
+      marketDataVersion: 7n,
+      payload: { price: '1' },
+    });
+    expect(received(asked)).toEqual(['quote']);
+    expect(JSON.parse(asked.messages[0] as string)).toMatchObject({
+      type: 'quote',
+      market: 'US',
+      symbol: 'AAPL',
+      recoveryEpoch: '1',
+      marketDataVersion: '7',
+      payload: { price: '1' },
+    });
+    expect(received(other)).toEqual([]);
+  });
+
   it('supports two entries for one session and fans out deliver/quote/heartbeat to LIVE only (U13)', async () => {
     const hub = new StreamHub();
     const a = socket();

@@ -1,10 +1,11 @@
 import type { MetricsRegistry } from '../../observability/metrics.js';
-import type {
-  DurableAccountEvent,
-  QuoteEvent,
-  StreamOpenResult,
-  StreamSession,
-  StreamSocket,
+import {
+  type DurableAccountEvent,
+  type QuoteEvent,
+  quoteFrame,
+  type StreamOpenResult,
+  type StreamSession,
+  type StreamSocket,
 } from './stream-session.js';
 
 export const STREAM_OPENING_QUEUE_MAX = 200;
@@ -18,6 +19,11 @@ type LogFn = (event: string, fields: Record<string, unknown>) => void;
 interface Entry {
   readonly handle: StreamHandle;
   readonly ws: StreamSocket;
+  /**
+   * The `MARKET:SYMBOL` keys the client asked for at the upgrade. Quotes for
+   * them are forwarded while the entry is still OPENING — see `publishQuote`.
+   */
+  readonly quoteSymbols: ReadonlySet<string>;
   state: StreamEntryState;
   queue: DurableAccountEvent[];
   session?: StreamSession;
@@ -52,9 +58,19 @@ export class StreamHub {
     this.#deps = deps;
   }
 
-  registerOpening(sessionId: string, ws: StreamSocket): StreamHandle {
+  registerOpening(
+    sessionId: string,
+    ws: StreamSocket,
+    quoteSymbols: ReadonlySet<string> = new Set(),
+  ): StreamHandle {
     const handle: StreamHandle = { id: this.#nextId++, sessionId };
-    const entry: Entry = { handle, ws, state: 'OPENING', queue: [] };
+    const entry: Entry = {
+      handle,
+      ws,
+      quoteSymbols,
+      state: 'OPENING',
+      queue: [],
+    };
     const set = this.#entries.get(sessionId) ?? new Set<Entry>();
     set.add(entry);
     this.#entries.set(sessionId, set);
@@ -135,9 +151,24 @@ export class StreamHub {
       if (entry.state === 'LIVE') entry.ws.send(JSON.stringify(frame));
   }
 
+  /**
+   * LIVE entries hear quotes through their session, which knows what they
+   * subscribed. An OPENING entry has no session yet — it is between the `ready`
+   * frame `StreamSession.open` already sent and the replay that must finish
+   * before it is promoted — but the client on the other end has been told it
+   * is connected. Quotes are not replayed (§5.3), so one dropped in that
+   * window is a price the client never sees until the book next moves; the
+   * strategy runner's cycle observed exactly that after a restart, whose replay
+   * makes the window long enough to matter. So quotes for the symbols the
+   * client asked for are forwarded here as well, straight to the socket.
+   */
   publishQuote(event: QuoteEvent): void {
-    for (const entry of this.#byHandle.values())
+    const key = `${event.market}:${event.symbol}`;
+    for (const entry of this.#byHandle.values()) {
       if (entry.state === 'LIVE') entry.session?.publishQuote(event);
+      else if (entry.quoteSymbols.has(key))
+        entry.ws.send(JSON.stringify(quoteFrame(event)));
+    }
   }
 
   heartbeat(serverTime: string): void {
