@@ -168,7 +168,13 @@ export function createStreamUpgradeHandler(
     query: ReturnType<typeof parseStreamQuery>,
   ): Promise<void> => {
     const socket = wrap(ws);
-    const handle = options.hub.registerOpening(sessionId, socket);
+    const handle = options.hub.registerOpening(
+      sessionId,
+      socket,
+      new Set(
+        query.quoteSymbols.map(({ market, symbol }) => `${market}:${symbol}`),
+      ),
+    );
     ws.on('close', () => options.hub.unregister(sessionId, handle));
     ws.on('error', (error) => {
       options.log?.('stream.socket_error', { sessionId, error: error.message });

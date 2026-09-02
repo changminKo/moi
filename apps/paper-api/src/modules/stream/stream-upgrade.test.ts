@@ -460,6 +460,48 @@ describe('stream upgrade bridge', () => {
     );
   });
 
+  /**
+   * §16.50: the wiring. While replay is still pending the entry is OPENING, and
+   * a quote for a symbol the client asked for must reach it now — before the
+   * replayed events, since those are what the client is waiting on — while a
+   * quote for a tradable symbol it did not ask for must not. After promotion
+   * the LIVE fan-out is the only path, so a quote arrives exactly once.
+   */
+  it('a quote published during replay reaches the client before the replayed events', async () => {
+    fixture.source.replayDeferred = new Deferred();
+    const c = client('?afterSequence=2&quoteSymbols=US:AAPL');
+    await c.opened;
+    await vi.waitFor(() => expect(fixture.hub.size()).toBe(1));
+    await vi.waitFor(() => expect(fixture.source.replayCalls).toHaveLength(1));
+    const quote = (symbol: string, market: 'US' | 'KR', version: bigint) =>
+      fixture.hub.publishQuote({
+        market,
+        symbol,
+        recoveryEpoch: 1n,
+        marketDataVersion: version,
+        payload: { symbol },
+      });
+    quote('AAPL', 'US', 7n);
+    quote('005930', 'KR', 8n);
+    await vi.waitFor(() =>
+      expect(c.messages.filter((m) => m.type === 'quote')).toHaveLength(1),
+    );
+    expect(eventIds(c.messages)).toEqual([]);
+    fixture.source.replayDeferred.resolve([E(3), E(4)]);
+    await vi.waitFor(() => expect(eventIds(c.messages)).toEqual(['e3', 'e4']));
+    quote('AAPL', 'US', 9n);
+    await vi.waitFor(() =>
+      expect(c.messages.filter((m) => m.type === 'quote')).toHaveLength(2),
+    );
+    expect(
+      c.messages
+        .filter((m) => m.type === 'quote')
+        .map((m) => m.marketDataVersion),
+    ).toEqual(['7', '9']);
+    const types = c.messages.map((m) => m.type);
+    expect(types.indexOf('quote')).toBeLessThan(types.indexOf('event'));
+  });
+
   it('U11d: an OUTBOX_GAP close during open leaves no registry entry', async () => {
     fixture.source.events = [E(10), E(11)];
     const c = client('?afterSequence=1');
