@@ -98,6 +98,11 @@ function harness(
     readonly answers?: readonly (BrokerOrder | Error)[];
     readonly directory?: string;
     readonly maxAttempts?: number;
+    readonly barrier?: (kind: 'place' | 'cancel') => boolean;
+    readonly onExhausted?: (failure: {
+      readonly code: string;
+      readonly consecutiveFailures: number;
+    }) => void;
   } = {},
 ) {
   const directory =
@@ -135,6 +140,10 @@ function harness(
       ...(options.maxAttempts === undefined
         ? {}
         : { maxAttempts: options.maxAttempts }),
+      ...(options.barrier === undefined ? {} : { barrier: options.barrier }),
+      ...(options.onExhausted === undefined
+        ? {}
+        : { onExhausted: options.onExhausted }),
     }),
   };
 }
@@ -446,5 +455,156 @@ describe('OrderGateway failure handling', () => {
     await gateway.place('samsung', BUY, TICK);
 
     expect(reporter.lines.join('\n')).not.toContain('leaked');
+  });
+});
+
+/**
+ * Phase D's submission barrier (design §6, §7.2; kill-switch design §2.2). The
+ * gateway does not know *why* the barrier is down — that is the kill switch's
+ * business — only that a `place` may not go out and a `cancel` may.
+ */
+describe('OrderGateway under the kill switch barrier', () => {
+  const CANCEL = Object.freeze({
+    kind: 'cancel',
+    reason: 'kill switch',
+    orderId: 'o-9',
+  } as const);
+
+  it('settles a place as halted instead of submitting it', async () => {
+    const { broker, gateway, state, reporter } = harness({
+      barrier: (kind) => kind === 'cancel',
+    });
+
+    await expect(gateway.place('samsung', BUY, TICK)).resolves.toStrictEqual({
+      decisionId: 'd-1',
+      outcome: 'halted',
+    });
+    expect(broker.calls).toStrictEqual([]);
+    expect(state.pendingDecisions()).toStrictEqual([]);
+    expect(reporter.lines.at(-1)).toMatch(
+      /\[warn\] the place was halted by the kill switch .*code=KILL_SWITCH/u,
+    );
+  });
+
+  it('lets a cancel through the same barrier', async () => {
+    const { broker, gateway } = harness({
+      answers: [{ id: 'o-9', status: 'CANCELLED' } as BrokerOrder],
+      barrier: (kind) => kind === 'cancel',
+    });
+    const record = gateway.record('kill-switch', CANCEL, null, {
+      decisionId: 'kill:2026-09-02T02:00:00.000Z:o-9',
+    });
+
+    await expect(
+      gateway.submit(record as NonNullable<typeof record>),
+    ).resolves.toMatchObject({ outcome: 'accepted', orderId: 'o-9' });
+    expect(broker.calls[0]?.kind).toBe('cancel');
+  });
+
+  /**
+   * The barrier is asked before *every* attempt, not once at the door. A trip
+   * that lands during a retry backoff — a fill wedge on the other chain, say —
+   * must stop the next attempt; the one already sent cannot be unsent, and the
+   * sweep is what catches that.
+   */
+  it('stops retrying when the barrier comes down between attempts', async () => {
+    let down = false;
+    const { broker, gateway } = harness({
+      answers: [new DomainError('SERVICE_UNAVAILABLE', 'try later')],
+      barrier: () => !down,
+      maxAttempts: 4,
+    });
+    const originalPlace = broker.placeOrder.bind(broker);
+
+    broker.placeOrder = async (command) => {
+      down = true;
+
+      return originalPlace(command);
+    };
+
+    await expect(gateway.place('samsung', BUY, TICK)).resolves.toMatchObject({
+      outcome: 'halted',
+    });
+    expect(broker.calls).toHaveLength(1);
+  });
+
+  it('resolves idle() only after every in-flight submission has settled', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { broker, gateway } = harness();
+    const originalPlace = broker.placeOrder.bind(broker);
+
+    broker.placeOrder = async (command) => {
+      await gate;
+
+      return originalPlace(command);
+    };
+
+    const placing = gateway.place('samsung', BUY, TICK);
+    let idle = false;
+    const waiting = gateway.idle().then(() => {
+      idle = true;
+    });
+
+    await Promise.resolve();
+    expect(idle).toBe(false);
+
+    release();
+    await placing;
+    await waiting;
+    expect(idle).toBe(true);
+    // Nothing in flight: resolves at once.
+    await expect(gateway.idle()).resolves.toBeUndefined();
+  });
+
+  /**
+   * Design §7.2: "10회 실패 시 킬 스위치". Counted per failed *attempt* across
+   * decisions, reset by a success, and a rejection is a verdict rather than a
+   * failure so it neither counts nor resets. The callback fires once, on the
+   * crossing.
+   */
+  it('reports exhaustion once after ten failed attempts in a row', async () => {
+    const exhausted: { code: string; consecutiveFailures: number }[] = [];
+    const fault = new DomainError('SERVICE_UNAVAILABLE', 'down');
+    const { gateway } = harness({
+      answers: [fault],
+      maxAttempts: 4,
+      onExhausted: (failure) => exhausted.push(failure),
+    });
+
+    await gateway.place('samsung', BUY, TICK); // attempts 1-4
+    await gateway.place('samsung', BUY, TICK); // 5-8
+    expect(exhausted).toStrictEqual([]);
+    await gateway.place('samsung', BUY, TICK); // 9-12: fires at 10
+    expect(exhausted).toStrictEqual([
+      { code: 'SERVICE_UNAVAILABLE', consecutiveFailures: 10 },
+    ]);
+  });
+
+  it('resets the failure run on a success and ignores rejections', async () => {
+    const exhausted: unknown[] = [];
+    const fault = new DomainError('SERVICE_UNAVAILABLE', 'down');
+    const { gateway, broker } = harness({
+      answers: [fault],
+      maxAttempts: 9,
+      onExhausted: (failure) => exhausted.push(failure),
+    });
+
+    await gateway.place('samsung', BUY, TICK); // 9 failures
+    broker.placeOrder = async () =>
+      ({ id: 'o-1', status: 'OPEN' }) as BrokerOrder;
+    await gateway.place('samsung', BUY, TICK); // success: back to 0
+    broker.placeOrder = async () => {
+      throw new DomainError('INVALID_ORDER', 'no');
+    };
+    await gateway.place('samsung', BUY, TICK); // rejection: not counted
+    broker.placeOrder = async () => {
+      throw fault;
+    };
+    await gateway.place('samsung', BUY, TICK); // 9 more, still under 10
+
+    expect(exhausted).toStrictEqual([]);
   });
 });
