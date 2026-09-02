@@ -348,3 +348,63 @@ decision is unchanged; the exposure is no longer silent.
 decision table over (previous relation, current relation, position). A cross is
 confirmed only between two strict relations: an exact tie on either side
 suppresses the signal rather than entering a position the averages never made.
+
+### `grid`
+
+Buy a lot each time the price falls through a level, sell it when the price
+rises through the level above it.
+
+**The grid is a step and a count, never a range divided up.** The obvious
+parameterisation — lower bound, upper bound, level count — is a division, and
+`(upper − lower) / (levels − 1)` has no exact value for most of the ranges an
+operator would write. So the operator writes the *step*, and
+`level(i) = lowerPrice + step × i` is one exact multiplication and one exact
+addition per level, taken from the two configured values rather than from the
+level before it. **No division, so no rounding mode to configure.**
+
+A test pins the case that shows why, and it is worse than "floats are
+imprecise". For `lowerPrice = 0.1`, `step = 0.2`, five levels, this answers
+`0.1 0.3 0.5 0.7 0.9`; in float64 the two obvious formulations of the same
+configuration disagree with each other and with that — `lower + step × i` gives
+`… 0.7000000000000001 0.9` and `previous + step` gives `… 0.7 0.8999999999999999`.
+A tick at exactly `0.7` is *at* the fourth level here and *below* it under the
+first float grid: one rung lower, on the far side of the boundary that decides
+whether a lot is bought.
+
+**The hysteresis is two rungs deep, and that is the whole design.** The rung of a
+price is how many levels are at or below it, so it runs `0 … levels` and a price
+outside the band is clamped by the count itself. A slot `k` is bought on entering
+rung `k` — the price crossing `level(k)` downwards — and sold on entering rung
+`k + 2`, the price crossing `level(k + 1)` upwards. A grid that sold on
+re-entering rung `k + 1` would sell at the level it bought at, and a round trip
+would earn exactly nothing. Slots run `0 … levels − 2`, so the bottom level is
+buy-only, the top is sell-only, and a full grid holds `quantity × (levels − 1)`.
+
+A tick that jumps several rungs is **one** order for `quantity × slots`: the
+runner evaluates every decision from a tick against one portfolio snapshot, so a
+second order would be sized against a position the first had already changed.
+
+**It places `MARKET` orders**, because a strategy sees its position and not its
+open orders, and one that guessed at its resting orders would accumulate
+phantoms until `maxOpenOrders` refused everything. So the realised price is the
+tick's, not the level's, and a tick that jumps past a level takes the overshoot
+out of the step the round trip was meant to earn. A grid whose `step` is small
+relative to how far the price moves between ticks loses money on fees and
+slippage; the backtest harness exists to show that before a run does.
+
+**The lot set is a belief, and the ledger corrects it.** `lots` records which
+slots the strategy thinks it holds — the only copy of a fact the ledger never
+knew, since the ledger knows the total quantity and not which slot each lot
+belongs to. It is written when the *decision* is taken, not when a fill arrives,
+so a buy the risk gate refuses leaves a slot nothing backs; when that slot comes
+due, the sell is sized from `position.available` and the lots are **dropped** if
+there is nothing there. The ledger is the original (§7.3); this is the side that
+changes.
+
+A `gapBefore` tick re-baselines the rung and trades nothing — the crossings were
+not observed — but **keeps** the lots, unlike `sma-crossover`'s window: that
+window is an observation of prices that are no longer consecutive, while a lot is
+a position the ledger is still holding.
+
+Its sells are not capped by the runner's risk gate, which returns early for any
+non-`BUY` intent by design. The bound on that side is the strategy's own.

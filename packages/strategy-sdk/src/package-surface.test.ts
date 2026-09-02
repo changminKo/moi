@@ -19,6 +19,7 @@ describe('published surface', () => {
   it('publishes the strategy contract and each strategy behind their own subpaths', () => {
     expect(manifest.exports).toMatchObject({
       './strategy': { default: './dist/strategy.js' },
+      './strategies/grid': { default: './dist/strategies/grid.js' },
       './strategies/sma-crossover': {
         default: './dist/strategies/sma-crossover.js',
       },
@@ -34,6 +35,7 @@ describe('published surface', () => {
       'defineParameterSchema',
       'enumParameter',
       'integerParameter',
+      'priceParameter',
       'quantityParameter',
       'readOrderIntent',
       'readStrategyDecisions',

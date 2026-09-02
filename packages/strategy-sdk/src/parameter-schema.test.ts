@@ -5,6 +5,7 @@ import {
   defineParameterSchema,
   enumParameter,
   integerParameter,
+  priceParameter,
   quantityParameter,
   symbolParameter,
 } from './parameter-schema.js';
@@ -245,5 +246,44 @@ describe('quantityParameter', () => {
 
   it('accepts a plain positive whole decimal string', () => {
     expect(schema.parse({ ...valid, quantity: '1' }).quantity).toBe('1');
+  });
+});
+
+describe('priceParameter', () => {
+  const priced = defineParameterSchema({ price: priceParameter() });
+
+  it.each([
+    ['zero', '0'],
+    ['a zero with decimals', '0.00'],
+    ['exponent notation', '2.5e2'],
+    ['a signed value', '+250'],
+    ['a leading zero', '0250'],
+    ['a negative value', '-250'],
+    ['a JS number', 250],
+    ['a value outside the money domain', `1${'0'.repeat(80)}`],
+  ])('refuses %s', (_label, price) => {
+    expectDomainError(
+      () => priced.parse({ price }),
+      'INVALID_PRICE',
+      /price must be a positive plain decimal string inside the exact money domain/u,
+    );
+  });
+
+  it.each([
+    ['a whole price', '70000'],
+    ['a fractional price', '0.0001'],
+  ])('accepts %s', (_label, price) => {
+    expect(priced.parse({ price }).price).toBe(price);
+  });
+
+  it('describes itself as a price, so the runner can report what it takes', () => {
+    expect(priced.describe()).toStrictEqual([
+      {
+        name: 'price',
+        kind: 'price',
+        constraint:
+          'a positive plain decimal string inside the exact money domain',
+      },
+    ]);
   });
 });

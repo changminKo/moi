@@ -1,8 +1,9 @@
-import { DomainError } from '@moi/trading-core';
+import { type DecimalString, DomainError } from '@moi/trading-core';
 
 import {
   assertCommandObject,
   isIdentifier,
+  isPositiveMoneyAmount,
   isPositiveWholeQuantity,
   MAX_IDENTIFIER_LENGTH,
 } from './validation.js';
@@ -135,6 +136,38 @@ export function quantityParameter(): ParameterField<string> {
           'INVALID_QUANTITY',
           `${name} must be ${constraint}`,
         );
+      }
+
+      return value;
+    },
+  };
+}
+
+/**
+ * A price, held to the same rule as a price on an order: strictly positive,
+ * plain, and inside trading-core's exact money domain.
+ *
+ * This is the parameter kind a *priced* strategy needs — a grid's lower bound
+ * and its step are prices the operator writes down, and they are the numbers
+ * every level is then derived from, so they are decimal strings and never JS
+ * numbers (AGENTS.md rule 5). `integerParameter` is for counts, which a period
+ * and a level count are; this is for money, which a level is.
+ *
+ * The plain form is required rather than merely parsed: `'2.5e2'` is a number
+ * decimal.js would read and a human reviewing a configuration file would not,
+ * and a grid whose spacing is written in exponent notation is a grid nobody can
+ * check by eye.
+ */
+export function priceParameter(): ParameterField<DecimalString> {
+  const constraint =
+    'a positive plain decimal string inside the exact money domain';
+
+  return {
+    kind: 'price',
+    constraint,
+    read: (value, name) => {
+      if (!isPositiveMoneyAmount(value)) {
+        throw new DomainError('INVALID_PRICE', `${name} must be ${constraint}`);
       }
 
       return value;

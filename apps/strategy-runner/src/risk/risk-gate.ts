@@ -7,8 +7,6 @@ import {
   moneyDecimal,
 } from '@moi/trading-core';
 import type { RiskLimits } from '../config.js';
-import type { MarketSessionCache } from '../feed/market-session.js';
-import type { StateStore } from '../state/state-store.js';
 import { utcDay } from '../state/state-store.js';
 
 /**
@@ -74,14 +72,55 @@ import { utcDay } from '../state/state-store.js';
  * is held — so `SELL` is an exit and nothing else.
  */
 
+/**
+ * The market phase, from whatever knows it. `MarketSessionCache` is that in the
+ * runner; in a backtest it is the configured phase, because a recorded tick
+ * series does not carry the calendar the endpoint would have answered from.
+ *
+ * Named as an interface rather than taking the cache itself so the gate has one
+ * collaborator it can be handed rather than one it must be given: design §8.2
+ * requires the backtest to replay through *this* gate, and a class with private
+ * fields cannot be substituted structurally.
+ */
+export interface MarketPhaseSource {
+  phase(market: Market): Promise<string | null>;
+}
+
+/**
+ * The realised-PnL questions §6.4's limits ask. `FillJournal` is this in the
+ * runner, folded from `fills.ndjson`; in a backtest it is the simulated
+ * exchange's own fills, which is the only realised PnL a replay has.
+ */
+export interface RealisedPnlSource {
+  realizedPnlOn(day: string): DecimalString;
+  consecutiveLosses(): number;
+}
+
+/**
+ * Everything the gate asks its own records — how much entry notional a UTC day
+ * has committed, and what the fills have realised. `StateStore` is this in the
+ * runner (durably, which is the point of §1 row 7); the backtest's is in
+ * memory, because a replay's budget and a replay's PnL are properties of the
+ * replay.
+ *
+ * Named as an interface rather than taking `StateStore` itself so the gate has
+ * one collaborator it can be *handed* rather than one it must be given: design
+ * §8.2 requires the backtest to replay through this gate, and a class with
+ * `#private` fields cannot be substituted structurally.
+ */
+export interface RiskLedgerSource {
+  dailyEntryNotional(day: string): DecimalString;
+  readonly fills: RealisedPnlSource;
+}
+
 export type RiskVerdict =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly reason: string };
 
 export interface RiskGateOptions {
   readonly limits: RiskLimits;
-  readonly sessions: MarketSessionCache;
-  readonly state: StateStore;
+  readonly sessions: MarketPhaseSource;
+  readonly state: RiskLedgerSource;
   readonly now?: () => number;
 }
 
@@ -122,8 +161,8 @@ export const isOpenOrder = (order: PortfolioOrder): boolean =>
 
 export class RiskGate {
   readonly #limits: RiskLimits;
-  readonly #sessions: MarketSessionCache;
-  readonly #state: StateStore;
+  readonly #sessions: MarketPhaseSource;
+  readonly #state: RiskLedgerSource;
   readonly #now: () => number;
 
   constructor(options: RiskGateOptions) {

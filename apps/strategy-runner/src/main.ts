@@ -1,4 +1,5 @@
 import { DomainError } from '@moi/trading-core';
+import { openTickRecorder } from './backtest/tick-log.js';
 import { loadRunnerConfig } from './config.js';
 import { DEFAULT_REGISTRY } from './registry.js';
 import { createLineReporter } from './reporter.js';
@@ -21,7 +22,17 @@ export async function main(): Promise<void> {
     registry: DEFAULT_REGISTRY,
   });
 
-  const supervisor = new RunnerSupervisor({ config, reporter });
+  // Opt-in, and read here rather than in `loadRunnerConfig` because it decides
+  // nothing the runner trades on: it is a research artifact, and a bad path
+  // fails loudly at `AppendLog.open` before the first cycle either way.
+  const tickLog = process.env.BOT_TICK_LOG;
+  const supervisor = new RunnerSupervisor({
+    config,
+    reporter,
+    ...(tickLog === undefined || tickLog.trim().length === 0
+      ? {}
+      : { recorder: openTickRecorder({ path: tickLog, reporter }) }),
+  });
 
   const stop = (signal: string): void => {
     reporter.report('info', 'stopping', { signal });

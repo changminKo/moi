@@ -198,7 +198,7 @@ function instrument(value: unknown, name: string): InstrumentRef {
 
 const keyOf = (ref: InstrumentRef): string => `${ref.market}:${ref.symbol}`;
 
-function readRiskLimits(value: unknown): RiskLimits {
+export function readRiskLimits(value: unknown): RiskLimits {
   const source = object(value, 'risk');
   const allowList = array(source.symbolAllowList, 'risk.symbolAllowList').map(
     (entry, index) => instrument(entry, `risk.symbolAllowList[${index}]`),
@@ -254,7 +254,7 @@ function readRiskLimits(value: unknown): RiskLimits {
   });
 }
 
-function readStrategies(
+export function readStrategies(
   value: unknown,
   registry: StrategyRegistry,
 ): readonly ConfiguredStrategy[] {
@@ -288,7 +288,7 @@ function readStrategies(
  * it believes it holds — and separating logical positions inside one ledger
  * account is explicitly out of scope.
  */
-function assertOneStrategyPerInstrument(
+export function assertOneStrategyPerInstrument(
   strategies: readonly ConfiguredStrategy[],
 ): void {
   const owner = new Map<string, string>();
