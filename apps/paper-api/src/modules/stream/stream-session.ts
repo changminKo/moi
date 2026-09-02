@@ -58,6 +58,20 @@ function message(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * The wire shape of a quote. One builder, because the hub also sends quotes to
+ * an entry that is still OPENING (before it has a `StreamSession` to send
+ * through) and the two paths must not drift.
+ */
+export function quoteFrame(event: QuoteEvent): Record<string, unknown> {
+  return {
+    type: 'quote',
+    ...event,
+    recoveryEpoch: String(event.recoveryEpoch),
+    marketDataVersion: String(event.marketDataVersion),
+  };
+}
+
 export class StreamSession {
   readonly #sessionId: string;
   readonly #source: DurableEventSource;
@@ -147,12 +161,7 @@ export class StreamSession {
 
   publishQuote(event: QuoteEvent): void {
     if (this.#subscriptions.has(`${event.market}:${event.symbol}`))
-      this.#send({
-        type: 'quote',
-        ...event,
-        recoveryEpoch: String(event.recoveryEpoch),
-        marketDataVersion: String(event.marketDataVersion),
-      });
+      this.#send(quoteFrame(event));
   }
 
   #event(event: DurableAccountEvent): unknown {
