@@ -9,6 +9,7 @@ import {
   capFractionDigits,
   formatDecimal,
   isDecimal,
+  MONEY_DISPLAY_FRACTION_DIGITS,
 } from '../../lib/format-number';
 import { useAppLocale } from '../../lib/i18n';
 import { newIdempotencyKey } from '../../lib/idempotency';
@@ -61,13 +62,9 @@ export function formatKrwPerUsd(rate: string): string | null {
   return formatDecimal(inverse.toFixed(2));
 }
 
-// However many fraction digits the wire value carries, the quote block shows
-// at most this many — but never pads a shorter fraction out to it.
-const MAX_DISPLAYED_FRACTION_DIGITS = 2;
-
 /** Fee/source/destination amounts: capped fraction, grouped, currency-tagged. */
 function displayAmount(symbol: string, value: string): string {
-  return `${symbol}${formatDecimal(capFractionDigits(value, MAX_DISPLAYED_FRACTION_DIGITS))}`;
+  return `${symbol}${formatDecimal(capFractionDigits(value, MONEY_DISPLAY_FRACTION_DIGITS))}`;
 }
 
 export function FxTicket({

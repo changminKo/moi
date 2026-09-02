@@ -1,6 +1,7 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PositionsTable } from './positions-table';
+import { type RealizedPnlReport, realizedKey } from './realized-pnl';
 
 afterEach(cleanup);
 
@@ -27,6 +28,31 @@ const closed = {
 function holdings() {
   return within(screen.getByRole('region', { name: 'Positions' }));
 }
+
+function closedPositions() {
+  return within(screen.getByRole('region', { name: 'Closed positions' }));
+}
+
+type Entry = { realizedPnl: string; currency: 'KRW' | 'USD' };
+/** Keys are `market:symbol`, matching the fixtures above. */
+const realized = (
+  byPosition: Record<string, Entry>,
+  unavailable: Record<string, string> = {},
+): RealizedPnlReport => {
+  const key = (marketSymbol: string) => {
+    const [market, symbol] = marketSymbol.split(':');
+    return realizedKey(String(market), String(symbol));
+  };
+  return {
+    byPosition: new Map(
+      Object.entries(byPosition).map(([k, v]) => [key(k), v]),
+    ),
+    totals: [],
+    unavailable: new Map(
+      Object.entries(unavailable).map(([k, v]) => [key(k), v]),
+    ),
+  };
+};
 
 describe('PositionsTable', () => {
   it('lists a symbol that is still held', () => {
@@ -67,5 +93,114 @@ describe('PositionsTable', () => {
     const row = holdings().getByRole('row', { name: /MSFT/ });
     expect(within(row).getByText('325.97')).toBeInTheDocument();
     expect(within(row).queryByText('325.9733333333')).not.toBeInTheDocument();
+  });
+
+  describe('realized P&L column', () => {
+    it('shows what a partly-sold holding has realized so far, in its currency', () => {
+      render(
+        <PositionsTable
+          positions={[held]}
+          realized={realized({
+            'US:MSFT': { realizedPnl: '12.5', currency: 'USD' },
+          })}
+        />,
+      );
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      expect(within(row).getByText('$12.5')).toHaveClass('pnl-gain');
+    });
+
+    it("shows a closed position's realized loss with the sign ahead of the currency", () => {
+      render(
+        <PositionsTable
+          positions={[closed]}
+          realized={realized({
+            'US:AAPL': { realizedPnl: '-3.256', currency: 'USD' },
+          })}
+        />,
+      );
+      const row = closedPositions().getByRole('row', { name: /AAPL/ });
+      expect(within(row).getByText('-$3.26')).toHaveClass('pnl-loss');
+    });
+
+    it('groups a KRW figure and leaves zero unstyled', () => {
+      render(
+        <PositionsTable
+          positions={[
+            { ...held, market: 'KR', symbol: '005930' },
+            { ...closed, market: 'KR', symbol: '000660' },
+          ]}
+          realized={realized({
+            'KR:005930': { realizedPnl: '0', currency: 'KRW' },
+            'KR:000660': { realizedPnl: '1250000', currency: 'KRW' },
+          })}
+        />,
+      );
+      const heldRow = holdings().getByRole('row', { name: /005930/ });
+      const zero = within(heldRow).getByText('₩0');
+      expect(zero).not.toHaveClass('pnl-gain');
+      expect(zero).not.toHaveClass('pnl-loss');
+      const closedRow = closedPositions().getByRole('row', { name: /000660/ });
+      expect(within(closedRow).getByText('₩1,250,000')).toBeInTheDocument();
+    });
+
+    it('says a position could not be folded, and why, distinct from a plain dash', () => {
+      render(
+        <PositionsTable
+          positions={[held]}
+          realized={realized(
+            {},
+            {
+              'US:MSFT':
+                'INSUFFICIENT_AVAILABLE_POSITION: Sell fill exceeds the held position',
+            },
+          )}
+        />,
+      );
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      const cell = within(row).getByRole('cell', {
+        name: 'Realized P&L unavailable',
+      });
+      expect(cell).toHaveTextContent('—');
+      expect(cell).toHaveAttribute(
+        'title',
+        'INSUFFICIENT_AVAILABLE_POSITION: Sell fill exceeds the held position',
+      );
+    });
+
+    it('shows a bare dash for a position the report has no row for', () => {
+      render(<PositionsTable positions={[held]} realized={realized({})} />);
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      const [dash] = within(row).getAllByText('—');
+      expect(dash).not.toHaveAttribute('aria-label');
+      expect(
+        within(row).queryByRole('cell', { name: 'Realized P&L unavailable' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('looks a position up by market and symbol, not by symbol alone', () => {
+      render(
+        <PositionsTable
+          positions={[
+            { ...held, market: 'KR', symbol: 'DUAL' },
+            { ...closed, market: 'US', symbol: 'DUAL' },
+          ]}
+          realized={realized({
+            'KR:DUAL': { realizedPnl: '1000', currency: 'KRW' },
+            'US:DUAL': { realizedPnl: '-5', currency: 'USD' },
+          })}
+        />,
+      );
+      const heldRow = holdings().getByRole('row', { name: /DUAL/ });
+      expect(within(heldRow).getByText('₩1,000')).toBeInTheDocument();
+      expect(within(heldRow).queryByText('-$5')).not.toBeInTheDocument();
+      const closedRow = closedPositions().getByRole('row', { name: /DUAL/ });
+      expect(within(closedRow).getByText('-$5')).toBeInTheDocument();
+    });
+
+    it('shows a dash when no realized figure was supplied at all', () => {
+      render(<PositionsTable positions={[held]} />);
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      expect(within(row).getAllByText('—')).toHaveLength(1);
+    });
   });
 });

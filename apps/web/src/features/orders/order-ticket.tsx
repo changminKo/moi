@@ -5,7 +5,11 @@ import type { ApiClient } from '../../lib/api-client';
 import { apiClient as defaultApiClient } from '../../lib/api-client';
 import type { QuoteSnapshot } from '../../lib/api-types';
 import { type Currency, withCurrency } from '../../lib/currency';
-import { capFractionDigits, formatDecimal } from '../../lib/format-number';
+import {
+  capFractionDigits,
+  formatDecimal,
+  MONEY_DISPLAY_FRACTION_DIGITS,
+} from '../../lib/format-number';
 import { type MessageKey, useAppLocale } from '../../lib/i18n';
 import { presentationForReason } from '../system/system-status-provider';
 import {
@@ -34,15 +38,10 @@ const VALIDATION_KEYS: Record<string, MessageKey> = {
   'OCO triggers must differ': 'validation.ocoTriggersDiffer',
 };
 
-// The estimate is a display value, so it is capped the way every other amount
-// on this screen is (wallet-summary.tsx, fx-ticket.tsx) — never padded, and
-// never applied to anything that gets submitted.
-const MAX_DISPLAYED_FRACTION_DIGITS = 2;
-
 const displayAmount = (currency: Currency | undefined, value: string) =>
   withCurrency(
     currency,
-    formatDecimal(capFractionDigits(value, MAX_DISPLAYED_FRACTION_DIGITS)),
+    formatDecimal(capFractionDigits(value, MONEY_DISPLAY_FRACTION_DIGITS)),
   );
 
 /**

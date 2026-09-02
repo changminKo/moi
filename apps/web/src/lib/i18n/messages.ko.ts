@@ -142,6 +142,9 @@ export const ko: Record<MessageKey, string> = {
   'positions.closedTitle': '청산한 종목',
   'positions.closedCaption': '전량 매도한 종목과 보유 당시 평균 단가',
   'positions.closedAvgCost': '보유 당시 평균 단가',
+  'positions.realized': '실현 손익',
+  'positions.realizedUnavailable': '실현 손익 계산 불가',
+  'positions.realizedCaption': '이 세션이 지금까지 실현한 손익, 결제 통화별',
 
   'orders.title': '미체결 주문',
   'orders.empty': '미체결 주문이 없습니다.',

@@ -136,6 +136,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@moi/trading-core':
+        specifier: workspace:*
+        version: link:../../packages/trading-core
       '@tanstack/react-query':
         specifier: 5.102.8
         version: 5.102.8(react@19.2.8)

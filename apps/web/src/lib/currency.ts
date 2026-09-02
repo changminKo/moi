@@ -11,6 +11,9 @@ export type Currency = 'KRW' | 'USD';
  */
 const SYMBOLS: Readonly<Record<Currency, string>> = { KRW: '₩', USD: '$' };
 
+/** Every currency this client knows, in the order a list of them is shown. */
+export const CURRENCIES: readonly Currency[] = ['KRW', 'USD'];
+
 /**
  * Narrows a currency off the wire. The fill rows carry one now, but they are
  * `Record<string, unknown>` at this boundary and anything unrecognised must
@@ -38,6 +41,20 @@ export function withCurrency(
   return currency === undefined
     ? formatted
     : `${currencySymbol(currency)}${formatted}`;
+}
+
+/**
+ * `withCurrency` for a figure that may be negative: the sign goes ahead of the
+ * symbol (`-$3.26`, not `$-3.26`). Same render-boundary contract — the digits
+ * are the caller's, untouched.
+ */
+export function withSignedCurrency(
+  currency: Currency | undefined,
+  formatted: string,
+): string {
+  return formatted.startsWith('-')
+    ? `-${withCurrency(currency, formatted.slice(1))}`
+    : withCurrency(currency, formatted);
 }
 
 /**
