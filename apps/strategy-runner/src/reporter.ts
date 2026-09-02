@@ -27,14 +27,22 @@ export interface ReportLine {
   readonly fields: ReportFields;
 }
 
-/** Formats one line and masks it. Shared so a Discord embed masks identically. */
-export function formatReport(line: ReportLine): string {
+/**
+ * Formats one line and masks it — by pattern, and by value for the `secrets`
+ * the runner holds (the session cookie, the CSRF token). Shared so a Discord
+ * embed masks identically; `docker logs` is a log too (AGENTS.md rule 2).
+ */
+export function formatReport(
+  line: ReportLine,
+  secrets: readonly string[] = [],
+): string {
   const fields = Object.entries(line.fields)
     .map(([name, value]) => `${name}=${String(value)}`)
     .join(' ');
 
   return maskOutbound(
     `[${line.level}] ${line.message}${fields.length === 0 ? '' : ` ${fields}`}`,
+    secrets,
   );
 }
 
@@ -42,10 +50,12 @@ export function createLineReporter(
   write: (line: string) => void = (line) => {
     process.stdout.write(`${line}\n`);
   },
+  /** Read at write time, because the values rotate. */
+  secrets: () => readonly string[] = () => [],
 ): Reporter {
   return {
     report: (level, message, fields = {}) => {
-      write(formatReport({ level, message, fields }));
+      write(formatReport({ level, message, fields }, secrets()));
     },
   };
 }

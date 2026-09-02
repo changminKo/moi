@@ -10,16 +10,12 @@
  * imports, and keeps the dependency pointing one way: the app may depend on
  * this package, never the reverse.
  *
- * **On masking.** The runner's `formatReport` runs `redact` over every line it
- * writes, unconditionally, covering the four shapes design §7.4 names. This
- * reporter masks again on the way out, with a superset: the same four, plus
- * Discord webhook URLs, `Bearer` values, credentials inside a URL and
- * `*KEY|TOKEN|SECRET*=` assignments, plus exact-value substitution for the
- * secrets the runner holds and a tripwire that drops a payload in which one
- * survived. Masking twice is idempotent and neither side has to trust the
- * other; `discord-reporter.test.ts` holds this masker to every rule the
- * runner's has, so a rule added there and missed here fails a test rather than
- * reaching a channel.
+ * **On masking.** Since phase D (#92) the runner's own `formatReport` runs this
+ * package's `maskOutbound` — one masker, not two — so a line reaching this
+ * reporter has already been masked by pattern and by held value. This reporter
+ * masks again on the way out and adds the tripwire that drops a payload in
+ * which a held secret survived. Masking twice is idempotent; the rules
+ * themselves are pinned once, in `masking.test.ts`.
  *
  * **On levels.** The runner says `info | warn | error`; Discord embeds here use
  * the four colours `infra/oracle/notify.sh` posts. `error` maps onto the red

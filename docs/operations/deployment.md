@@ -346,8 +346,17 @@ systemd (`moi.service`) and `infra/oracle/deploy.sh` both read that file, so wit
 the line present `pull`, `up` and `stop` include the bot, a release restarts it
 with the stack, and the deploy's verify step **fails unless the bot container is
 running** — a runner that refuses its configuration is a restart loop, and that
-must not hide behind `restart: unless-stopped`. Remove the line and
-`systemctl restart moi` to take it out again.
+must not hide behind `restart: unless-stopped`.
+
+To take it out again, stop the container **while the profile is still
+selected** — a profile that is no longer selected is a service compose no longer
+touches, so removing the line alone leaves the bot running:
+
+```bash
+COMPOSE_PROFILES=bot docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml rm -sf bot
+```
+
+then delete the line from `/etc/moi/moi.env`.
 
 Before enabling it:
 

@@ -3,7 +3,7 @@ import { openTickRecorder } from './backtest/tick-log.js';
 import { loadRunnerConfig } from './config.js';
 import { DEFAULT_REGISTRY } from './registry.js';
 import { createLineReporter } from './reporter.js';
-import { wireReporter } from './runner/reporter-wiring.js';
+import { runUntilStopped, wireReporter } from './runner/reporter-wiring.js';
 import { RunnerSupervisor } from './runner/supervisor.js';
 
 /**
@@ -67,14 +67,7 @@ export async function main(): Promise<void> {
     discord: wiring.discord,
   });
 
-  try {
-    await supervisor.start();
-    await supervisor.run();
-  } finally {
-    supervisor.close();
-    // Last: whatever the shutdown said still has to reach the channel.
-    await wiring.close();
-  }
+  await runUntilStopped(supervisor, wiring);
 }
 
 /**

@@ -67,10 +67,11 @@ describe('createDiscordReporter', () => {
     expect(embeds()[0].color).toBe(15_026_253);
   });
 
-  // Masking twice is safe: a line the runner already put through `redact`
-  // keeps its shape and reveals nothing new. The mask token differs — the
-  // runner writes `[redacted]`, this masker writes `***` — and re-masking an
-  // already-masked value is the harmless direction to be wrong in.
+  // Masking twice is safe: a line the runner already put through
+  // `maskOutbound` keeps its shape and reveals nothing new. An operator may
+  // still paste a `[redacted]` token from an older log, so that shape is kept
+  // here too — re-masking an already-masked value is the harmless direction to
+  // be wrong in.
   it('is idempotent over a line the runner already masked', async () => {
     reporter.report('warn', 'submitted moi_session=[redacted] for 01J8Z0Q9');
     await reporter.flush();

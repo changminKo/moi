@@ -45,7 +45,7 @@ export interface ReporterWiringOptions {
 }
 
 export function wireReporter(options: ReporterWiringOptions): ReporterWiring {
-  const lines = createLineReporter(options.write);
+  const lines = createLineReporter(options.write, options.secrets);
   const config = readReporterConfig(options.env);
 
   if (!config.ok) {
@@ -85,4 +85,46 @@ export function wireReporter(options: ReporterWiringOptions): ReporterWiring {
     },
     close: () => discord.close(),
   };
+}
+
+/** The part of `RunnerSupervisor` the entry point drives. */
+export interface Runnable {
+  start(): Promise<void>;
+  run(): Promise<void>;
+  close(): void;
+}
+
+/**
+ * Starts, runs until stopped, and — whatever happened — says so through the
+ * wired reporter *before* the channel is closed, then closes it even if the
+ * supervisor's own close threw. A runner that dies is the one event §7.4 most
+ * wants in the channel, and a crash that only reached stdout would be a crash
+ * nobody was told about.
+ */
+export async function runUntilStopped(
+  supervisor: Runnable,
+  wiring: ReporterWiring,
+): Promise<void> {
+  try {
+    await supervisor.start();
+    await supervisor.run();
+  } catch (error) {
+    wiring.reporter.report('error', 'the strategy runner stopped on an error', {
+      // The code or the class, never the message: it may be the server's.
+      error:
+        error instanceof DomainError
+          ? error.code
+          : error instanceof Error
+            ? error.name
+            : 'unknown',
+    });
+    throw error;
+  } finally {
+    try {
+      supervisor.close();
+    } finally {
+      // Last: whatever the shutdown said still has to reach the channel.
+      await wiring.close();
+    }
+  }
 }

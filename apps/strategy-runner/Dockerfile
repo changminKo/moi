@@ -24,7 +24,7 @@ COPY apps/strategy-runner ./apps/strategy-runner
 RUN pnpm install --offline --frozen-lockfile --filter @moi/strategy-runner...
 RUN pnpm turbo run build --filter=@moi/strategy-runner...
 RUN pnpm --filter @moi/strategy-runner deploy --prod --legacy /out/strategy-runner \
-    && rm -rf /out/strategy-runner/src /out/strategy-runner/Dockerfile /out/strategy-runner/tsconfig.json /out/strategy-runner/tsconfig.test.json /out/strategy-runner/.turbo
+    && rm -rf /out/strategy-runner/src /out/strategy-runner/Dockerfile /out/strategy-runner/tsconfig.json /out/strategy-runner/tsconfig.test.json /out/strategy-runner/vitest.config.ts /out/strategy-runner/README.md /out/strategy-runner/.turbo
 
 FROM node:24.19.0-alpine3.23 AS runtime
 # Pull in Alpine security updates (e.g. openssl) so the published image passes

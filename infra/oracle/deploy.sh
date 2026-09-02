@@ -99,10 +99,14 @@ for _ in $(seq 1 40); do
     # it refuses (no runner.json, a limit outside exact money) is a container in
     # a restart loop, and that has to fail the deploy, not hide behind
     # `restart: unless-stopped`.
-    if printf %s "${COMPOSE_PROFILES:-}" | tr ',' '\n' | grep -qx bot; then
+    # Capture, then grep: under `pipefail` a `grep -q` that exits on its first
+    # match can SIGPIPE the producer and turn a healthy answer into 141.
+    case ",${COMPOSE_PROFILES:-}," in *,bot,*) bot_enabled=1 ;; *) bot_enabled=0 ;; esac
+    if [ "$bot_enabled" = 1 ]; then
       bot_up=0
       for _ in $(seq 1 20); do
-        if withsecrets "${COMPOSE[*]} ps --status running --services" | grep -qx bot; then bot_up=1; break; fi
+        running="$(withsecrets "${COMPOSE[*]} ps --status running --services")"
+        if grep -qx bot <<<"$running"; then bot_up=1; break; fi
         sleep 3
       done
       [ "$bot_up" = 1 ] || { echo "FAIL: COMPOSE_PROFILES enables the bot but the bot container is not running:"; withsecrets "${COMPOSE[*]} logs --no-color --tail 20 bot"; exit 1; }

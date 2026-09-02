@@ -582,16 +582,26 @@ check('production overlay pulls every built image from GHCR', () => {
   // `!reset null` is a compose-specific tag; read the overlay as text so the
   // check does not depend on how a generic YAML parser treats it.
   const overlay = read('infra/oracle/compose.override.yaml');
+  const workflow = readYaml('.github/workflows/publish.yml');
+  const matrix = workflow.jobs.images.strategy.matrix.include ?? [];
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!service.build?.dockerfile) continue;
+    const dockerfile = service.build?.dockerfile;
+    if (!dockerfile) continue;
+    // The image a service pulls is the one publish.yml builds from its
+    // Dockerfile — not merely *some* moi-* image.
+    const built = matrix.find((entry) => entry.dockerfile === dockerfile);
+    assert.ok(built, `publish.yml must build ${dockerfile} for ${name}`);
     const block = overlay.match(
       new RegExp(`\\n  ${name}:\\n((?:    [^\\n]*\\n)+)`),
     );
     assert.ok(block, `overlay must pull ${name} from GHCR`);
     assert.match(
       block[1],
-      /^ {4}image: ghcr\.io\/changminko\/moi-[a-z-]+:\$\{MOI_IMAGE_TAG:-main\}$/m,
-      `overlay must pull ${name} from GHCR under MOI_IMAGE_TAG`,
+      new RegExp(
+        `^ {4}image: ghcr\\.io/changminko/moi-${built.name}:\\$\\{MOI_IMAGE_TAG:-main\\}$`,
+        'm',
+      ),
+      `overlay must pull ${name} as ghcr.io/changminko/moi-${built.name} under MOI_IMAGE_TAG`,
     );
     assert.match(
       block[1],
