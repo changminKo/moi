@@ -1,9 +1,11 @@
 import type { BrokerPortfolio } from '@moi/strategy-sdk';
 import type { StrategyContext } from '@moi/strategy-sdk/strategy';
+import { DomainError } from '@moi/trading-core';
 import { instrumentKey } from '../feed/quote-ticker.js';
 import type { StreamAccountEvent } from '../feed/stream-client.js';
 import type { OrderGateway } from '../gateway/order-gateway.js';
 import type { Reporter } from '../reporter.js';
+import type { KillSwitchTrigger } from '../runner/kill-switch.js';
 import type { StrategyHost } from '../runner/strategy-host.js';
 import type { FillCommit } from '../state/fill-journal.js';
 import type { DecisionRecord, StateStore } from '../state/state-store.js';
@@ -81,6 +83,13 @@ export interface FillProcessorOptions {
    */
   readonly portfolio: () => Promise<BrokerPortfolio>;
   readonly now?: () => number;
+  /**
+   * Phase D. An unexplainable fill (§16.46) wedges fill processing *and* brings
+   * the submission barrier down: the runner has evidence the ledger published
+   * something the contract does not allow, and trading on ticks meanwhile is
+   * the half §16.46 left for the barrier. Absent in a backtest.
+   */
+  readonly killSwitch?: KillSwitchTrigger;
 }
 
 export class FillProcessor {
@@ -124,7 +133,32 @@ export class FillProcessor {
 
       return snapshot;
     };
-    const resolution = await this.#resolver.resolve(event, portfolio);
+    let resolution: Awaited<ReturnType<FillResolver['resolve']>>;
+
+    try {
+      resolution = await this.#resolver.resolve(event, portfolio);
+    } catch (error) {
+      if (
+        error instanceof DomainError &&
+        error.code === 'INVARIANT_VIOLATION'
+      ) {
+        // Not awaited: the sweep is network work, and this is the event drain
+        // chain. `engage` is idempotent, so the replay on every reconnect is
+        // silent after the first. Guarded too: whatever the trigger does, the
+        // error that leaves here is the wedge's own — that is the diagnosis.
+        try {
+          void this.#options.killSwitch?.engage('fill-wedge', error.message, {
+            accountSequence: event.accountSequence,
+            eventType: event.eventType,
+          });
+        } catch {
+          // Reported by the kill switch itself; nothing to add here.
+        }
+      }
+
+      throw error;
+    }
+
     const decisions: DecisionRecord[] = [];
 
     for (const { event: fill } of resolution.fills) {

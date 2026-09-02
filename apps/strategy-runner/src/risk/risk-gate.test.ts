@@ -664,4 +664,55 @@ describe('RiskGate loss limits', () => {
 
     expect(reopened.fills.consecutiveLosses()).toBe(2);
   });
+
+  /**
+   * The same two folds, asked without a decision in hand. Phase D escalates a
+   * tripped loss limit from "refuse entries" to the kill switch, and the
+   * supervisor asks this once a cycle rather than waiting for the next BUY to
+   * be refused.
+   */
+  describe('lossLimitBreach', () => {
+    it('is null while both limits hold', () => {
+      const { gate, state } = gateWith({ limits: { maxConsecutiveLosses: 3 } });
+
+      losing(state, 1, '-100');
+      losing(state, 2, '-100');
+
+      expect(gate.lossLimitBreach()).toBeNull();
+    });
+
+    it('names the run of losses at the limit', () => {
+      const { gate, state } = gateWith({ limits: { maxConsecutiveLosses: 3 } });
+
+      losing(state, 1, '-100');
+      losing(state, 2, '-100');
+      losing(state, 3, '-100');
+
+      expect(gate.lossLimitBreach()).toBe(
+        '3 closing fills in a row lost, at the limit of 3',
+      );
+    });
+
+    it('names the daily loss at the limit, on the boundary', () => {
+      const { gate, state } = gateWith({
+        limits: { maxConsecutiveLosses: 100, maxDailyLoss: '200' },
+      });
+
+      losing(state, 1, '-200', '2026-09-02T01:00:00.000Z');
+
+      expect(gate.lossLimitBreach()).toBe(
+        'today has realised -200, at the daily loss limit of 200',
+      );
+    });
+
+    it('does not count a profitable day against the daily loss limit', () => {
+      const { gate, state } = gateWith({
+        limits: { maxConsecutiveLosses: 100, maxDailyLoss: '200' },
+      });
+
+      losing(state, 1, '900');
+
+      expect(gate.lossLimitBreach()).toBeNull();
+    });
+  });
 });

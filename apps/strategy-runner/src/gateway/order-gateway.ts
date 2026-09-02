@@ -4,7 +4,11 @@ import type { StrategyDecision, Tick } from '@moi/strategy-sdk/strategy';
 import { DomainError } from '@moi/trading-core';
 import type { Reporter } from '../reporter.js';
 import { notionalOf } from '../risk/risk-gate.js';
-import type { DecisionRecord, StateStore } from '../state/state-store.js';
+import type {
+  DecisionKind,
+  DecisionRecord,
+  StateStore,
+} from '../state/state-store.js';
 import { deriveIdempotencyKey } from './idempotency.js';
 
 /**
@@ -30,7 +34,7 @@ import { deriveIdempotencyKey } from './idempotency.js';
  * never recognise as its own — so the next tick decides again, under a new key,
  * and the position doubles.
  *
- * ## Failure handling (§7.1), and what phase B does not do
+ * ## Failure handling (§7.1), and where the kill switch meets it
  *
  * A `SESSION_EXPIRED` re-establishes the session once and retries under the
  * *unchanged* key. A retryable fault — `RATE_LIMITED`, `SERVICE_UNAVAILABLE` —
@@ -38,17 +42,40 @@ import { deriveIdempotencyKey } from './idempotency.js';
  * verdict: it is recorded as a rejection and not retried, because reformulating
  * and resending is the one recovery that must not happen.
  *
- * §7.1 escalates a run of failures to the kill switch at ten. Phase B has no
- * kill switch — design §11 puts the submission barrier in phase D — so a
- * submission that exhausts its attempts is reported at `error` and **left
- * pending**. That is deliberate rather than a gap left open: a pending decision
- * is one the next start recovers and resubmits under the same key, which is the
- * safe state to be stuck in. What is missing is the escalation, not the
- * bookkeeping.
+ * A submission that exhausts its attempts is reported at `error` and **left
+ * pending**: a pending decision is one the next start recovers and resubmits
+ * under the same key, which is the safe state to be stuck in. Since phase D the
+ * run of failed attempts is also counted across decisions, and at
+ * `KILL_SWITCH_AFTER_FAILED_ATTEMPTS` (§7.2: "10회 실패 시 킬 스위치") the
+ * gateway tells whoever gave it `onExhausted` — it does not stop itself.
+ *
+ * ## The barrier (phase D)
+ *
+ * The kill switch's one point of contact with the order path is `barrier`,
+ * asked before **every** attempt with the kind of decision about to go out. A
+ * `place` it refuses is settled as `halted` — not left pending, because a
+ * decision the kill switch caught is a dead decision and must not be resurrected
+ * by the `recoverPending` of a later, cleared start. A `cancel` goes through:
+ * cancelling reduces exposure, and the kill switch's own sweep is the caller.
+ * The gateway does not know *why* the barrier is down.
  */
 
 export const MAX_SUBMIT_ATTEMPTS = 4;
+/**
+ * Design §7.2: "10회 실패 시 킬 스위치". Failed *attempts*, across decisions,
+ * in a row — a success resets the run and a rejection (a verdict, not a fault)
+ * leaves it alone. Two and a half decisions at `MAX_SUBMIT_ATTEMPTS`, which is
+ * the reading closest to the sentence. A constant, not configuration.
+ */
+export const KILL_SWITCH_AFTER_FAILED_ATTEMPTS = 10;
 const BASE_BACKOFF_MS = 200;
+/** Design §7.2: "지수 백오프(최대 5분)". A server's `Retry-After` is honoured up to this. */
+export const MAX_BACKOFF_MS = 5 * 60 * 1_000;
+
+export interface ExhaustedSubmissions {
+  readonly code: string;
+  readonly consecutiveFailures: number;
+}
 
 export interface OrderGatewayOptions {
   readonly broker: Broker;
@@ -62,11 +89,20 @@ export interface OrderGatewayOptions {
   readonly newDecisionId?: () => string;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly maxAttempts?: number;
+  /**
+   * Phase D's submission barrier. Asked before every attempt with the kind of
+   * decision about to go out; `false` settles the decision as `halted`. The
+   * default lets everything through, which is what the backtest and every
+   * pre-D caller want.
+   */
+  readonly barrier?: (kind: DecisionKind) => boolean;
+  /** Fires once, on the attempt that makes the run of failures reach the limit. */
+  readonly onExhausted?: (failure: ExhaustedSubmissions) => void;
 }
 
 export interface SubmitResult {
   readonly decisionId: string;
-  readonly outcome: 'accepted' | 'rejected' | 'pending';
+  readonly outcome: 'accepted' | 'rejected' | 'pending' | 'halted';
   readonly orderId?: string;
 }
 
@@ -80,6 +116,11 @@ export class OrderGateway {
   readonly #newDecisionId: () => string;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #maxAttempts: number;
+  readonly #barrier: (kind: DecisionKind) => boolean;
+  readonly #onExhausted: ((failure: ExhaustedSubmissions) => void) | undefined;
+  #consecutiveFailures = 0;
+  #inFlight = 0;
+  readonly #idleWaiters: (() => void)[] = [];
 
   constructor(options: OrderGatewayOptions) {
     this.#broker = options.broker;
@@ -93,6 +134,8 @@ export class OrderGateway {
       options.sleep ??
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#maxAttempts = options.maxAttempts ?? MAX_SUBMIT_ATTEMPTS;
+    this.#barrier = options.barrier ?? (() => true);
+    this.#onExhausted = options.onExhausted;
   }
 
   /**
@@ -111,10 +154,20 @@ export class OrderGateway {
   record(
     strategy: string,
     decision: StrategyDecision,
-    tick: Tick,
+    tick: Tick | null,
     options: { readonly decisionId?: string } = {},
   ): DecisionRecord | null {
     const at = new Date(this.#now()).toISOString();
+
+    if (decision.kind === 'place' && tick === null) {
+      // A cancel names an order and needs no price; a place is measured through
+      // `notionalOf` and does. The kill switch's sweep is the caller that has
+      // no tick, and it only ever cancels.
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        'a place decision cannot be recorded without a tick to price it',
+      );
+    }
 
     if (decision.kind === 'noop') {
       this.#state.appendNoop({
@@ -141,7 +194,7 @@ export class OrderGateway {
             intent: decision.intent,
             // Recorded at decision time so the daily total can be rebuilt from
             // the log alone, without re-reading a market that has since moved.
-            notional: notionalOf(decision.intent, tick),
+            notional: notionalOf(decision.intent, tick as Tick),
           };
 
     this.#state.appendDecision(record);
@@ -151,13 +204,50 @@ export class OrderGateway {
 
   /** Steps 2 to 4, for a decision that is already on disk. */
   async submit(record: DecisionRecord): Promise<SubmitResult> {
+    this.#inFlight += 1;
+
+    try {
+      return await this.#submit(record);
+    } finally {
+      this.#inFlight -= 1;
+
+      if (this.#inFlight === 0) {
+        for (const wake of this.#idleWaiters.splice(0)) {
+          wake();
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolves once nothing is in flight. The kill switch's sweep waits on this
+   * before it reads the portfolio, so an order that was mid-submission when the
+   * latch came down is in the snapshot the sweep cancels from.
+   */
+  idle(): Promise<void> {
+    if (this.#inFlight === 0) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
+  }
+
+  async #submit(record: DecisionRecord): Promise<SubmitResult> {
     const idempotencyKey = deriveIdempotencyKey(record.decisionId);
     let reestablished = false;
 
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
+      // Before *every* attempt: a trip during a backoff stops the next send.
+      if (!this.#barrier(record.kind)) {
+        return this.#halt(record, attempt - 1);
+      }
+
       try {
         const order = await this.#send(record, idempotencyKey);
 
+        this.#consecutiveFailures = 0;
         this.#state.appendSubmission({
           decisionId: record.decisionId,
           at: new Date(this.#now()).toISOString(),
@@ -181,11 +271,39 @@ export class OrderGateway {
       } catch (error) {
         const failure = asDomainError(error);
 
+        if (failure.retryable) {
+          this.#noteFailure(failure.code);
+        }
+
+        // The latch may have come down while this attempt was in flight — or
+        // this very failure may have been the tenth. A place is then settled
+        // as halted here rather than re-established, retried or left pending:
+        // pending is exactly what a cleared restart would resubmit.
+        if (
+          (failure.retryable || failure.code === 'SESSION_EXPIRED') &&
+          !this.#barrier(record.kind)
+        ) {
+          return this.#halt(record, attempt);
+        }
+
         // One re-establishment, then the 401 is treated like any other verdict.
         // The key does not change, so the retry replays rather than duplicates.
         if (failure.code === 'SESSION_EXPIRED' && !reestablished) {
           reestablished = true;
-          await this.#reestablish();
+
+          try {
+            await this.#reestablish();
+          } catch (reestablishment) {
+            // A latch that came down while the session was being re-established
+            // settles the place as halted; otherwise the failure is the
+            // caller's, as before.
+            if (!this.#barrier(record.kind)) {
+              return this.#halt(record, attempt);
+            }
+
+            throw reestablishment;
+          }
+
           continue;
         }
 
@@ -272,6 +390,40 @@ export class OrderGateway {
     } as Parameters<Broker['placeOrder']>[0]);
   }
 
+  #noteFailure(code: string): void {
+    this.#consecutiveFailures += 1;
+
+    if (this.#consecutiveFailures === KILL_SWITCH_AFTER_FAILED_ATTEMPTS) {
+      this.#onExhausted?.({
+        code,
+        consecutiveFailures: this.#consecutiveFailures,
+      });
+    }
+  }
+
+  /** `attempts` is how many requests had gone out for this decision before the barrier caught it. */
+  #halt(record: DecisionRecord, attempts: number): SubmitResult {
+    this.#state.appendSubmission({
+      decisionId: record.decisionId,
+      at: new Date(this.#now()).toISOString(),
+      outcome: 'halted',
+      code: 'KILL_SWITCH',
+      attempts,
+    });
+    this.#reporter.report(
+      'warn',
+      `the ${record.kind} was halted by the kill switch`,
+      {
+        decisionId: record.decisionId,
+        strategy: record.strategy,
+        code: 'KILL_SWITCH',
+        reason: record.reason,
+      },
+    );
+
+    return { decisionId: record.decisionId, outcome: 'halted' };
+  }
+
   #settleOrLeavePending(
     record: DecisionRecord,
     failure: DomainError,
@@ -280,8 +432,8 @@ export class OrderGateway {
     if (failure.retryable) {
       // Retries exhausted on a fault that may yet clear. Left pending on
       // purpose: the next start resubmits it under the same key, which is the
-      // safe state to be stuck in. §7.1's escalation to the kill switch is
-      // phase D.
+      // safe state to be stuck in. The run of failures is counted in
+      // `#noteFailure`; escalation is the kill switch's, through `onExhausted`.
       this.#reporter.report(
         'error',
         `the ${record.kind} could not be submitted and is left pending for the next start`,
@@ -332,11 +484,11 @@ function asDomainError(error: unknown): DomainError {
   );
 }
 
-/** Exponential, and the server's own `Retry-After` wins when it gave one. */
+/** Exponential, and the server's own `Retry-After` wins when it gave one — both under the cap. */
 function backoffMs(attempt: number, retryAfterSeconds?: number): number {
   if (retryAfterSeconds !== undefined && retryAfterSeconds > 0) {
-    return retryAfterSeconds * 1_000;
+    return Math.min(MAX_BACKOFF_MS, retryAfterSeconds * 1_000);
   }
 
-  return BASE_BACKOFF_MS * 2 ** (attempt - 1);
+  return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (attempt - 1));
 }

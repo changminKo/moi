@@ -30,6 +30,7 @@ import {
   type FetchLike,
   PaperApiClient,
 } from '../transport/paper-api-client.js';
+import { KillSwitch } from './kill-switch.js';
 import { RunnerContext } from './runner-context.js';
 import { StrategyHost } from './strategy-host.js';
 
@@ -39,6 +40,8 @@ import { StrategyHost } from './strategy-host.js';
  *
  * The cycle is deliberately sequential and deliberately short:
  *
+ * 0. look for the operator's kill-switch file and ask the risk gate whether a
+ *    loss limit has tripped — either engages the kill switch (phase D);
  * 1. read the portfolio — the ledger is the source of truth (§7.3), so every
  *    cycle starts by asking it rather than by trusting what the runner recorded;
  * 2. poll the quote for each instrument and derive ticks;
@@ -48,6 +51,10 @@ import { StrategyHost } from './strategy-host.js';
  *
  * Step 5 is last because everything before it can throw, and a cursor written
  * for a cycle that did not finish would claim an observation that was not made.
+ *
+ * With the kill switch engaged the cycle still runs steps 0–2 and 5 — the feed
+ * drains, the recorder records, the cursors move — and skips only the hand-off
+ * to a strategy in step 3. The runner is watching, not trading.
  */
 
 export interface SupervisorOptions {
@@ -107,6 +114,7 @@ export class RunnerSupervisor {
   readonly #fills: FillProcessor;
   readonly #risk: RiskGate;
   readonly #gateway: OrderGateway;
+  readonly #killSwitch: KillSwitch;
   readonly #context: RunnerContext;
   readonly #hosts: readonly StrategyHost[];
   readonly #owner: ReadonlyMap<string, StrategyHost>;
@@ -215,6 +223,23 @@ export class RunnerSupervisor {
       },
       now: this.#now,
       ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      // Both read `#killSwitch` at call time; it is built just below, after the
+      // gateway it needs for its sweep.
+      barrier: (kind) => this.#killSwitch.permits(kind),
+      onExhausted: ({ code, consecutiveFailures }) => {
+        void this.#killSwitch.engage(
+          'submission-failures',
+          `${consecutiveFailures} submission attempts failed in a row`,
+          { code, consecutiveFailures },
+        );
+      },
+    });
+    this.#killSwitch = new KillSwitch({
+      cell: this.#state.killSwitch,
+      gateway: this.#gateway,
+      portfolio: () => this.#portfolio(),
+      reporter: options.reporter,
+      now: this.#now,
     });
     this.#hosts = Object.freeze(
       options.config.strategies.map(
@@ -244,6 +269,7 @@ export class RunnerSupervisor {
       owner,
       portfolio: () => this.#portfolio(),
       now: this.#now,
+      killSwitch: this.#killSwitch,
     });
   }
 
@@ -251,6 +277,10 @@ export class RunnerSupervisor {
 
   get state(): StateStore {
     return this.#state;
+  }
+
+  get killSwitch(): KillSwitch {
+    return this.#killSwitch;
   }
 
   /**
@@ -265,6 +295,10 @@ export class RunnerSupervisor {
   async start(): Promise<void> {
     await this.#session.establish();
     await this.#gateway.recoverPending();
+    // A latch found on disk is announced and swept again before any strategy
+    // is restored — the pending cancels `recoverPending` just resubmitted are
+    // the recorded half of an interrupted sweep; this reads the rest.
+    await this.#killSwitch.resume();
 
     for (const host of this.#hosts) {
       host.start(this.#runtime.strategies[host.name] ?? null, this.#context);
@@ -278,6 +312,16 @@ export class RunnerSupervisor {
 
   /** One pass. Separated from `run` so a test can drive the loop by hand. */
   async cycle(): Promise<void> {
+    await this.#killSwitch.observeOperatorFile();
+
+    if (!this.#killSwitch.engaged) {
+      const breach = this.#risk.lossLimitBreach();
+
+      if (breach !== null) {
+        await this.#killSwitch.engage('loss-limit', breach);
+      }
+    }
+
     const portfolio = await this.#portfolio();
 
     this.#context.observePortfolio(portfolio);
@@ -289,6 +333,7 @@ export class RunnerSupervisor {
     }
 
     this.#persist();
+    this.#killSwitch.heartbeat();
   }
 
   async run(): Promise<void> {
@@ -351,6 +396,12 @@ export class RunnerSupervisor {
     // a *different* configuration may well own it.
     this.#recorder?.record(tick);
     this.#context.observeTick(tick);
+
+    // Engaged: the feed, the recorder and the cursors carry on — the runner is
+    // watching, not trading — and the one thing that stops is this hand-off.
+    if (this.#killSwitch.engaged) {
+      return;
+    }
 
     const host = this.#owner.get(instrumentKey(tick));
 

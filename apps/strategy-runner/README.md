@@ -4,7 +4,8 @@ The trading bot's process: it reads the market through the paper API, asks each
 configured strategy what to do, filters that through a risk gate, and places the
 orders that survive. It is the runner of
 [`docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md`](../../docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md),
-at its **phase C** scope, plus **phase E**'s backtest harness in `src/backtest`.
+at its **phase C** scope, plus **phase D**'s kill-switch core (`src/runner/kill-switch.ts`)
+and **phase E**'s backtest harness in `src/backtest`.
 
 ## What is here, and what is not
 
@@ -25,8 +26,9 @@ Deliberately **not** here:
 
 | Not in C | Where it belongs | Why it is not pulled forward |
 |---|---|---|
-| The kill-switch submission barrier, Discord, the compose service | D (§7.2, §8.1) | The `Reporter` seam and the state layout are here; the wiring is not |
-| Escalating a tripped loss limit past "refuse new entries" | D | That escalation *is* the §7.2 barrier |
+| The kill-switch submission barrier | **here since phase D** — see "The kill switch" | |
+| Discord embeds, the compose service | D (#93) | The `Reporter` seam is here; the wiring is not |
+| Escalating a tripped loss limit past "refuse new entries" | **here since phase D** | `RiskGate.lossLimitBreach` feeds the kill switch |
 | Mid-price derivation and its tick-size rounding | nowhere — see below | §5.2's premise no longer holds |
 
 Phase E added the backtest harness (`src/backtest`) and registered the SDK's
@@ -104,7 +106,7 @@ instrument (§6.3), more than four subscriptions (§5.3), a strategy subscribed 
 an instrument the gate would refuse every order for, a money limit outside the
 exact money domain, and anything the strategy's own parameter schema rejects.
 
-## What the state store holds after phase C
+## What the state store holds after phase D
 
 | File | Shape | Unit of atomicity |
 |---|---|---|
@@ -113,6 +115,7 @@ exact money domain, and anything the strategy's own parameter schema rejects.
 | `fills.ndjson` | append-only | **one account event** — see below |
 | `session.json` (0600) | atomic replace | the current session |
 | `runtime.json` | atomic replace | feed cursors and strategy snapshots |
+| `kill-switch.json` | atomic replace | the kill switch's latch — present means engaged (phase D) |
 
 There is no `cursor.json`, though §8.1 lists one. See "the transaction is the
 line".
@@ -312,10 +315,56 @@ shared counter, so the one path that authorises orders off the back of an
 execution would be the one path that could never be quarantined.
 
 Quarantine is not a kill switch. It stops a broken decision path from producing
-more decisions; it does **not** cancel resting orders or close a position — that
-is the barrier of §7.2, in phase D. It is held in memory and re-derived after a
+more decisions and nothing else. It is held in memory and re-derived after a
 restart, because a quarantine on disk would mean a bot that cannot restart itself
-out of a transient fault without someone deleting a file.
+out of a transient fault without someone deleting a file. The two differ on every
+axis that matters:
+
+| | quarantine | kill switch |
+|---|---|---|
+| unit | one strategy | the whole runner |
+| persisted | no — a restart lifts it | `kill-switch.json` — a person lifts it |
+| resting orders | untouched | cancelled by the sweep |
+| tripped by | three consecutive throws | a loss limit, ten failed submission attempts in a row, an unexplainable fill, or an operator |
+
+A quarantine does not trip the kill switch (one strategy's fault does not stop the
+others — phase B's call), and the kill switch does not consult quarantine (once
+engaged, no host receives a tick anyway).
+
+## The kill switch
+
+Design §6's "킬 스위치가 걸리면", in phase D. The in-memory barrier closes, the
+latch is written to `kill-switch.json` (a write the disk refuses is reported and
+retried every cycle — the runner holds engaged in memory meanwhile), it is
+reported once at `error`, every resting order is
+cancelled through the ordinary gateway path (`decisionId`
+`kill:{engagedAt}:{orderId}`, so a re-sweep records nothing twice and a failed
+cancel is a pending decision the next start resubmits), and from then on the
+gateway settles every `place` as `halted` while a `cancel` still goes out. The
+runner stays up — fills keep reaching the journal, the cursors keep moving — and
+says `the kill switch is still engaged` every 30 minutes.
+
+Four things trip it: `maxConsecutiveLosses` or `maxDailyLoss` (design §6 calls
+both "킬 스위치"; the BUY refusal stays too), ten failed submission attempts in a
+row across decisions (design §7.2), an unexplainable fill (§16.46 — the wedge now
+brings the barrier down with it), and an operator. The gateway asks the barrier
+before every attempt **and after every failed one**, so a latch that comes down
+while a request is in flight still settles that place as halted rather than
+leaving it pending for a cleared restart to resubmit; backoffs are capped at
+five minutes (§7.2) and the sweep waits at most five seconds for in-flight
+submissions before it reads the portfolio.
+
+**To engage it by hand**, write `{"reason": "…"}` to `kill-switch.json` in
+`BOT_STATE_DIR`; the runner notices on its next cycle. **To clear it**, delete the
+file and restart the container. It does not lift itself, and deleting the file
+while the runner is up does not lift it either — a half-cleared switch would be a
+half-trading bot.
+
+A decision the barrier catches is settled as `halted`, not left pending: an
+operator who clears the latch must not have yesterday's entry resubmitted at
+them. The position is not closed; that is a person's decision. The design is
+`docs/superpowers/specs/2026-09-02-moi-strategy-runner-kill-switch-design.md`
+and the deviation row is §16.48.
 
 ## Where the risk gate stops
 
@@ -336,8 +385,9 @@ freshness as refusing an *entry*; this is that reading applied to the rest.
 §6.4's two loss limits joined it in phase C. Both are folds over `fills.ndjson`,
 which is to say over the same durable records that hold the cursor, so unlike §1
 row 7's memory counter there is nothing for a restart to reset. A tripped loss
-limit refuses new entries and leaves exits open; escalating it to cancelling
-resting orders is the §7.2 barrier, in phase D.
+limit refuses new entries and leaves exits open **and**, since phase D, engages
+the kill switch through `RiskGate.lossLimitBreach()`, which the supervisor asks
+once a cycle.
 
 `activeOrders` carries terminal orders too (#33), so the runner filters by status
 itself, as §1 row 12 says to until that lands.

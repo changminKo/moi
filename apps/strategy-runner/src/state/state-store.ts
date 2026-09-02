@@ -52,6 +52,9 @@ const SUBMISSIONS = 'submissions.ndjson';
 const FILLS = 'fills.ndjson';
 const SESSION = 'session.json';
 const RUNTIME = 'runtime.json';
+const KILL_SWITCH = 'kill-switch.json';
+/** The latch file's name, exported so an operator document and a test agree on it. */
+export const KILL_SWITCH_FILE = KILL_SWITCH;
 
 /**
  * What a line in `decisions.ndjson` records. Only `place` and `cancel`
@@ -94,7 +97,13 @@ export interface DecisionRecord {
   readonly notional?: DecimalString;
 }
 
-export type SubmissionOutcome = 'accepted' | 'rejected';
+/**
+ * `halted` is the kill switch's outcome (phase D): the barrier refused to submit
+ * a decision that was already on disk. It settles the decision — see
+ * `pendingDecisions` — because a decision the kill switch caught is a dead
+ * decision, not a deferred one.
+ */
+export type SubmissionOutcome = 'accepted' | 'rejected' | 'halted';
 
 export interface SubmissionRecord {
   readonly decisionId: string;
@@ -104,6 +113,12 @@ export interface SubmissionRecord {
   readonly status?: string;
   /** The domain error code, on a rejection. Never a message with a secret in it. */
   readonly code?: string;
+  /**
+   * On a `halted` outcome: how many attempts had gone out before the barrier
+   * caught it. Zero means the order never left the process; one or more means
+   * the ledger may hold it, which `dailyEntryNotional` has to assume it does.
+   */
+  readonly attempts?: number;
 }
 
 function invalid(message: string): never {
@@ -167,13 +182,27 @@ export function readSubmissionRecord(source: LogRecord): SubmissionRecord {
   const where = 'a submission record';
   const outcome = source.outcome;
 
-  if (outcome !== 'accepted' && outcome !== 'rejected') {
-    invalid(`${where} must be accepted or rejected`);
+  if (
+    outcome !== 'accepted' &&
+    outcome !== 'rejected' &&
+    outcome !== 'halted'
+  ) {
+    invalid(`${where} must be accepted, rejected or halted`);
   }
 
   const orderId = readOptionalText(source, 'orderId', where);
   const status = readOptionalText(source, 'status', where);
   const code = readOptionalText(source, 'code', where);
+  const attempts = source.attempts;
+
+  if (
+    attempts !== undefined &&
+    (typeof attempts !== 'number' ||
+      !Number.isInteger(attempts) ||
+      attempts < 0)
+  ) {
+    invalid(`${where} has a malformed attempts count`);
+  }
 
   return Object.freeze({
     decisionId: readText(source, 'decisionId', where),
@@ -182,6 +211,7 @@ export function readSubmissionRecord(source: LogRecord): SubmissionRecord {
     ...(orderId === undefined ? {} : { orderId }),
     ...(status === undefined ? {} : { status }),
     ...(code === undefined ? {} : { code }),
+    ...(attempts === undefined ? {} : { attempts: attempts as number }),
   });
 }
 
@@ -211,6 +241,13 @@ export class StateStore {
   readonly #submissions: AppendLog;
   readonly #decided: DecisionRecord[];
   readonly #settled: Set<string>;
+  /**
+   * The subset of `#settled` the kill switch settled (`halted`) **before any
+   * attempt went out**. Kept apart because `dailyEntryNotional` has to leave
+   * these out: such a decision is exactly one the runner never submitted. A
+   * halt after an attempt stays counted — the ledger may hold that order.
+   */
+  readonly #halted: Set<string>;
   readonly #recorded = new Set<string>();
   /**
    * The account-event cursor and everything that commits with it (§6.4). Its
@@ -220,6 +257,12 @@ export class StateStore {
   readonly fills: FillJournal;
   readonly session: JsonCell;
   readonly runtime: JsonCell;
+  /**
+   * The kill switch's latch (phase D). Present means engaged; absent means not.
+   * An operator clears it by deleting the file and restarting — so it is a
+   * cell, not a log line: there is no history to keep, only a current fact.
+   */
+  readonly killSwitch: JsonCell;
 
   private constructor(directory: string) {
     mkdirSync(directory, { recursive: true });
@@ -231,10 +274,13 @@ export class StateStore {
       // tolerating whatever it happens to hold.
       .filter((record) => ACTIONABLE.has(record.kind))
       .map(readDecisionRecord);
-    this.#settled = new Set(
-      readAppendLog(join(directory, SUBMISSIONS))
-        .map(readSubmissionRecord)
-        .map((record) => record.decisionId),
+    const submissions = readAppendLog(join(directory, SUBMISSIONS)).map(
+      readSubmissionRecord,
+    );
+
+    this.#settled = new Set(submissions.map((record) => record.decisionId));
+    this.#halted = new Set(
+      submissions.filter(neverSent).map((record) => record.decisionId),
     );
     for (const record of this.#decided) {
       this.#recorded.add(record.decisionId);
@@ -245,6 +291,7 @@ export class StateStore {
     this.fills = FillJournal.open(join(directory, FILLS));
     this.session = new JsonCell(join(directory, SESSION), { mode: 0o600 });
     this.runtime = new JsonCell(join(directory, RUNTIME));
+    this.killSwitch = new JsonCell(join(directory, KILL_SWITCH));
   }
 
   static open(options: StateStoreOptions): StateStore {
@@ -285,6 +332,10 @@ export class StateStore {
   appendSubmission(record: SubmissionRecord): void {
     this.#submissions.append(toRecord(record), { durable: true });
     this.#settled.add(record.decisionId);
+
+    if (neverSent(record)) {
+      this.#halted.add(record.decisionId);
+    }
   }
 
   /**
@@ -331,7 +382,12 @@ export class StateStore {
   /**
    * How much **entry** notional has been committed on a UTC day, over every
    * decision that recorded one — pending included, because a decision that has
-   * been written down is a decision the runner is going to submit.
+   * been written down is a decision the runner is going to submit. The one
+   * exception is a decision settled as `halted` **with no attempt made**: the
+   * kill switch caught it before it left, and charging it would leave an
+   * operator who clears the latch the same day short of budget for orders that
+   * never went out. A halt after an attempt is still charged — that request may
+   * have reached the ledger.
    *
    * Entries only, and the name says so rather than leaving it to be discovered.
    * `RiskGate` applies the daily limit to a `BUY` and never to a `SELL`, because
@@ -355,6 +411,7 @@ export class StateStore {
           record.notional !== undefined &&
           // A cancel carries no intent and commits nothing; a sell is an exit.
           record.intent?.side === 'BUY' &&
+          !this.#halted.has(record.decisionId) &&
           utcDay(record.at) === day,
       )
       .reduce(
@@ -371,6 +428,10 @@ export class StateStore {
     this.fills.close();
   }
 }
+
+/** A halted submission that never left the process. */
+const neverSent = (record: SubmissionRecord): boolean =>
+  record.outcome === 'halted' && record.attempts === 0;
 
 /** Drops the `undefined` fields `exactOptionalPropertyTypes` allows. */
 function toRecord(value: object): LogRecord {

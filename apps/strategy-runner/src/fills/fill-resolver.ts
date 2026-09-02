@@ -82,8 +82,9 @@ import type { CommittedFill, FillJournal } from '../state/fill-journal.js';
  * fixed, the replay from the unmoved cursor **delivers** the fill rather than
  * having lost it.
  *
- * What the wedge stops is *fill processing*, not tick-driven trading — halting
- * the whole runner is the submission barrier of §7.2, in phase D.
+ * What the wedge stops here is *fill processing*. Since phase D the same throw
+ * also engages the kill switch (`FillProcessor` calls it before re-throwing),
+ * so tick-driven trading stops with it — §7.2's submission barrier.
  *
  * ## When the ledger holds a position the runner never saw itself acquire — a
  * session with holdings from before the bot, or one whose events it had to skip
