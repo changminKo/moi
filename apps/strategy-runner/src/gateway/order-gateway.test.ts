@@ -471,7 +471,7 @@ describe('OrderGateway under the kill switch barrier', () => {
   } as const);
 
   it('settles a place as halted instead of submitting it', async () => {
-    const { broker, gateway, state, reporter } = harness({
+    const { broker, directory, gateway, state, reporter } = harness({
       barrier: (kind) => kind === 'cancel',
     });
 
@@ -481,6 +481,10 @@ describe('OrderGateway under the kill switch barrier', () => {
     });
     expect(broker.calls).toStrictEqual([]);
     expect(state.pendingDecisions()).toStrictEqual([]);
+    // Settled *as halted* on disk — not as a rejection the ledger never gave.
+    expect(readFileSync(join(directory, 'submissions.ndjson'), 'utf8')).toMatch(
+      /"outcome":"halted".*"code":"KILL_SWITCH"|"code":"KILL_SWITCH".*"outcome":"halted"/u,
+    );
     expect(reporter.lines.at(-1)).toMatch(
       /\[warn\] the place was halted by the kill switch .*code=KILL_SWITCH/u,
     );
