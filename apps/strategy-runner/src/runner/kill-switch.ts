@@ -97,6 +97,12 @@ export class KillSwitch implements KillSwitchTrigger {
   #engagement: Engagement | null;
   #sweep: Promise<void> | null = null;
   #lastHeartbeatAt = 0;
+  /**
+   * True only for a latch read off disk at construction and not yet announced
+   * by `resume`. A latch that came down in this run has already been reported
+   * by `engage` and is already sweeping; `resume` has nothing to add to it.
+   */
+  #pendingResume: boolean;
 
   constructor(options: KillSwitchOptions) {
     this.#cell = options.cell;
@@ -105,6 +111,7 @@ export class KillSwitch implements KillSwitchTrigger {
     this.#reporter = options.reporter;
     this.#now = options.now ?? Date.now;
     this.#engagement = this.#readLatch();
+    this.#pendingResume = this.#engagement !== null;
   }
 
   get engaged(): boolean {
@@ -179,13 +186,20 @@ export class KillSwitch implements KillSwitchTrigger {
    * resubmitted them, but an order the sweep never reached is only caught by
    * reading the portfolio again. The ids are the same, so nothing is recorded or
    * submitted twice.
+   *
+   * Silent for a latch that came down in this run (`recoverPending` can trip
+   * the failure counter before `start()` reaches here): the operator was told
+   * by `engage`, there is no stale file to point them at, and a second sweep
+   * would run beside the first. Speaks once — a second call is a no-op.
    */
   async resume(): Promise<void> {
     const engagement = this.#engagement;
 
-    if (engagement === null) {
+    if (engagement === null || !this.#pendingResume) {
       return;
     }
+
+    this.#pendingResume = false;
 
     this.#lastHeartbeatAt = this.#now();
     this.#reporter.report(

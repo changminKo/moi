@@ -506,6 +506,54 @@ describe('OrderGateway under the kill switch barrier', () => {
   });
 
   /**
+   * A restart under the latch. The pending place is a dead decision and settles
+   * as halted; the pending cancel is the recorded half of an interrupted sweep
+   * and goes out. This is the path that makes a failed sweep retry itself.
+   */
+  it('recovers pending decisions under the latch: places halted, cancels resubmitted', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'moi-gateway-latched-'));
+    const seeded = StateStore.open({ directory });
+
+    stores.push(seeded);
+    seeded.appendDecision({
+      decisionId: 'd-place',
+      at: '2026-09-02T01:00:00.000Z',
+      strategy: 'samsung',
+      kind: 'place',
+      reason: 'golden-cross',
+      intent: BUY.intent,
+      notional: '70000',
+    });
+    seeded.appendDecision({
+      decisionId: 'kill:2026-09-02T01:30:00.000Z:o-7',
+      at: '2026-09-02T01:30:00.000Z',
+      strategy: 'kill-switch',
+      kind: 'cancel',
+      reason: 'kill switch: drill',
+      orderId: 'o-7',
+    });
+    seeded.close();
+    stores.pop();
+
+    const { broker, gateway, state } = harness({
+      directory,
+      answers: [{ id: 'o-7', status: 'CANCELLED' } as BrokerOrder],
+      barrier: (kind) => kind === 'cancel',
+    });
+
+    await expect(gateway.recoverPending()).resolves.toStrictEqual([
+      { decisionId: 'd-place', outcome: 'halted' },
+      {
+        decisionId: 'kill:2026-09-02T01:30:00.000Z:o-7',
+        outcome: 'accepted',
+        orderId: 'o-7',
+      },
+    ]);
+    expect(broker.calls.map((call) => call.kind)).toStrictEqual(['cancel']);
+    expect(state.pendingDecisions()).toStrictEqual([]);
+  });
+
+  /**
    * The barrier is asked before *every* attempt, not once at the door. A trip
    * that lands during a retry backoff — a fill wedge on the other chain, say —
    * must stop the next attempt; the one already sent cannot be unsent, and the

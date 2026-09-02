@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrokerPortfolio } from '@moi/strategy-sdk';
@@ -156,6 +162,42 @@ describe('KillSwitch engagement', () => {
     ).toStrictEqual([
       '[error] the kill switch is engaged; new orders are refused and resting orders are being cancelled source=operator reason=drill by=test',
     ]);
+  });
+
+  /**
+   * The order is the guarantee: a crash between "decided to stop" and "said so"
+   * must leave a runner that comes back stopped. Observed from inside the first
+   * report, which is the first thing after the write.
+   */
+  it('has the latch on disk before the first report and before any sweep read', async () => {
+    const reporter = createRecordingReporter();
+    const path = join(directory, 'kill-switch.json');
+    const seen: boolean[] = [];
+    const gateway = fakeGateway();
+    let reads = 0;
+    const killSwitch = new KillSwitch({
+      cell: new JsonCell(path),
+      gateway,
+      portfolio: async () => {
+        reads += 1;
+        seen.push(existsSync(path));
+
+        return portfolioOf([]);
+      },
+      reporter: {
+        report: (level, message, fields) => {
+          seen.push(existsSync(path));
+          reporter.report(level, message, fields);
+        },
+      },
+      now: () => ENGAGED_AT_MS,
+    });
+
+    await killSwitch.engage('operator', 'drill');
+
+    expect(reads).toBe(1);
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(seen.every(Boolean)).toBe(true);
   });
 
   it('is idempotent: a second engage neither rewrites nor re-reports', async () => {
@@ -429,6 +471,55 @@ describe('KillSwitch resume and heartbeat', () => {
     expect(gateway.submitted).toStrictEqual([
       'kill:2026-09-01T00:00:00.000Z:o-1',
     ]);
+  });
+
+  /**
+   * A latch that came down in *this* run is not "from a previous run": the
+   * operator has already been told, there is no file for them to delete that
+   * they did not just watch appear, and the sweep is already running. `resume`
+   * speaks only for a latch it found on disk at construction.
+   */
+  it('resume() is silent, and sweeps nothing new, after an engage in the same run', async () => {
+    const gateway = fakeGateway();
+    const { killSwitch, reporter, reads } = build({
+      gateway,
+      portfolios: [portfolioOf([order('o-1')]), portfolioOf([])],
+    });
+
+    await killSwitch.engage('submission-failures', '10 attempts');
+
+    const lines = reporter.lines.length;
+    const readsAfterEngage = reads();
+
+    await killSwitch.resume();
+
+    expect(reporter.lines.length).toBe(lines);
+    expect(reporter.lines.join('\n')).not.toContain('from a previous run');
+    expect(reads()).toBe(readsAfterEngage);
+    expect(gateway.submitted).toStrictEqual([`kill:${ENGAGED_AT}:o-1`]);
+  });
+
+  it('resume() speaks once: a second call is silent', async () => {
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({
+        engagedAt: '2026-09-01T00:00:00.000Z',
+        source: 'operator',
+        reason: 'x',
+      }),
+    );
+
+    const { killSwitch, reporter, reads } = build();
+
+    await killSwitch.resume();
+
+    const lines = reporter.lines.length;
+    const readsAfterFirst = reads();
+
+    await killSwitch.resume();
+
+    expect(reporter.lines.length).toBe(lines);
+    expect(reads()).toBe(readsAfterFirst);
   });
 
   it('resume() is silent when not engaged', async () => {

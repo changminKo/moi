@@ -111,6 +111,31 @@ describe('StateStore decisions', () => {
     expect(store(directory).pendingDecisions()).toStrictEqual([]);
   });
 
+  /**
+   * The daily budget counts decisions the runner is going to submit. A halted
+   * one is exactly not that — the kill switch caught it — so it must not spend
+   * budget an operator who clears the latch the same day will need.
+   */
+  it('does not charge a halted decision against the daily entry notional', () => {
+    const directory = scratch();
+    const first = store(directory);
+
+    first.appendDecision(decision('d-1', { notional: '70000' }));
+    first.appendDecision(decision('d-2', { notional: '5000' }));
+    first.appendSubmission({
+      decisionId: 'd-1',
+      at: '2026-09-02T01:00:01.000Z',
+      outcome: 'halted',
+      code: 'KILL_SWITCH',
+    });
+
+    expect(first.dailyEntryNotional('2026-09-02')).toBe('5000');
+
+    first.close();
+
+    expect(store(directory).dailyEntryNotional('2026-09-02')).toBe('5000');
+  });
+
   it('exposes the kill-switch cell at a fixed name in the state directory', () => {
     const directory = scratch();
 

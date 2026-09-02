@@ -224,6 +224,12 @@ export class StateStore {
   readonly #submissions: AppendLog;
   readonly #decided: DecisionRecord[];
   readonly #settled: Set<string>;
+  /**
+   * The subset of `#settled` the kill switch settled (`halted`). Kept apart
+   * because `dailyEntryNotional` has to leave these out: a halted decision is
+   * exactly a decision the runner is *not* going to submit.
+   */
+  readonly #halted: Set<string>;
   readonly #recorded = new Set<string>();
   /**
    * The account-event cursor and everything that commits with it (§6.4). Its
@@ -250,9 +256,14 @@ export class StateStore {
       // tolerating whatever it happens to hold.
       .filter((record) => ACTIONABLE.has(record.kind))
       .map(readDecisionRecord);
-    this.#settled = new Set(
-      readAppendLog(join(directory, SUBMISSIONS))
-        .map(readSubmissionRecord)
+    const submissions = readAppendLog(join(directory, SUBMISSIONS)).map(
+      readSubmissionRecord,
+    );
+
+    this.#settled = new Set(submissions.map((record) => record.decisionId));
+    this.#halted = new Set(
+      submissions
+        .filter((record) => record.outcome === 'halted')
         .map((record) => record.decisionId),
     );
     for (const record of this.#decided) {
@@ -305,6 +316,10 @@ export class StateStore {
   appendSubmission(record: SubmissionRecord): void {
     this.#submissions.append(toRecord(record), { durable: true });
     this.#settled.add(record.decisionId);
+
+    if (record.outcome === 'halted') {
+      this.#halted.add(record.decisionId);
+    }
   }
 
   /**
@@ -351,7 +366,10 @@ export class StateStore {
   /**
    * How much **entry** notional has been committed on a UTC day, over every
    * decision that recorded one — pending included, because a decision that has
-   * been written down is a decision the runner is going to submit.
+   * been written down is a decision the runner is going to submit. The one
+   * exception is a decision settled as `halted`: the kill switch caught it, it
+   * will never be submitted, and charging it would leave an operator who clears
+   * the latch the same day short of budget for orders that never went out.
    *
    * Entries only, and the name says so rather than leaving it to be discovered.
    * `RiskGate` applies the daily limit to a `BUY` and never to a `SELL`, because
@@ -375,6 +393,7 @@ export class StateStore {
           record.notional !== undefined &&
           // A cancel carries no intent and commits nothing; a sell is an exit.
           record.intent?.side === 'BUY' &&
+          !this.#halted.has(record.decisionId) &&
           utcDay(record.at) === day,
       )
       .reduce(
