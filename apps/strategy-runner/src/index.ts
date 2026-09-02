@@ -10,8 +10,31 @@ export {
   type RiskLimits,
   type RunnerConfig,
 } from './config.js';
+export { MarketFeed } from './feed/market-feed.js';
 export { MarketSessionCache } from './feed/market-session.js';
-export { instrumentKey, RestQuoteFeed } from './feed/rest-quote-feed.js';
+export {
+  type FeedCursors,
+  type InstrumentCursor,
+  instrumentKey,
+  QuoteTicker,
+} from './feed/quote-ticker.js';
+export {
+  ATTEMPT_BASE_MS,
+  ATTEMPT_CEILING_MS,
+  REARM_BASE_MS,
+  REARM_CEILING_MS,
+  ReconnectPolicy,
+} from './feed/reconnect-policy.js';
+export { RestQuoteFeed } from './feed/rest-quote-feed.js';
+export {
+  type StreamAccountEvent,
+  StreamClient,
+  type StreamHandlers,
+  type StreamSocket,
+  type StreamSocketFactory,
+} from './feed/stream-client.js';
+export { FillProcessor, fillDecisionId } from './fills/fill-processor.js';
+export { FillResolver, isFillEvent } from './fills/fill-resolver.js';
 export { deriveIdempotencyKey } from './gateway/idempotency.js';
 export { OrderGateway } from './gateway/order-gateway.js';
 export { createStrategy, DEFAULT_REGISTRY } from './registry.js';
@@ -25,6 +48,11 @@ export { RunnerContext } from './runner/runner-context.js';
 export { StrategyHost } from './runner/strategy-host.js';
 export { RunnerSupervisor } from './runner/supervisor.js';
 export { SessionClient } from './session/session-client.js';
+export {
+  type CommittedFill,
+  type FillCommit,
+  FillJournal,
+} from './state/fill-journal.js';
 export { StateStore } from './state/state-store.js';
 export {
   type FetchLike,

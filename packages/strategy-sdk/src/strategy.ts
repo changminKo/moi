@@ -68,13 +68,34 @@ export interface InstrumentRef {
   readonly symbol: string;
 }
 
-/** Where a tick's price came from. See design §5.2. */
-export type TickPriceSource = 'book-mid' | 'rest-snapshot';
+/**
+ * Which of the runner's two market-data paths an observation arrived on
+ * (design §5.1): a `quote` frame off the stream subscription, or a REST read of
+ * `GET /api/v1/markets/:m/symbols/:s/quote`.
+ *
+ * Both carry the *same* projection — `projectQuote` is the single builder
+ * behind the REST body and the frame payload alike (`docs/api/quote-contract.md`,
+ * spec §16.36) — so the two differ in latency and in nothing else. The
+ * distinction is kept because a recorded tick series is a backtest input
+ * (§8.2) and "this price reached the bot 40 ms after the book moved" is not the
+ * same evidence as "this price was polled a second later".
+ *
+ * `book-mid` is **not produced**. Design §5.2 asks for a mid-price because at
+ * the time it was written a `quote` frame carried a bare order book and no
+ * price at all (§1 row 3). §16.36 removed that premise: the frame now states
+ * `price` under the same rule the ledger prices against — last trade, then best
+ * ask, then best bid (§16.33). Deriving a second price from the book in the
+ * same payload would put the runner and the ledger into disagreement about what
+ * an instrument costs, and buy nothing. The member stays in the union so a
+ * future adapter that genuinely has only a book has a name for what it makes,
+ * and so a recorded series from before this decision still reads.
+ */
+export type TickPriceSource = 'book-mid' | 'stream-quote' | 'rest-snapshot';
 
 /**
- * One price observation, as the runner derives it (design §5.2). The paper API
- * publishes an order book rather than trades, so `price` is a book mid-price or
- * a REST snapshot price and `priceSource` says which.
+ * One price observation, as the runner derives it (design §5.2). `price` is the
+ * paper API's own quote projection and `priceSource` says which path it came
+ * down.
  *
  * `asOf` is the **runner's** receive time, not the provider's: the frame carries
  * no provider timestamp, and the name says so rather than pretending otherwise.

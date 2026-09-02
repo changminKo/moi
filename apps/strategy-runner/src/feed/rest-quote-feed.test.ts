@@ -5,7 +5,8 @@ import {
   type FetchLike,
   PaperApiClient,
 } from '../transport/paper-api-client.js';
-import { type FeedCursors, RestQuoteFeed } from './rest-quote-feed.js';
+import { type FeedCursors, QuoteTicker } from './quote-ticker.js';
+import { RestQuoteFeed } from './rest-quote-feed.js';
 
 const SAMSUNG = { market: 'KR', symbol: '005930' } as const;
 const HYNIX = { market: 'KR', symbol: '000660' } as const;
@@ -79,6 +80,17 @@ function feedOver(
 ) {
   const stub = quotes(byPath);
   const reporter = createRecordingReporter();
+  // Phase C moved the cursor, the ordering rule and the gap judgement into
+  // `QuoteTicker`, shared with the stream feed so one observation cannot become
+  // two ticks. The feed's behaviour through this seam is unchanged, which is
+  // what these tests carried over from phase B are here to keep true.
+  const ticker = new QuoteTicker({
+    gapAfterMs: options.gapAfterMs ?? 5_000,
+    now: options.clock ?? (() => 1_000_000),
+    ...(options.cursors === undefined ? {} : { cursors: options.cursors }),
+    onGap: (gap) =>
+      reporter.report('warn', 'a market-data gap was observed', { ...gap }),
+  });
   const feed = new RestQuoteFeed({
     api: new PaperApiClient({
       origin: 'http://127.0.0.1:3001',
@@ -86,13 +98,11 @@ function feedOver(
       fetch: stub.fetch,
     }),
     instruments: options.instruments ?? [SAMSUNG],
-    gapAfterMs: options.gapAfterMs ?? 5_000,
     reporter,
-    now: options.clock ?? (() => 1_000_000),
-    ...(options.cursors === undefined ? {} : { cursors: options.cursors }),
+    ticker,
   });
 
-  return { feed, paths: stub.paths, reporter };
+  return { feed, ticker, paths: stub.paths, reporter };
 }
 
 describe('RestQuoteFeed tick derivation', () => {
@@ -358,7 +368,7 @@ describe('RestQuoteFeed gap detection', () => {
   });
 
   it('hands back cursors a restart can resume from', async () => {
-    const { feed } = feedOver({
+    const { feed, ticker } = feedOver({
       '005930': [
         { price: '70000', recoveryEpoch: '3', marketDataVersion: '7' },
       ],
@@ -366,7 +376,7 @@ describe('RestQuoteFeed gap detection', () => {
 
     await feed.poll();
 
-    expect(feed.cursors()).toStrictEqual({
+    expect(ticker.cursors()).toStrictEqual({
       'KR:005930': {
         recoveryEpoch: '3',
         marketDataVersion: '7',

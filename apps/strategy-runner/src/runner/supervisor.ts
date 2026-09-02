@@ -7,12 +7,19 @@ import type {
 } from '@moi/strategy-sdk/strategy';
 import { DomainError } from '@moi/trading-core';
 import type { RunnerConfig } from '../config.js';
+import { MarketFeed } from '../feed/market-feed.js';
 import { MarketSessionCache } from '../feed/market-session.js';
 import {
   type FeedCursors,
   instrumentKey,
-  RestQuoteFeed,
-} from '../feed/rest-quote-feed.js';
+  QuoteTicker,
+} from '../feed/quote-ticker.js';
+import { RestQuoteFeed } from '../feed/rest-quote-feed.js';
+import {
+  StreamClient,
+  type StreamSocketFactory,
+} from '../feed/stream-client.js';
+import { FillProcessor } from '../fills/fill-processor.js';
 import { OrderGateway } from '../gateway/order-gateway.js';
 import type { Reporter } from '../reporter.js';
 import { RiskGate } from '../risk/risk-gate.js';
@@ -48,6 +55,8 @@ export interface SupervisorOptions {
   readonly fetch?: FetchLike;
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
+  /** Injected so a test can drive the socket. Defaults to Node's `WebSocket`. */
+  readonly socketFactory?: StreamSocketFactory;
 }
 
 interface RuntimeCell {
@@ -83,7 +92,10 @@ export class RunnerSupervisor {
   readonly #session: SessionClient;
   readonly #api: PaperApiClient;
   readonly #broker: PaperBroker;
-  readonly #feed: RestQuoteFeed;
+  readonly #ticker: QuoteTicker;
+  readonly #feed: MarketFeed;
+  readonly #stream: StreamClient;
+  readonly #fills: FillProcessor;
   readonly #risk: RiskGate;
   readonly #gateway: OrderGateway;
   readonly #context: RunnerContext;
@@ -115,13 +127,56 @@ export class RunnerSupervisor {
       reporter: options.reporter,
     });
     this.#broker = new PaperBroker(this.#api.brokerTransport());
-    this.#feed = new RestQuoteFeed({
-      api: this.#api,
-      instruments: options.config.subscriptions,
+    this.#ticker = new QuoteTicker({
       gapAfterMs: options.config.gapAfterMs,
-      reporter: options.reporter,
       now: this.#now,
       cursors: runtime.cursors,
+      onGap: (gap) =>
+        options.reporter.report('warn', 'a market-data gap was observed', {
+          ...gap,
+        }),
+    });
+    // The three reference each other, and every reference is a closure read at
+    // call time rather than a value read now: the stream hands frames to the
+    // feed, asks the fill processor for its cursor, and the fill processor is
+    // built last because it needs the gateway.
+    this.#stream = new StreamClient({
+      origin: options.config.apiOrigin,
+      publicOrigin: options.config.publicOrigin,
+      credentials: () => this.#session.credentials(),
+      instruments: options.config.subscriptions,
+      cursor: () => this.#fills.cursor(),
+      reporter: options.reporter,
+      handlers: {
+        onReady: (accountSequence) =>
+          options.reporter.report('info', 'the market stream is ready', {
+            accountSequence,
+          }),
+        onQuote: (market, symbol, payload) =>
+          this.#feed.observeFrame(market, symbol, payload),
+        onEvent: (event) => this.#fills.process(event),
+        onResync: (reason) => this.#fills.resync(reason),
+        // §5.3: quotes are not replayed, so a connection that comes back
+        // knows nothing until the book next moves. One REST read per
+        // instrument puts a price in front of the strategy now.
+        onConnected: () => this.#feed.rebaseline(),
+      },
+      ...(options.socketFactory === undefined
+        ? {}
+        : { socketFactory: options.socketFactory }),
+    });
+    this.#feed = new MarketFeed({
+      instruments: options.config.subscriptions,
+      ticker: this.#ticker,
+      rest: new RestQuoteFeed({
+        api: this.#api,
+        instruments: options.config.subscriptions,
+        reporter: options.reporter,
+        ticker: this.#ticker,
+      }),
+      stream: this.#stream,
+      reporter: options.reporter,
+      maxQuoteAgeMs: options.config.risk.maxQuoteAgeMs,
     });
     this.#risk = new RiskGate({
       limits: options.config.risk,
@@ -170,6 +225,15 @@ export class RunnerSupervisor {
 
     this.#owner = owner;
     this.#runtime = runtime;
+    this.#fills = new FillProcessor({
+      state: this.#state,
+      gateway: this.#gateway,
+      reporter: options.reporter,
+      context: this.#context,
+      owner,
+      portfolio: () => this.#portfolio(),
+      now: this.#now,
+    });
   }
 
   #runtime: RuntimeCell;
@@ -194,6 +258,11 @@ export class RunnerSupervisor {
     for (const host of this.#hosts) {
       host.start(this.#runtime.strategies[host.name] ?? null, this.#context);
     }
+
+    // Last: the socket starts replaying account events as soon as it is up, and
+    // an event that reaches `FillProcessor` before `recoverPending` has run
+    // would race a decision the previous process left unsettled.
+    this.#stream.start();
   }
 
   /** One pass. Separated from `run` so a test can drive the loop by hand. */
@@ -202,7 +271,7 @@ export class RunnerSupervisor {
 
     this.#context.observePortfolio(portfolio);
 
-    const ticks = await this.#feed.poll();
+    const ticks = await this.#feed.drain();
 
     for (const tick of ticks) {
       await this.#applyTick(tick, portfolio);
@@ -232,9 +301,11 @@ export class RunnerSupervisor {
 
   stop(): void {
     this.#running = false;
+    this.#stream.stop();
   }
 
   close(): void {
+    this.#stream.stop();
     this.#state.close();
   }
 
@@ -341,7 +412,7 @@ export class RunnerSupervisor {
       }
     }
 
-    this.#runtime = { cursors: this.#feed.cursors(), strategies };
+    this.#runtime = { cursors: this.#ticker.cursors(), strategies };
     this.#state.runtime.write({
       cursors: this.#runtime.cursors,
       strategies: this.#runtime.strategies,

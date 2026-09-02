@@ -1,4 +1,5 @@
 import type {
+  FillEvent,
   StrategyContext,
   StrategyDecision,
   StrategyState,
@@ -70,6 +71,14 @@ export class StrategyHost {
   readonly #reporter: Reporter;
   readonly #quarantineAfter: number;
   #consecutiveFailures = 0;
+  /**
+   * Counted apart from the tick failures, and it has to be. A strategy whose
+   * `onFill` is broken while its `onTick` works would never reach three
+   * *consecutive* failures on a shared counter — every good tick would clear
+   * it — so the one path that authorises orders off the back of an execution
+   * would be the one path that could never be quarantined.
+   */
+  #consecutiveFillFailures = 0;
   #quarantined = false;
   #active = false;
 
@@ -148,7 +157,44 @@ export class StrategyHost {
 
       return decisions;
     } catch (error) {
-      return this.#contain(error);
+      this.#consecutiveFailures += 1;
+
+      return this.#contain(error, this.#consecutiveFailures, 'a tick');
+    }
+  }
+
+  /**
+   * A fill the runner has resolved and committed to deliver. Contained exactly
+   * as `onTick` is: a broken strategy must not stop the fill from being
+   * recorded, because the cursor advancing is what stops the fill from being
+   * delivered twice.
+   *
+   * A strategy that declares no `onFill` answers nothing, which is not the same
+   * as a strategy whose `onFill` returned nothing — the first never had an
+   * opinion, and asking phase A's `sma-crossover` for one would be inventing it.
+   */
+  onFill(
+    fill: FillEvent,
+    context: StrategyContext,
+  ): readonly StrategyDecision[] {
+    const { strategy, params } = this.#configured;
+
+    if (this.#quarantined || strategy.onFill === undefined) {
+      return [];
+    }
+
+    try {
+      const decisions = readStrategyDecisions(
+        strategy.onFill(fill, context, params),
+      );
+
+      this.#consecutiveFillFailures = 0;
+
+      return decisions;
+    } catch (error) {
+      this.#consecutiveFillFailures += 1;
+
+      return this.#contain(error, this.#consecutiveFillFailures, 'a fill');
     }
   }
 
@@ -179,20 +225,22 @@ export class StrategyHost {
     }
   }
 
-  #contain(error: unknown): readonly StrategyDecision[] {
-    this.#consecutiveFailures += 1;
-
-    if (this.#consecutiveFailures >= this.#quarantineAfter) {
+  #contain(
+    error: unknown,
+    consecutiveFailures: number,
+    what: string,
+  ): readonly StrategyDecision[] {
+    if (consecutiveFailures >= this.#quarantineAfter) {
       this.#quarantined = true;
       this.#reporter.report(
         'error',
-        `a strategy threw on ${this.#consecutiveFailures} consecutive ticks and is quarantined; its open orders and position are untouched and need a person`,
-        { strategy: this.name, error: describe(error) },
+        `a strategy threw on ${consecutiveFailures} consecutive calls and is quarantined; its open orders and position are untouched and need a person`,
+        { strategy: this.name, on: what, error: describe(error) },
       );
     } else {
-      this.#reporter.report('warn', 'a strategy threw on a tick', {
+      this.#reporter.report('warn', `a strategy threw on ${what}`, {
         strategy: this.name,
-        consecutiveFailures: this.#consecutiveFailures,
+        consecutiveFailures,
         error: describe(error),
       });
     }
