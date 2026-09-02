@@ -312,11 +312,29 @@ describe('StreamHub replay→live barrier (U11)', () => {
     expect(received(other)).toEqual([]);
   });
 
+  /** Fail-closed default: an entry registered without symbols hears no quote while OPENING. */
+  it('forwards nothing to an OPENING entry that asked for no symbols', () => {
+    const hub = new StreamHub();
+    const s = socket();
+    hub.registerOpening('sid', s);
+    hub.publishQuote({
+      market: 'US',
+      symbol: 'AAPL',
+      recoveryEpoch: 1n,
+      marketDataVersion: 1n,
+      payload: {},
+    });
+    expect(received(s)).toEqual([]);
+  });
+
   it('supports two entries for one session and fans out deliver/quote/heartbeat to LIVE only (U13)', async () => {
     const hub = new StreamHub();
     const a = socket();
     const b = socket();
-    const ha = hub.registerOpening('sid', a);
+    // `a` asks for AAPL at the upgrade too, as the real wiring does: with the
+    // same set on both sides, an entry served by *both* the OPENING forward and
+    // the LIVE session would show up here as a doubled quote.
+    const ha = hub.registerOpening('sid', a, new Set(['US:AAPL']));
     const hb = hub.registerOpening('sid', b);
     const openedA = await StreamSession.open({
       sessionId: 'sid',

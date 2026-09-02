@@ -22,6 +22,9 @@ interface Entry {
   /**
    * The `MARKET:SYMBOL` keys the client asked for at the upgrade. Quotes for
    * them are forwarded while the entry is still OPENING — see `publishQuote`.
+   * The same query feeds `StreamSession.subscribeQuote` once the session
+   * exists, so the LIVE gate is the validated twin of this set; if a client
+   * path to unsubscribe ever appears, keep the two in step.
    */
   readonly quoteSymbols: ReadonlySet<string>;
   state: StreamEntryState;
