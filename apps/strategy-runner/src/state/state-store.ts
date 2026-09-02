@@ -113,6 +113,12 @@ export interface SubmissionRecord {
   readonly status?: string;
   /** The domain error code, on a rejection. Never a message with a secret in it. */
   readonly code?: string;
+  /**
+   * On a `halted` outcome: how many attempts had gone out before the barrier
+   * caught it. Zero means the order never left the process; one or more means
+   * the ledger may hold it, which `dailyEntryNotional` has to assume it does.
+   */
+  readonly attempts?: number;
 }
 
 function invalid(message: string): never {
@@ -187,6 +193,16 @@ export function readSubmissionRecord(source: LogRecord): SubmissionRecord {
   const orderId = readOptionalText(source, 'orderId', where);
   const status = readOptionalText(source, 'status', where);
   const code = readOptionalText(source, 'code', where);
+  const attempts = source.attempts;
+
+  if (
+    attempts !== undefined &&
+    (typeof attempts !== 'number' ||
+      !Number.isInteger(attempts) ||
+      attempts < 0)
+  ) {
+    invalid(`${where} has a malformed attempts count`);
+  }
 
   return Object.freeze({
     decisionId: readText(source, 'decisionId', where),
@@ -195,6 +211,7 @@ export function readSubmissionRecord(source: LogRecord): SubmissionRecord {
     ...(orderId === undefined ? {} : { orderId }),
     ...(status === undefined ? {} : { status }),
     ...(code === undefined ? {} : { code }),
+    ...(attempts === undefined ? {} : { attempts: attempts as number }),
   });
 }
 
@@ -225,9 +242,10 @@ export class StateStore {
   readonly #decided: DecisionRecord[];
   readonly #settled: Set<string>;
   /**
-   * The subset of `#settled` the kill switch settled (`halted`). Kept apart
-   * because `dailyEntryNotional` has to leave these out: a halted decision is
-   * exactly a decision the runner is *not* going to submit.
+   * The subset of `#settled` the kill switch settled (`halted`) **before any
+   * attempt went out**. Kept apart because `dailyEntryNotional` has to leave
+   * these out: such a decision is exactly one the runner never submitted. A
+   * halt after an attempt stays counted — the ledger may hold that order.
    */
   readonly #halted: Set<string>;
   readonly #recorded = new Set<string>();
@@ -262,9 +280,7 @@ export class StateStore {
 
     this.#settled = new Set(submissions.map((record) => record.decisionId));
     this.#halted = new Set(
-      submissions
-        .filter((record) => record.outcome === 'halted')
-        .map((record) => record.decisionId),
+      submissions.filter(neverSent).map((record) => record.decisionId),
     );
     for (const record of this.#decided) {
       this.#recorded.add(record.decisionId);
@@ -317,7 +333,7 @@ export class StateStore {
     this.#submissions.append(toRecord(record), { durable: true });
     this.#settled.add(record.decisionId);
 
-    if (record.outcome === 'halted') {
+    if (neverSent(record)) {
       this.#halted.add(record.decisionId);
     }
   }
@@ -367,9 +383,11 @@ export class StateStore {
    * How much **entry** notional has been committed on a UTC day, over every
    * decision that recorded one — pending included, because a decision that has
    * been written down is a decision the runner is going to submit. The one
-   * exception is a decision settled as `halted`: the kill switch caught it, it
-   * will never be submitted, and charging it would leave an operator who clears
-   * the latch the same day short of budget for orders that never went out.
+   * exception is a decision settled as `halted` **with no attempt made**: the
+   * kill switch caught it before it left, and charging it would leave an
+   * operator who clears the latch the same day short of budget for orders that
+   * never went out. A halt after an attempt is still charged — that request may
+   * have reached the ledger.
    *
    * Entries only, and the name says so rather than leaving it to be discovered.
    * `RiskGate` applies the daily limit to a `BUY` and never to a `SELL`, because
@@ -410,6 +428,10 @@ export class StateStore {
     this.fills.close();
   }
 }
+
+/** A halted submission that never left the process. */
+const neverSent = (record: SubmissionRecord): boolean =>
+  record.outcome === 'halted' && record.attempts === 0;
 
 /** Drops the `undefined` fields `exactOptionalPropertyTypes` allows. */
 function toRecord(value: object): LogRecord {

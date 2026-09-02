@@ -604,6 +604,107 @@ describe('OrderGateway under the kill switch barrier', () => {
     expect(state.pendingDecisions()).toStrictEqual([]);
   });
 
+  /**
+   * A 401 whose re-establishment then fails, under a latch that came down in
+   * the meantime: the place must settle as halted rather than escape as a throw
+   * that leaves it pending for a cleared restart.
+   */
+  it('halts when the barrier closes during a failed session re-establishment', async () => {
+    let down = false;
+    const directory = mkdtempSync(join(tmpdir(), 'moi-gateway-401-'));
+    const state = StateStore.open({ directory });
+
+    stores.push(state);
+
+    const broker = fakeBroker([new DomainError('SESSION_EXPIRED', 'expired')]);
+    const gateway = new OrderGateway({
+      broker,
+      state,
+      sessionId: () => 's-1',
+      reporter: createRecordingReporter(),
+      reestablishSession: async () => {
+        down = true;
+        throw new DomainError('SERVICE_UNAVAILABLE', 'auth down');
+      },
+      now: () => NOW_MS,
+      newDecisionId: () => 'd-1',
+      sleep: async () => {},
+      barrier: () => !down,
+    });
+
+    await expect(gateway.place('samsung', BUY, TICK)).resolves.toMatchObject({
+      outcome: 'halted',
+    });
+    expect(state.pendingDecisions()).toStrictEqual([]);
+  });
+
+  it('still throws a failed re-establishment while the barrier is open', async () => {
+    const { gateway, broker } = harness({
+      answers: [new DomainError('SESSION_EXPIRED', 'expired')],
+    });
+
+    broker.placeOrder = async () => {
+      throw new DomainError('SESSION_EXPIRED', 'expired');
+    };
+
+    const directory = mkdtempSync(join(tmpdir(), 'moi-gateway-401-open-'));
+    const state = StateStore.open({ directory });
+
+    stores.push(state);
+
+    const failing = new OrderGateway({
+      broker,
+      state,
+      sessionId: () => 's-1',
+      reporter: createRecordingReporter(),
+      reestablishSession: async () => {
+        throw new DomainError('SERVICE_UNAVAILABLE', 'auth down');
+      },
+      now: () => NOW_MS,
+      newDecisionId: () => 'd-1',
+      sleep: async () => {},
+    });
+
+    await expect(failing.place('samsung', BUY, TICK)).rejects.toMatchObject({
+      code: 'SERVICE_UNAVAILABLE',
+    });
+    void gateway;
+  });
+
+  /**
+   * A halt records how many attempts went out before it. Zero means the order
+   * never left; one or more means the ledger may hold it, and the daily budget
+   * has to keep counting it (see `StateStore.dailyEntryNotional`).
+   */
+  it('records the attempts a halted place had made', async () => {
+    let down = false;
+    const { broker, directory, gateway } = harness({
+      barrier: () => !down,
+      maxAttempts: 1,
+    });
+
+    broker.placeOrder = async () => {
+      down = true;
+      throw new DomainError('SERVICE_UNAVAILABLE', 'gone');
+    };
+
+    await gateway.place('samsung', BUY, TICK);
+
+    expect(readFileSync(join(directory, 'submissions.ndjson'), 'utf8')).toMatch(
+      /"outcome":"halted".*"attempts":1|"attempts":1.*"outcome":"halted"/u,
+    );
+
+    const { directory: fresh, gateway: closed } = harness({
+      barrier: () => false,
+    });
+
+    await closed.place('samsung', BUY, TICK);
+
+    expect(readFileSync(join(fresh, 'submissions.ndjson'), 'utf8')).toMatch(
+      /"attempts":0/u,
+    );
+  });
+
   it('does not sleep out a backoff once the barrier is down', async () => {
     let down = false;
     const slept: number[] = [];

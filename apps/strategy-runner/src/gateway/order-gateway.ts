@@ -241,7 +241,7 @@ export class OrderGateway {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       // Before *every* attempt: a trip during a backoff stops the next send.
       if (!this.#barrier(record.kind)) {
-        return this.#halt(record);
+        return this.#halt(record, attempt - 1);
       }
 
       try {
@@ -283,14 +283,27 @@ export class OrderGateway {
           (failure.retryable || failure.code === 'SESSION_EXPIRED') &&
           !this.#barrier(record.kind)
         ) {
-          return this.#halt(record);
+          return this.#halt(record, attempt);
         }
 
         // One re-establishment, then the 401 is treated like any other verdict.
         // The key does not change, so the retry replays rather than duplicates.
         if (failure.code === 'SESSION_EXPIRED' && !reestablished) {
           reestablished = true;
-          await this.#reestablish();
+
+          try {
+            await this.#reestablish();
+          } catch (reestablishment) {
+            // A latch that came down while the session was being re-established
+            // settles the place as halted; otherwise the failure is the
+            // caller's, as before.
+            if (!this.#barrier(record.kind)) {
+              return this.#halt(record, attempt);
+            }
+
+            throw reestablishment;
+          }
+
           continue;
         }
 
@@ -388,12 +401,14 @@ export class OrderGateway {
     }
   }
 
-  #halt(record: DecisionRecord): SubmitResult {
+  /** `attempts` is how many requests had gone out for this decision before the barrier caught it. */
+  #halt(record: DecisionRecord, attempts: number): SubmitResult {
     this.#state.appendSubmission({
       decisionId: record.decisionId,
       at: new Date(this.#now()).toISOString(),
       outcome: 'halted',
       code: 'KILL_SWITCH',
+      attempts,
     });
     this.#reporter.report(
       'warn',

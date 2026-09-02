@@ -52,7 +52,7 @@ class KillSwitch {
 - **메모리 배리어가 먼저, 래치 기록이 그다음, 보고·스윕은 그 뒤다.** `engage` 는 `#engagement` 를 먼저 세워 배리어를 닫고, 파일을 쓴 뒤에야 보고하고 스윕한다. 결정 기록이 제출보다 먼저인 것(§6.2)과 같은 이유: 스윕 도중 죽어도 재시작이 래치를 본다. **쓰기가 실패하면**(ENOSPC·읽기 전용 FS) 던지지 않고 `error` 로 보고하며 메모리 래치는 그대로 — 디스크가 거부해도 거래를 계속하는 쪽이 틀린 방향이다 — 그리고 이후 cycle 의 `observeOperatorFile` 이 쓰기를 재시도한다(레인 2 BLOCKER).
 - **해제는 사람이 파일을 지우고 재시작한다**(설계 §6, 자동 해제 없음). 프로세스가 도는 동안 파일이 사라져도 래치는 풀리지 않는다 — 메모리의 `engaged` 가 진실이고 파일은 재시작을 위한 것이다. "지우면 바로 재개" 는 반쯤 지운 운영자에게 반쯤 도는 봇을 준다.
 - **전이에서만 보고한다.** 첫 `engage` 가 `error` 한 줄(`the kill switch is engaged; new orders are refused and resting orders are being cancelled`, fields: `source`, `reason`, 추가 필드). 이후 `engage` 호출은 조용하다 — wedge 는 재연결마다 같은 이벤트를 다시 던지고, 그때마다 임베드를 내면 신호가 죽는다. 30분 heartbeat 는 별도의 `warn` 이다.
-- **운영자 트립**: 사람이 `{"reason":"…"}` 를 `kill-switch.json` 에 쓰면 다음 cycle 에 `engage('operator', reason)`. 해제와 대칭이고 비용은 stat 하나다. 파일에 `reason` 이 없거나 JSON 이 아니면 `reason: 'operator file present'` 로 건다 — 파싱할 수 없는 킬 스위치 파일도 킬 스위치 파일이다. 반면 `EACCES`·`EIO`·`EISDIR` 같은 **읽기 장애는 래치가 아니다**: 전이에서 `warn` 한 줄을 내고 다음 cycle 에 다시 읽는다(일시적 I/O 오류가 온콜 없는 봇을 영구히 세우면 안 된다). 운영자 파일의 여분 필드(`by`, 티켓)는 `resume()` 의 정규화 쓰기에서 보존된다 — 생성자는 읽기만 하고 쓰지 않는다. `reason` 은 파일에 쓰기 전에 `redact` 를 지난다.
+- **운영자 트립**: 사람이 `{"reason":"…"}` 를 `kill-switch.json` 에 쓰면 다음 cycle 에 `engage('operator', reason)`. 해제와 대칭이고 비용은 stat 하나다. 파일에 `reason` 이 없거나 JSON 이 아니면 `reason: 'operator file present'` 로 건다 — 파싱할 수 없는 킬 스위치 파일도 킬 스위치 파일이다. 반면 **실행 중** `EACCES`·`EIO`·`EISDIR` 같은 읽기 장애는 래치가 아니다: 전이에서 `warn` 한 줄을 내고 다음 cycle 에 다시 읽는다(일시적 I/O 오류가 온콜 없는 봇을 영구히 세우면 안 된다). **시작 시**의 읽기 장애는 다르다 — 경로에 무언가 있는데 러너가 그것이 래치인지 말할 수 없다 — 그러므로 fail closed: 메모리 래치로 시작하고(`reason: operator file present but unreadable (CODE)`), `resume()` 이 디스크가 허락하면 써 넣는다(레인 2 검증 BLOCKER). 운영자 파일의 여분 필드(`by`, 티켓)는 `resume()` 의 정규화 쓰기에서 보존된다 — 생성자는 읽기만 하고 쓰지 않는다. `reason` 은 파일에 쓰기 전에 `redact` 를 지난다.
 - 재시작 시 파일이 있으면 생성자에서 `engaged = true` 로 시작하고 `start()` 의 `resume()` 이 그 사실을 `error` 로 한 번 보고한다(재시작마다 한 번 — 컨테이너가 다시 뜰 때마다 사람이 봐야 하는 상태다). 그리고 `resume()` 이 스윕을 **다시** 돈다 — 첫 스윕 도중 죽었을 때 기록되지 못한 주문을 잡는 유일한 길이고, id 가 같아 두 번 기록·제출되지 않는다. `resume()` 은 **생성자에서 읽은 래치에만, 한 번만** 말한다: `recoverPending` 이 실패를 소진해 같은 실행에서 걸린 래치는 이미 `engage` 가 보고했고 스윕 중이므로, `resume()` 은 조용히 지나간다(없는 파일을 지우라고 하거나 스윕을 겹쳐 돌리지 않는다).
 
 ### 2.2 `OrderGateway` — 배리어와 정산
@@ -99,9 +99,9 @@ heartbeat()
 
 `engage` 의 나머지 절반. 순서가 곧 안전성이다:
 
-1. `await gateway.idle()` — 진행 중인 제출이 정산될 때까지, **최대 `SWEEP_IDLE_WAIT_MS = 5초`**. "in-flight submission racing a cancel sweep": 방금 나간 주문은 다음 단계의 포트폴리오 읽기에 나타나야 한다. 상한을 두는 이유: `idle()` 은 백오프 중인 제출에 잡혀 있을 수 있고, 그 시간만큼 미체결이 남는 것이 더 나쁜 실패다 — 상한 뒤에 정산되는 주문은 재스캔이나 다음 재시작의 `resume()` 이 잡는다.
+1. `await gateway.idle()` — 진행 중인 제출이 정산될 때까지, **최대 `SWEEP_IDLE_WAIT_MS = 5초`**. 상한이 이기면 원래의 `idle()` 이 풀리는 순간 **스윕을 한 번 더** 돈다 — 상한 뒤에 원장에 닿은 place 를 방치하지 않기 위해(레인 2 검증 BLOCKER). "in-flight submission racing a cancel sweep": 방금 나간 주문은 다음 단계의 포트폴리오 읽기에 나타나야 한다. 상한을 두는 이유: `idle()` 은 백오프 중인 제출에 잡혀 있을 수 있고, 그 시간만큼 미체결이 남는 것이 더 나쁜 실패다 — 상한 뒤에 정산되는 주문은 재스캔이나 다음 재시작의 `resume()` 이 잡는다.
 2. 최대 `MAX_SWEEP_PASSES = 5` 패스. 각 패스: `portfolio()` 재조회 → `isOpenOrder` 필터 → 각 주문에 대해 게이트웨이 경로로 `record('kill-switch', { kind: 'cancel', orderId, reason }, tick?, { decisionId: 'kill:' + engagedAt + ':' + orderId })` 후 `submit()`. 빈 스캔이면 종료.
-   - 게이트웨이 경로를 쓰는 이유: 결정 로그에 남고(감사), `decisionId` 가 결정론적이라 `appendDecision` 이 멱등하며(결정 행은 하나 — 재스윕은 같은 키로 취소 **요청**을 다시 보낼 수 있고 원장의 멱등성이 그것을 재생으로 만든다, #88 의 관찰), 실패한 취소는 pending cancel 로 남아 **재시작의 `recoverPending` 이 재시도**한다. 스윕이 자기만의 취소 코드를 갖지 않는다.
+   - 게이트웨이 경로를 쓰는 이유: 결정 로그에 남고(감사), `decisionId` 가 결정론적이라 `appendDecision` 이 멱등하며(결정 행은 하나 — 재스윕·재스캔은 아직 열린 주문에 같은 키로 취소 **요청**을 다시 보내고, 원장의 멱등성이 그것을 재생으로 만든다; 이것은 의도다 — 주문이 아직 열려 있다는 것이 재전송의 이유다, #88 의 관찰), 실패한 취소는 pending cancel 로 남아 **재시작의 `recoverPending` 이 재시도**한다. 스윕이 자기만의 취소 코드를 갖지 않는다.
    - `record()` 는 `tick` 을 `notionalOf` 에만 쓰고 cancel 은 notional 을 기록하지 않으므로, cancel 에 한해 `tick` 을 선택으로 완화한다.
 3. 스윕 자체가 던지면(포트폴리오 읽기 실패 등) `error` 로 **코드만** 보고한다 — 메시지는 서버의 것일 수 있다(§7.3). 5패스 뒤에도 열린 주문이 남으면 `error` 로 남은 `orderId` 목록을 보고한다. 러너는 계속 산다(§0.3); 다음 재시작이 pending cancel 을 다시 낸다 — 정확히는 `recoverPending` 이 기록된 취소를 재제출하고, 이어지는 `resume()` 의 재스윕이 기록되지 못한 나머지를 읽는다.
 4. 스윕 중 취소가 `rejected` 되는 경우(예: 이미 체결됨) 는 정상이다 — 다음 패스의 포트폴리오에 없다.
@@ -135,7 +135,7 @@ quarantine 은 킬 스위치를 **트립하지 않는다**(전략 하나의 결�
 
 - `kill-switch.test.ts`: 첫 `engage` 만 파일 쓰기·보고, 두 번째는 조용·같은 Promise; 파일이 있는 채 생성 → engaged; 운영자 파일(정상·`reason` 없음·깨진 JSON) 세 모양; heartbeat 30분 경계; 스윕 — `idle` 을 기다린 뒤 읽는다(in-flight 중엔 포트폴리오 읽기 0), 2패스에 걸쳐 새로 나타난 주문도 취소, `decisionId` 결정론, 5패스 잔존 보고.
 - `order-gateway.test.ts`: `barrier` 가 place 를 막으면 `halted` 정산 + 반환, cancel 은 통과; 백오프 사이에 배리어가 닫히면 다음 attempt 없음; `idle` 이 in-flight 정산 뒤 풀림; retryable 실패 10회 연속에 `onExhausted` 한 번, 성공이 카운터 리셋, `rejected` 는 안 셈; `recoverPending` 아래 래치 → place halted·cancel 재제출.
-- `state-store.test.ts`: `halted` 레코드가 읽히고 그 결정은 pending 이 아니다; halted 결정은 `dailyEntryNotional` 에 들지 않는다(킬 스위치가 잡은 결정은 내지 않을 결정이라 같은 날 래치를 푼 운영자의 예산을 깎지 않는다).
+- `state-store.test.ts`: `halted` 레코드가 읽히고 그 결정은 pending 이 아니다; **시도 0회로** halted 된 결정은 `dailyEntryNotional` 에 들지 않는다(내지 않은 주문이 같은 날 래치를 푼 운영자의 예산을 깎지 않는다) — 시도 뒤 halted 는 원장에 닿았을 수 있어 계속 센다(`SubmissionRecord.attempts`).
 - `risk-gate.test.ts`: `lossLimitBreach` 두 한도 각각, 경계값(같음 = 걸림), 둘 다 아니면 `null`.
 - `fill-processor.test.ts`: §16.46 세 모양 각각에서 `engage('fill-wedge')` 호출 + 재throw + 커서 불변.
 - `supervisor.test.ts`: 래치 cycle 에 `onTick` 0회·drain·persist 는 있음; 운영자 파일 → 다음 cycle 에 걸림; `lossLimitBreach` → engage; 재시작 시 `resume` 보고; **배선 고정** — 래치 아래 `recoverPending` 의 pending place 가 halted(배리어 배선), 503 연속으로 `submission-failures`(`onExhausted` 배선), 스트림의 설명 불가 fill 로 `fill-wedge`(`FillProcessor` 배선), 30분 뒤 heartbeat(`heartbeat()` 호출).

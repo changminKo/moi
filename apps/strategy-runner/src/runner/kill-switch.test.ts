@@ -156,6 +156,13 @@ function unwritableCell(): JsonCell {
   return cell;
 }
 
+/** Lets a chain that was started without being awaited run to rest. */
+const settle = async (): Promise<void> => {
+  for (let index = 0; index < 20; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
 const latch = (): Record<string, unknown> =>
   JSON.parse(
     readFileSync(join(directory, 'kill-switch.json'), 'utf8'),
@@ -246,6 +253,13 @@ describe('KillSwitch engagement', () => {
     expect(reporter.lines).toContain(
       '[error] the kill switch could not be persisted; it holds in memory but a restart would come up trading code=ENOSPC',
     );
+
+    // Still failing: retried every observation, reported once per fault.
+    await killSwitch.observeOperatorFile();
+    await killSwitch.observeOperatorFile();
+    expect(
+      reporter.lines.filter((line) => line.includes('could not be persisted')),
+    ).toHaveLength(1);
 
     // The disk comes back: the next observation writes the latch.
     cell.write = JsonCell.prototype.write;
@@ -379,18 +393,66 @@ describe('KillSwitch operator file', () => {
     });
   });
 
-  /** A transient read fault is not a kill switch: it is reported and re-read next cycle. */
-  it('does not engage on a read fault that is neither absence nor bad JSON', async () => {
+  /**
+   * At start the question is different: something is at the latch's path and
+   * the runner cannot tell what. Fail closed — engage in memory — rather than
+   * come up trading over a file that may well be a latch. `resume` then tries
+   * to write it back, and says so if the disk still refuses.
+   */
+  it('comes up engaged when an existing latch cannot be read at construction', async () => {
     mkdirSync(join(directory, 'kill-switch.json'));
 
     const { killSwitch, reporter } = build();
 
+    expect(killSwitch.engaged).toBe(true);
+    expect(killSwitch.permits('place')).toBe(false);
+    expect(killSwitch.engagement).toMatchObject({
+      source: 'operator',
+      reason: 'operator file present but unreadable (EISDIR)',
+    });
+    expect(reporter.lines).toStrictEqual([
+      '[warn] the kill-switch file could not be read and will be retried next cycle code=EISDIR',
+    ]);
+  });
+
+  /** A transient read fault while running is not a kill switch: it is reported and re-read next cycle. */
+  it('does not engage on a read fault that is neither absence nor bad JSON', async () => {
+    const { killSwitch, reporter } = build();
+
+    mkdirSync(join(directory, 'kill-switch.json'));
+    await killSwitch.observeOperatorFile();
     await killSwitch.observeOperatorFile();
 
     expect(killSwitch.engaged).toBe(false);
     expect(reporter.lines).toStrictEqual([
       '[warn] the kill-switch file could not be read and will be retried next cycle code=EISDIR',
     ]);
+  });
+
+  it('masks a legacy latch reason before it reaches a cancel decision', async () => {
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({
+        engagedAt: '2026-09-01T00:00:00.000Z',
+        source: 'fill-wedge',
+        reason: 'cookie moi_session=abcdef0123456789abcdef0123456789',
+      }),
+    );
+
+    const gateway = fakeGateway();
+    const { killSwitch } = build({
+      gateway,
+      portfolios: [portfolioOf([order('o-1')]), portfolioOf([])],
+    });
+
+    await killSwitch.resume();
+
+    expect(gateway.recorded[0]?.reason).not.toContain(
+      'abcdef0123456789abcdef0123456789',
+    );
+    expect(killSwitch.engagement?.reason).not.toContain(
+      'abcdef0123456789abcdef0123456789',
+    );
   });
 
   it('masks the reason before it is written to disk', async () => {
@@ -595,6 +657,41 @@ describe('KillSwitch cancel sweep', () => {
     expect(waited).toStrictEqual([SWEEP_IDLE_WAIT_MS]);
     expect(reads()).toBe(2);
     expect(gateway.submitted).toStrictEqual([`kill:${ENGAGED_AT}:o-1`]);
+  });
+
+  /**
+   * What the cap gives up, the late idle gives back: a place that was still in
+   * flight when the cap elapsed may have reached the ledger after the sweep's
+   * last read, so when `idle()` finally resolves the sweep runs once more.
+   */
+  it('sweeps again when the in-flight submissions settle after the cap', async () => {
+    let release!: () => void;
+    const idle = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gateway = fakeGateway({ idle });
+    const { killSwitch, reads } = build({
+      gateway,
+      // First sweep (after the cap): nothing resting. The late place then
+      // shows up as o-late, and the re-sweep cancels it.
+      portfolios: [
+        portfolioOf([]),
+        portfolioOf([order('o-late')]),
+        portfolioOf([]),
+      ],
+      wait: async () => {},
+    });
+
+    await killSwitch.engage('operator', 'drill');
+
+    expect(reads()).toBe(1);
+    expect(gateway.submitted).toStrictEqual([]);
+
+    release();
+    await settle();
+
+    expect(reads()).toBe(3);
+    expect(gateway.submitted).toStrictEqual([`kill:${ENGAGED_AT}:o-late`]);
   });
 });
 

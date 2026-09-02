@@ -158,6 +158,8 @@ export class KillSwitch implements KillSwitchTrigger {
   #lastHeartbeatAt = 0;
   /** Set while the latch file is unreadable, so the fault is reported on the transition only. */
   #readFault = false;
+  /** Likewise for a latch that cannot be written. */
+  #persistFault = false;
   /**
    * True only for a latch read off disk at construction and not yet announced
    * by `resume`. A latch that came down in this run has already been reported
@@ -369,21 +371,41 @@ export class KillSwitch implements KillSwitchTrigger {
     try {
       this.#cell.write({ ...this.#carried, ...engagement });
       this.#persisted = true;
+      this.#persistFault = false;
     } catch (error) {
       this.#persisted = false;
-      this.#reporter.report(
-        'error',
-        'the kill switch could not be persisted; it holds in memory but a restart would come up trading',
-        { code: codeOf(error) },
-      );
+
+      // Retried every observation; reported once per fault, not once a second.
+      if (!this.#persistFault) {
+        this.#persistFault = true;
+        this.#reporter.report(
+          'error',
+          'the kill switch could not be persisted; it holds in memory but a restart would come up trading',
+          { code: codeOf(error) },
+        );
+      }
     }
   }
 
   #readLatch(): Engagement | null {
     const read = this.#readCell();
 
-    if (read.kind !== 'present') {
+    if (read.kind === 'absent') {
       return null;
+    }
+
+    if (read.kind === 'unreadable') {
+      // At start the question is not "is the disk having a moment" but "is
+      // there a latch": something is at the path and the runner cannot tell
+      // what. Fail closed — engaged in memory, written back by `resume` if the
+      // disk allows it by then.
+      this.#persisted = false;
+
+      return Object.freeze({
+        engagedAt: new Date(this.#now()).toISOString(),
+        source: 'operator',
+        reason: `${OPERATOR_FILE_PRESENT} but unreadable (${read.code})`,
+      });
     }
 
     const saved = read.value;
@@ -398,7 +420,9 @@ export class KillSwitch implements KillSwitchTrigger {
       return Object.freeze({
         engagedAt: saved.engagedAt,
         source: saved.source as KillSwitchSource,
-        reason: saved.reason,
+        // The file is not a trusted source either: it was written by a runner,
+        // but it could have been edited since.
+        reason: redact(saved.reason),
       });
     }
 
@@ -438,8 +462,19 @@ export class KillSwitch implements KillSwitchTrigger {
   async #runSweep(engagement: Engagement): Promise<void> {
     // An order that was mid-submission when the latch came down has to be in
     // the snapshot this reads, or the sweep misses it — up to the cap; see
-    // `SWEEP_IDLE_WAIT_MS`.
-    await Promise.race([this.#gateway.idle(), this.#wait(SWEEP_IDLE_WAIT_MS)]);
+    // `SWEEP_IDLE_WAIT_MS`. If the cap won, the sweep runs once more when the
+    // in-flight submissions do settle: whatever they placed after this read is
+    // caught then rather than left resting.
+    let idle = false;
+    const settled = this.#gateway.idle().then(() => {
+      idle = true;
+    });
+
+    await Promise.race([settled, this.#wait(SWEEP_IDLE_WAIT_MS)]);
+
+    if (!idle) {
+      void settled.then(() => this.#sweepGuarded(engagement));
+    }
 
     let resting = await this.#resting();
     let passes = 0;

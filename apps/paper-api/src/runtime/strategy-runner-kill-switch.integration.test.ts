@@ -324,16 +324,24 @@ describe('the kill switch against the real paper API', () => {
       }
 
       // Before the restart: a place the previous process recorded and never
-      // settled, and a cancel from an interrupted sweep. `recoverPending` meets
-      // the restored barrier — the place must settle as halted without reaching
-      // the ledger, the cancel must go out. This is the gateway barrier's one
-      // path in this suite: once engaged, no tick reaches a strategy, so
-      // nothing else here can produce a place decision.
-      const cancelledId = (
-        await brokerOf(supervisor).broker.getPortfolio(
-          brokerOf(supervisor).sessionId,
-        )
-      ).activeOrders.find((order) => order.symbol === SYMBOL)?.id as string;
+      // settled, and a cancel from an interrupted sweep for an order that is
+      // *still resting* — placed here, after the sweep, as the sweep would
+      // have missed it. `recoverPending` meets the restored barrier: the place
+      // must settle as halted without reaching the ledger, the cancel must go
+      // out and the ledger must show the order cancelled. This is the gateway
+      // barrier's one path in this suite: once engaged, no tick reaches a
+      // strategy, so nothing else here can produce a place decision.
+      const { broker: late, sessionId: lateSession } = brokerOf(supervisor);
+      const missed = await late.placeOrder({
+        sessionId: lateSession,
+        idempotencyKey: 'rest-missed',
+        market: 'KR',
+        symbol: SYMBOL,
+        side: 'BUY',
+        type: 'LIMIT',
+        quantity: '1',
+        limitPrice: '50000',
+      });
       const seeded = StateStore.open({ directory: stateDir });
 
       seeded.appendDecision({
@@ -352,12 +360,12 @@ describe('the kill switch against the real paper API', () => {
         notional: '80000',
       });
       seeded.appendDecision({
-        decisionId: `kill:seeded:${cancelledId}`,
+        decisionId: `kill:seeded:${missed.id}`,
         at: new Date().toISOString(),
         strategy: 'kill-switch',
         kind: 'cancel',
         reason: 'kill switch: interrupted sweep',
-        orderId: cancelledId,
+        orderId: missed.id,
       });
       seeded.close();
 
@@ -379,12 +387,10 @@ describe('the kill switch against the real paper API', () => {
           ),
         ).toHaveLength(1);
         expect(
-          restartedReporter.lines.some(
-            (line) =>
-              line.includes('the cancel was accepted') ||
-              line.includes('the cancel was rejected'),
-          ),
-        ).toBe(true);
+          restartedReporter.lines.filter((line) =>
+            line.includes('the cancel was accepted'),
+          ).length,
+        ).toBeGreaterThanOrEqual(1);
 
         for (const price of PRICES) {
           await feedPrice(restarted, price);
@@ -392,7 +398,10 @@ describe('the kill switch against the real paper API', () => {
 
         const { broker, sessionId } = brokerOf(restarted);
 
+        // Three: the two the sweep cancelled, and the one the seeded pending
+        // cancel (and `resume`'s re-sweep) cancelled after the restart.
         expect(await statusesOf(broker, sessionId)).toStrictEqual([
+          'CANCELLED',
           'CANCELLED',
           'CANCELLED',
         ]);
@@ -409,12 +418,14 @@ describe('the kill switch against the real paper API', () => {
         reason: 'integration drill',
       });
       // The sweep's cancels are ordinary, recorded decisions (two from the
-      // sweep, one seeded above), and the pre-trip place settled as halted.
+      // first sweep, one seeded above, and at most one more from `resume`'s
+      // re-sweep for the same order under the restart's own id), and the
+      // pre-trip place settled as halted.
       expect(
         readFileSync(join(stateDir, 'decisions.ndjson'), 'utf8').match(
           /"decisionId":"kill:[^"]+"/gu,
-        ),
-      ).toHaveLength(3);
+        )?.length,
+      ).toBeGreaterThanOrEqual(3);
       expect(
         readFileSync(join(stateDir, 'submissions.ndjson'), 'utf8'),
       ).toMatch(/"decisionId":"d-before-trip".*"outcome":"halted"/u);

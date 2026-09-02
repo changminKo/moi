@@ -127,6 +127,7 @@ describe('StateStore decisions', () => {
       at: '2026-09-02T01:00:01.000Z',
       outcome: 'halted',
       code: 'KILL_SWITCH',
+      attempts: 0,
     });
 
     expect(first.dailyEntryNotional('2026-09-02')).toBe('5000');
@@ -134,6 +135,26 @@ describe('StateStore decisions', () => {
     first.close();
 
     expect(store(directory).dailyEntryNotional('2026-09-02')).toBe('5000');
+  });
+
+  /**
+   * A halt after an attempt is not "never sent": the request may have reached
+   * the ledger, so the conservative reading — count it — stands.
+   */
+  it('still charges a halted decision that had already been attempted', () => {
+    const state = store(scratch());
+
+    state.appendDecision(decision('d-1', { notional: '70000' }));
+    state.appendSubmission({
+      decisionId: 'd-1',
+      at: '2026-09-02T01:00:01.000Z',
+      outcome: 'halted',
+      code: 'KILL_SWITCH',
+      attempts: 1,
+    });
+
+    expect(state.dailyEntryNotional('2026-09-02')).toBe('70000');
+    expect(state.pendingDecisions()).toStrictEqual([]);
   });
 
   it('exposes the kill-switch cell at a fixed name in the state directory', () => {
