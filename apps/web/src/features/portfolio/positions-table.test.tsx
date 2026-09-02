@@ -143,6 +143,60 @@ describe('PositionsTable', () => {
       expect(within(closedRow).getByText('₩1,250,000')).toBeInTheDocument();
     });
 
+    it('says a position could not be folded, and why, distinct from a plain dash', () => {
+      render(
+        <PositionsTable
+          positions={[held]}
+          realized={realized(
+            {},
+            {
+              'US:MSFT':
+                'INSUFFICIENT_AVAILABLE_POSITION: Sell fill exceeds the held position',
+            },
+          )}
+        />,
+      );
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      const cell = within(row).getByRole('cell', {
+        name: 'Realized P&L unavailable',
+      });
+      expect(cell).toHaveTextContent('—');
+      expect(cell).toHaveAttribute(
+        'title',
+        'INSUFFICIENT_AVAILABLE_POSITION: Sell fill exceeds the held position',
+      );
+    });
+
+    it('shows a bare dash for a position the report has no row for', () => {
+      render(<PositionsTable positions={[held]} realized={realized({})} />);
+      const row = holdings().getByRole('row', { name: /MSFT/ });
+      const [dash] = within(row).getAllByText('—');
+      expect(dash).not.toHaveAttribute('aria-label');
+      expect(
+        within(row).queryByRole('cell', { name: 'Realized P&L unavailable' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('looks a position up by market and symbol, not by symbol alone', () => {
+      render(
+        <PositionsTable
+          positions={[
+            { ...held, market: 'KR', symbol: 'DUAL' },
+            { ...closed, market: 'US', symbol: 'DUAL' },
+          ]}
+          realized={realized({
+            'KR:DUAL': { realizedPnl: '1000', currency: 'KRW' },
+            'US:DUAL': { realizedPnl: '-5', currency: 'USD' },
+          })}
+        />,
+      );
+      const heldRow = holdings().getByRole('row', { name: /DUAL/ });
+      expect(within(heldRow).getByText('₩1,000')).toBeInTheDocument();
+      expect(within(heldRow).queryByText('-$5')).not.toBeInTheDocument();
+      const closedRow = closedPositions().getByRole('row', { name: /DUAL/ });
+      expect(within(closedRow).getByText('-$5')).toBeInTheDocument();
+    });
+
     it('shows a dash when no realized figure was supplied at all', () => {
       render(<PositionsTable positions={[held]} />);
       const row = holdings().getByRole('row', { name: /MSFT/ });
