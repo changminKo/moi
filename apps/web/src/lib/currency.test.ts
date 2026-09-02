@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Instrument, QuoteSnapshot } from './api-types';
-import { currencySymbol, resolveQuoteCurrency, withCurrency } from './currency';
+import {
+  currencySymbol,
+  resolveQuoteCurrency,
+  withCurrency,
+  withSignedCurrency,
+} from './currency';
 
 const quote: QuoteSnapshot = {
   market: 'US',
@@ -32,6 +37,18 @@ describe('withCurrency', () => {
 
   it('returns the amount untouched when the currency is unknown', () => {
     expect(withCurrency(undefined, '326.30')).toBe('326.30');
+  });
+});
+
+describe('withSignedCurrency', () => {
+  it('puts a negative sign ahead of the currency symbol', () => {
+    expect(withSignedCurrency('USD', '-3.26')).toBe('-$3.26');
+    expect(withSignedCurrency('KRW', '-1,250,000')).toBe('-₩1,250,000');
+  });
+
+  it('is plain withCurrency for a non-negative figure', () => {
+    expect(withSignedCurrency('USD', '12.5')).toBe('$12.5');
+    expect(withSignedCurrency(undefined, '-3.26')).toBe('-3.26');
   });
 });
 

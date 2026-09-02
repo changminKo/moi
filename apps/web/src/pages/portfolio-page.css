@@ -41,6 +41,36 @@
   font-size: var(--type-sm);
 }
 
+.portfolio-page .pnl-gain {
+  color: var(--color-up);
+}
+
+.portfolio-page .pnl-loss {
+  color: var(--color-down);
+}
+
+/* The realized strip sits between the title and the tables: a label and one
+   large figure per currency, not a table of one row. */
+.portfolio-page .realized-summary {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.portfolio-page .realized-summary ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.portfolio-page .realized-summary li {
+  font-family: var(--font-display);
+  font-size: var(--type-xl);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (min-width: 1024px) {
   .portfolio-page {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -52,6 +82,7 @@
      the closed table squeezed into half a column and the fill history alone in
      the other half. */
   .portfolio-page > header,
+  .portfolio-page > .realized-summary,
   .portfolio-page > .panel-wide {
     grid-column: 1 / -1;
   }

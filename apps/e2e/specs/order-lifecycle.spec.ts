@@ -204,3 +204,44 @@ test('spans both position panels across the two-column portfolio grid', async ({
     'the two-column grid must actually be in force at 1280px',
   ).toBeLessThan((widths.held ?? 0) - 1);
 });
+
+test('reports the profit a round trip realized, per symbol and for the session', async ({
+  page,
+  paperSystem,
+}) => {
+  await page.goto('/trade');
+  await selectInstrument(page, 'AAPL');
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Price').fill('200');
+  await submitOrder(page);
+  await paperSystem.fill({
+    orderId: await paperSystem.latestOrderId(),
+    quantity: '2',
+    price: '200',
+  });
+  await page.getByLabel('Sell').check();
+  await page.getByLabel('Type').selectOption('LIMIT');
+  await page.getByLabel('Quantity').fill('1');
+  await page.getByLabel('Price').fill('210');
+  await submitOrder(page);
+  await paperSystem.fill({
+    orderId: await paperSystem.latestOrderId(),
+    quantity: '1',
+    price: '210',
+  });
+  await page.getByRole('link', { name: 'Portfolio' }).click();
+
+  // One share of two sold, ten dollars above what it cost. The e2e fee
+  // schedule is zero, so the figure is the bare spread; the ledger has no
+  // realized column, and this is the client folding the snapshot's fills
+  // (`realized-pnl.ts`) — the e2e is what proves the fold sees the same rows
+  // the ledger wrote, in the order it wrote them.
+  const held = page
+    .getByRole('region', { name: 'Positions', exact: true })
+    .getByRole('row', { name: /AAPL/ });
+  await expect(held).toContainText('$10');
+  await expect(
+    page.getByRole('region', { name: 'Realized P&L' }),
+  ).toContainText('$10');
+});

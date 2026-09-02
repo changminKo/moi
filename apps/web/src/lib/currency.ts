@@ -41,6 +41,20 @@ export function withCurrency(
 }
 
 /**
+ * `withCurrency` for a figure that may be negative: the sign goes ahead of the
+ * symbol (`-$3.26`, not `$-3.26`). Same render-boundary contract — the digits
+ * are the caller's, untouched.
+ */
+export function withSignedCurrency(
+  currency: Currency | undefined,
+  formatted: string,
+): string {
+  return formatted.startsWith('-')
+    ? `-${withCurrency(currency, formatted.slice(1))}`
+    : withCurrency(currency, formatted);
+}
+
+/**
  * Which currency the quote panel and the order ticket should show for the
  * selected instrument.
  *

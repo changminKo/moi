@@ -150,6 +150,10 @@ export const en = {
   'positions.closedCaption':
     'Symbols sold in full, with the average cost they were held at',
   'positions.closedAvgCost': 'Avg cost held at',
+  'positions.realized': 'Realized P&L',
+  'positions.realizedUnavailable': 'Realized P&L unavailable',
+  'positions.realizedCaption':
+    'What the session has realized so far, per settlement currency',
 
   'orders.title': 'Open orders',
   'orders.empty': 'No open orders.',

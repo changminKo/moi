@@ -11,6 +11,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@moi/trading-core": "workspace:*",
     "@tanstack/react-query": "5.102.8",
     "clsx": "2.1.1",
     "decimal.js": "10.6.0",
