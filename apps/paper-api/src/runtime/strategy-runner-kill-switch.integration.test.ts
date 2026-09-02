@@ -166,6 +166,32 @@ const observed = (supervisor: RunnerSupervisor): string =>
       ?.cursors ?? {},
   );
 
+/**
+ * Waits for the runner's stream to report `ready`. Quotes are not replayed
+ * (§5.3), so a price published before the socket is up reaches the runner only
+ * through the one REST re-baseline at connect; feeding a series before that is
+ * a race the stream suite already learned not to run.
+ */
+async function streamReady(
+  reporter: ReturnType<typeof createRecordingReporter>,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+
+  while (Date.now() < deadline) {
+    if (
+      reporter.lines.some((line) =>
+        line.startsWith('[info] the market stream is ready'),
+      )
+    ) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error('the market stream never became ready');
+}
+
 /** Publishes a price and drives cycles until the runner has observed it. */
 async function feedPrice(
   supervisor: RunnerSupervisor,
@@ -265,6 +291,7 @@ describe('the kill switch against the real paper API', () => {
       try {
         await publishPrice(PRICES[0]);
         await supervisor.start();
+        await streamReady(reporter);
         await feedPrice(supervisor, PRICES[0]);
 
         const { broker, sessionId } = brokerOf(supervisor);
@@ -378,6 +405,7 @@ describe('the kill switch against the real paper API', () => {
 
       try {
         await restarted.start();
+        await streamReady(restartedReporter);
 
         expect(restarted.killSwitch.engaged).toBe(true);
         expect(restarted.state.pendingDecisions()).toStrictEqual([]);
