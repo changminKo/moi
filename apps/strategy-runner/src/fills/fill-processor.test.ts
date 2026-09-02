@@ -190,6 +190,10 @@ function build(
     readonly seen?: FillEvent[];
     /** Counts every time the processor actually reached for the ledger. */
     readonly portfolioReads?: { count: number };
+    /** Phase D: what an unexplainable fill trips. */
+    readonly killSwitch?: {
+      engage: (...args: unknown[]) => Promise<void>;
+    };
   } = {},
 ) {
   const reporter = createRecordingReporter();
@@ -233,6 +237,9 @@ function build(
       return options.portfolio ?? portfolioWith();
     },
     now: () => NOW_MS,
+    ...(options.killSwitch === undefined
+      ? {}
+      : { killSwitch: options.killSwitch }),
   });
 
   return { state, broker, gateway, processor, reporter };
@@ -305,14 +312,46 @@ describe('processing one account event', () => {
     what: RegExp,
     event: StreamAccountEvent,
   ): Promise<void> => {
-    const { processor, state, reporter } = build(scratch());
+    const engaged: unknown[][] = [];
+    const { processor, state, reporter } = build(scratch(), {
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
 
     await expect(processor.process(event)).rejects.toThrow(DomainError);
 
     expect(state.fills.cursor).toBeNull();
     expect(state.fills.hasEvent(event.eventId)).toBe(false);
     expect(reporter.lines.join('\n')).toMatch(what);
+    // §16.46 closed: the wedge also brings the submission barrier down (phase D).
+    expect(engaged).toHaveLength(1);
+    expect(engaged[0]?.[0]).toBe('fill-wedge');
+    // The reason is the thrown message, not the reported sentence: a fact
+    // about the record, for the embed's own line.
+    expect(engaged[0]?.[1]).toEqual(expect.stringMatching(/\S/u));
+    expect(engaged[0]?.[2]).toStrictEqual({
+      accountSequence: event.accountSequence,
+      eventType: event.eventType,
+    });
   };
+
+  it('processes an ordinary fill without touching the kill switch', async () => {
+    const engaged: unknown[] = [];
+    const { processor } = build(scratch(), {
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
+
+    await processor.process(fillEvent('12'));
+
+    expect(engaged).toStrictEqual([]);
+  });
 
   it('stops on a fill record that names a different account sequence', async () => {
     await unaccountable(
