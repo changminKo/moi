@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { Market } from '@moi/trading-core';
-import { type Currency, DomainError, type FeeModel } from '@moi/trading-core';
+import {
+  type Currency,
+  currencyFor,
+  DomainError,
+  type FeeModel,
+} from '@moi/trading-core';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { buildApp } from '../app.js';
@@ -1438,7 +1443,7 @@ export class ProductionRuntime {
         sessionId: row.session_id,
         market: row.market_code,
         symbol: row.symbol,
-        currency: (row.market_code === 'US' ? 'USD' : 'KRW') as 'USD' | 'KRW',
+        currency: currencyFor(row.market_code),
         side: row.side,
         quantity: row.quantity,
         filledQuantity: row.filled_quantity,

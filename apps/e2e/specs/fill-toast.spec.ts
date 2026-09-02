@@ -53,7 +53,7 @@ test('announces a partial fill on the trade screen the reader never left', async
   await expect(page.getByRole('status')).toHaveText('Order accepted.');
   // The fill itself arrives over the stream, with no form to attach to.
   await expect(toasts(page)).toContainText(
-    '005930 Buy 2 filled · 70,000 · 2/3',
+    '005930 Buy 2 filled · ₩70,000 · 2/3',
   );
 });
 
@@ -72,7 +72,7 @@ test('announces a fill that lands while the reader is on the portfolio', async (
     price: '200',
   });
   await expect(toasts(page)).toContainText(
-    'AAPL Buy 1 filled · 200 · order complete',
+    'AAPL Buy 1 filled · $200 · order complete',
   );
 });
 
@@ -92,7 +92,7 @@ test('never re-announces a fill the browser is only being replayed', async ({
   await page.goto('/trade');
   await selectInstrument(page, '005930');
   await placeLimit(page, '2', '70000');
-  await expect(toasts(page)).toContainText('70,000');
+  await expect(toasts(page)).toContainText('₩70,000');
 
   await paperSystem.setBook({
     market: 'KR',
@@ -108,7 +108,7 @@ test('never re-announces a fill the browser is only being replayed', async ({
   // The new fill is proof the replay has already been delivered on this
   // connection: replay precedes every live event the socket sends. So the
   // stack holding exactly one toast is a statement about the old fill.
-  await expect(toasts(page)).toContainText('70,500');
+  await expect(toasts(page)).toContainText('₩70,500');
   await expect(toasts(page).getByRole('listitem')).toHaveCount(1);
-  await expect(toasts(page)).not.toContainText('70,000');
+  await expect(toasts(page)).not.toContainText('₩70,000');
 });

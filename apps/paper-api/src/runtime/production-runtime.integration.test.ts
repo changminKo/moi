@@ -2285,7 +2285,7 @@ describe('ProductionRuntime', () => {
               price: string;
               quantity: string;
               fee: string;
-              feeCurrency: string;
+              currency: string;
             }[];
           };
           expect(payload.fills, JSON.stringify(payload)).toBeDefined();
@@ -2295,7 +2295,7 @@ describe('ProductionRuntime', () => {
             expect(fill.symbol.length).toBeGreaterThan(0);
             expect(fill.side).toMatch(/^(BUY|SELL)$/);
             // Fee is charged in the market's settlement currency.
-            expect(fill.feeCurrency).toBe(fill.market === 'KR' ? 'KRW' : 'USD');
+            expect(fill.currency).toBe(fill.market === 'KR' ? 'KRW' : 'USD');
             expect(Number(fill.price)).toBeGreaterThan(0);
             expect(Number(fill.quantity)).toBeGreaterThan(0);
             expect(Number(fill.fee)).toBeGreaterThanOrEqual(0);

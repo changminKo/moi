@@ -11,6 +11,16 @@ export type Currency = 'KRW' | 'USD';
  */
 const SYMBOLS: Readonly<Record<Currency, string>> = { KRW: '₩', USD: '$' };
 
+/**
+ * Narrows a currency off the wire. The fill rows carry one now, but they are
+ * `Record<string, unknown>` at this boundary and anything unrecognised must
+ * leave the amount bare rather than pick a symbol — the same rule
+ * `withCurrency` already follows for an absent one.
+ */
+export function asCurrency(value: unknown): Currency | undefined {
+  return value === 'KRW' || value === 'USD' ? value : undefined;
+}
+
 export function currencySymbol(currency: Currency): string {
   return SYMBOLS[currency];
 }

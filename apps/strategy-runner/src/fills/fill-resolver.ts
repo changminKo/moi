@@ -140,7 +140,7 @@ const opening = (symbol: string): PositionCost =>
  * read once into a frozen snapshot before anything acts on it — the same
  * treatment `readOrderIntent` gives a strategy's answer.
  *
- * `feeCurrency`, `isRecoveryFill`, `fillSequence` and `occurredAt` are on the
+ * `currency`, `isRecoveryFill`, `fillSequence` and `occurredAt` are on the
  * record and are deliberately not read. `fillSequence` is the cursor for
  * `GET /api/v1/fills`, which this runner does not page; the runner's cursor is
  * `accountSequence`, because that is what the stream replays from. Reading a

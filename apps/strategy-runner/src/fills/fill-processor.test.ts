@@ -89,7 +89,7 @@ function wireFill(fill: WireFill, sequence: string): Record<string, unknown> {
     quantity: fill.quantity ?? '10',
     price: fill.price ?? '1000',
     fee: fill.fee ?? '5',
-    feeCurrency: 'KRW',
+    currency: 'KRW',
     isRecoveryFill: false,
     occurredAt: '2026-09-02T02:00:00.000Z',
   };

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   assertExactMoney,
-  type Currency,
   calculateAverageCost,
+  currencyFor,
   type DecimalString,
   DomainError,
   type Market,
@@ -148,9 +148,6 @@ export interface FillSettlementInput {
     quantity: DecimalString,
   ) => DecimalString;
 }
-
-export const currencyFor = (market: Market): Currency =>
-  market === 'KR' ? 'KRW' : 'USD';
 
 interface ReservationRow {
   id: string;
