@@ -28,7 +28,7 @@ acceptance criteria. Behaviour changes still follow TDD, the gates in
   status marker, timers, or notifications.
 - [x] **#28 P1 — re-exec the fetched deploy script.** Preserve the #44 mutex
   across `exec` and guard against a second re-exec.
-- [ ] **#83 P0 — verify image provenance.** Publish OCI revision labels and
+- [x] **#83 P0 — verify image provenance.** Publish OCI revision labels and
   refuse an image whose revision differs from the requested checkout SHA.
 - [ ] **#46 P0 for schema releases — test old-image/new-schema compatibility.**
   Replace the current documentary claim with an actual gate.
@@ -137,3 +137,4 @@ The order above is strict. PR #97 currently computes realised PnL from
 |---|---:|---|---|
 | 2026-09-02 | #44 | Complete locally | TDD RED→GREEN; `pnpm check`, `pnpm check:deployment`, and `pnpm test:deployment` (55/55) |
 | 2026-09-02 | #28 | Complete locally | TDD RED→GREEN; fresh-script exec, inherited-mutex, forged-guard, and contract-mutation coverage; deployment tests 58/58 |
+| 2026-09-02 | #83 | Complete locally | TDD RED→GREEN; publish-label and deploy-wiring mutation coverage; matching, mismatched, missing, and wrong-cardinality revision tests; deployment tests 64/64 |

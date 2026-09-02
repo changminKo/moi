@@ -70,6 +70,7 @@ jobs:
           outputs: type=image,name=ghcr.io/changminko/moi-${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
+          labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }},mode=max
       - name: Record the digest

@@ -709,4 +709,54 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('fails when published runtime images lose the source revision label', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, '.github/workflows/publish.yml');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `          labels: org.opencontainers.image.revision=\${{ github.sha }}\n`,
+        '',
+      );
+      assert.notEqual(after, before, 'revision-label mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /published runtime images must carry the source revision label/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy skips pulled-image revision verification', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `verify_release_image_revisions "$checkout_sha" "$paper_api_image" "$web_image" \${bot_image:+"$bot_image"}\n`,
+        '',
+      );
+      assert.notEqual(
+        after,
+        before,
+        'revision-verification mutation matched nothing',
+      );
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must verify pulled image revisions before migrations/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

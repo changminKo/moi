@@ -74,6 +74,22 @@ esac
   };
   stub('curl', fakeCurl);
   stub(
+    'docker',
+    `#!/usr/bin/env bash
+if [ "\${1:-}" != image ] || [ "\${2:-}" != inspect ]; then
+  echo "unexpected docker call: $*" >&2
+  exit 2
+fi
+image="\${!#}"
+case "$image" in
+  ghcr.io/changminko/moi-paper-api:*) printf '%s' "\${FAKE_DOCKER_PAPER_API_REVISION:-}";;
+  ghcr.io/changminko/moi-web:*) printf '%s' "\${FAKE_DOCKER_WEB_REVISION:-}";;
+  ghcr.io/changminko/moi-strategy-runner:*) printf '%s' "\${FAKE_DOCKER_BOT_REVISION:-}";;
+  *) echo "unexpected image: $image" >&2; exit 2;;
+esac
+`,
+  );
+  stub(
     'flock',
     `#!/usr/bin/env bash
 lock="\${MOI_DEPLOY_MUTEX}.held"
@@ -877,6 +893,150 @@ deploy_reexec ${JSON.stringify(checkedOutScript)} main
       assert.match(r.stderr, /re-exec lost its inherited mutex/u);
       assert.equal(readFileSync(marker, 'utf8'), 'owned elsewhere');
       assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a release image whose revision differs from the checked-out commit', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const actual = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: actual,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /moi-web:main revision does not match checkout/u);
+      assert.match(r.stderr, new RegExp(`expected ${expected}, got ${actual}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a release image with no OCI revision label', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: '',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /moi-web:main has no org\.opencontainers\.image\.revision label/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to verify fewer than the two public release images', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main`,
+        {
+          extraEnv: { FAKE_DOCKER_PAPER_API_REVISION: expected },
+        },
+      );
+
+      assert.equal(r.status, 64, r.stderr);
+      assert.match(
+        r.stderr,
+        /revision verification requires at least the two public release images/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verifies the bot image too when the profile pulled it', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const stale = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main \
+  ghcr.io/changminko/moi-strategy-runner:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: expected,
+            FAKE_DOCKER_BOT_REVISION: stale,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /moi-strategy-runner:main revision does not match checkout/u,
+      );
+      assert.match(r.stderr, new RegExp(`expected ${expected}, got ${stale}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts two release images at the checked-out revision and records that revision', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main
+deploy_verified ${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        new RegExp(`release images verified at ${expected}`),
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        `deploy finished: ${expected}`,
+      ]);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }

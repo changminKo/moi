@@ -88,6 +88,31 @@ deploy_reexec() {
   exec "$@"
 }
 
+verify_release_image_revisions() {
+  local expected="$1"
+  local image revision
+  shift
+  if [ "$#" -lt 2 ]; then
+    echo "FAIL: revision verification requires at least the two public release images" >&2
+    return 64
+  fi
+  for image in "$@"; do
+    if ! revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"; then
+      echo "FAIL: cannot inspect release image $image" >&2
+      return 1
+    fi
+    if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
+      echo "FAIL: $image has no org.opencontainers.image.revision label" >&2
+      return 1
+    fi
+    if [ "$revision" != "$expected" ]; then
+      echo "FAIL: $image revision does not match checkout (expected $expected, got $revision)" >&2
+      return 1
+    fi
+  done
+  echo "release images verified at $expected"
+}
+
 # Called by deploy.sh only after readiness, both markets NORMAL and placement
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {

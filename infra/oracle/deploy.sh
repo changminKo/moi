@@ -73,6 +73,19 @@ step "registry login + pull (${MOI_IMAGE_TAG:-main})"
 withsecrets 'printf %s "$GHCR_TOKEN" | docker login ghcr.io -u changminko --password-stdin >/dev/null'
 withsecrets "${COMPOSE[*]} pull --quiet"
 
+step "verify image revisions"
+# A mutable tag such as `main` is only a selector. The immutable OCI revision
+# label is the release identity, and every runtime image the stack pulls must
+# agree with the exact checkout before any migration can change the database.
+# `compose config` resolves the active profiles, so the bot image is listed
+# (and verified) exactly when COMPOSE_PROFILES=bot pulled it.
+checkout_sha="$(as_owner git rev-parse HEAD)"
+compose_json="$(withsecrets "${COMPOSE[*]} config --format json")"
+paper_api_image="$(printf '%s' "$compose_json" | jq -er '.services["paper-api"].image')"
+web_image="$(printf '%s' "$compose_json" | jq -er '.services.web.image')"
+bot_image="$(printf '%s' "$compose_json" | jq -r '.services.bot.image // empty')"
+verify_release_image_revisions "$checkout_sha" "$paper_api_image" "$web_image" ${bot_image:+"$bot_image"}
+
 step "migrations (new image, old release still serving)"
 # First deploy: no release is running yet, so the datastore the job connects to
 # must be started here. --no-recreate leaves an already running postgres/redis

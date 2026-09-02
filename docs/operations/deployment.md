@@ -193,6 +193,15 @@ verified in CI by running the previous release's tests against the migrated
 schema before a migration is merged). Rolling back a migration requires
 restore from backup with a full stop.
 
+On the reference host, the rollback ref and image tag are one release identity:
+set `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`, then invoke
+`sudo /opt/moi/infra/oracle/deploy.sh <the same full commit sha>`. Every
+published runtime image (`paper-api`, `web`, `strategy-runner`) carries that
+SHA in `org.opencontainers.image.revision`; the deploy inspects the label of
+every image the active profiles pulled and refuses a missing or different
+revision before migrations run. Do not pair a previous image tag with `main`
+or any other code ref.
+
 Roll back when: any `InvariantViolation` or `TransactionalAuditFailure`
 within 30 minutes of a deploy; markets fail to reach NORMAL after two recovery
 cycles; readiness never turns green within `start_period`.
@@ -329,18 +338,23 @@ requires, and the artefacts are the same ones the local smoke uses.
    published to GHCR (`.github/workflows/publish.yml`, `linux/amd64` and
    `linux/arm64`, each built on a native runner of its own architecture and
    joined into one manifest — no QEMU; the host never builds — a 1 GB Micro
-   cannot) →
+   cannot) → inspect every pulled runtime image (`paper-api`, `web`, and `bot`
+   when its profile is on) and require their `org.opencontainers.image.revision`
+   labels to equal the full SHA of the checked-out ref →
    start postgres/redis if absent (first deploy; running ones are left
    untouched) → one-off migration job with the new image
    (`node dist/migrate-cli.js`) while the old release still serves → `systemctl restart moi` (compose
    recreates containers stop-then-start, the 45 s grace period lets the leader
    drain) → readiness, both markets `NORMAL`, placement enabled.
-   Roll back by pinning `MOI_IMAGE_TAG=<commit sha>` in `/etc/moi/moi.env`.
+   Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
+   and passing that same full SHA to `deploy.sh`; mixing a tag and a different
+   ref fails before migrations.
    The GHCR packages are private: create a classic PAT with only
    `read:packages`, store it as `GHCR_TOKEN` in the sops file, and `deploy.sh`
    logs docker in with it before pulling. Every published image is scanned by
    Trivy (fixable HIGH/CRITICAL fail the publish) and carries an SBOM and
-   provenance attestation; the `main` tag moves only after a clean scan.
+   provenance attestation plus the source revision label; the `main` tag moves
+   only after a clean scan.
 8. **Operate.** `sudo journalctl -u moi -f`, the runbooks in `docs/runbooks/`,
    and `pg_dump` through `docker compose exec postgres` for backups (see
    *Backup and restore*). Oracle may reclaim Always Free compute that stays

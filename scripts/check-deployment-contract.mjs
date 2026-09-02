@@ -951,6 +951,38 @@ check('reference deploy re-executes the checked-out script', () => {
   );
 });
 
+check('reference deploy verifies pulled image revisions', () => {
+  const script = read('infra/oracle/deploy.sh');
+  const pull = script.indexOf(`withsecrets "\${COMPOSE[*]} pull --quiet"`);
+  const checkoutSha = script.indexOf(
+    'checkout_sha="$(as_owner git rev-parse HEAD)"',
+  );
+  const composeConfig = script.indexOf(
+    `compose_json="$(withsecrets "\${COMPOSE[*]} config --format json")"`,
+  );
+  const paperApiImage = script.indexOf(`.services["paper-api"].image`);
+  const webImage = script.indexOf('.services.web.image');
+  const botImage = script.indexOf('.services.bot.image // empty');
+  const verify = script.indexOf(
+    `verify_release_image_revisions "$checkout_sha" "$paper_api_image" "$web_image" \${bot_image:+"$bot_image"}`,
+  );
+  const migrations = script.indexOf(
+    'step "migrations (new image, old release still serving)"',
+  );
+
+  assert.ok(
+    pull >= 0 &&
+      pull < checkoutSha &&
+      checkoutSha < composeConfig &&
+      composeConfig < paperApiImage &&
+      paperApiImage < webImage &&
+      webImage < botImage &&
+      botImage < verify &&
+      verify < migrations,
+    'deploy.sh must verify pulled image revisions before migrations',
+  );
+});
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(
@@ -1184,6 +1216,22 @@ check('deployment guide', () => {
   for (const pattern of required) {
     assert.ok(pattern.test(text), `deployment.md must cover ${pattern}`);
   }
+});
+
+// The deploy compares this label with the checked-out SHA before migrations
+// (#83); which images the workflow builds is asserted by the checks above.
+check('published runtime images carry source revision', () => {
+  const workflow = readYaml('.github/workflows/publish.yml');
+  const job = workflow.jobs?.images;
+  const build = (job?.steps ?? []).find((step) =>
+    String(step.uses ?? '').startsWith('docker/build-push-action@'),
+  );
+  assert.ok(build, 'publish workflow must use docker/build-push-action');
+  assert.equal(
+    String(build.with?.labels ?? ''),
+    `org.opencontainers.image.revision=\${{ github.sha }}`,
+    'published runtime images must carry the source revision label',
+  );
 });
 
 check('ci workflow', () => {
