@@ -52,6 +52,9 @@ const SUBMISSIONS = 'submissions.ndjson';
 const FILLS = 'fills.ndjson';
 const SESSION = 'session.json';
 const RUNTIME = 'runtime.json';
+const KILL_SWITCH = 'kill-switch.json';
+/** The latch file's name, exported so an operator document and a test agree on it. */
+export const KILL_SWITCH_FILE = KILL_SWITCH;
 
 /**
  * What a line in `decisions.ndjson` records. Only `place` and `cancel`
@@ -94,7 +97,13 @@ export interface DecisionRecord {
   readonly notional?: DecimalString;
 }
 
-export type SubmissionOutcome = 'accepted' | 'rejected';
+/**
+ * `halted` is the kill switch's outcome (phase D): the barrier refused to submit
+ * a decision that was already on disk. It settles the decision — see
+ * `pendingDecisions` — because a decision the kill switch caught is a dead
+ * decision, not a deferred one.
+ */
+export type SubmissionOutcome = 'accepted' | 'rejected' | 'halted';
 
 export interface SubmissionRecord {
   readonly decisionId: string;
@@ -167,8 +176,12 @@ export function readSubmissionRecord(source: LogRecord): SubmissionRecord {
   const where = 'a submission record';
   const outcome = source.outcome;
 
-  if (outcome !== 'accepted' && outcome !== 'rejected') {
-    invalid(`${where} must be accepted or rejected`);
+  if (
+    outcome !== 'accepted' &&
+    outcome !== 'rejected' &&
+    outcome !== 'halted'
+  ) {
+    invalid(`${where} must be accepted, rejected or halted`);
   }
 
   const orderId = readOptionalText(source, 'orderId', where);
@@ -220,6 +233,12 @@ export class StateStore {
   readonly fills: FillJournal;
   readonly session: JsonCell;
   readonly runtime: JsonCell;
+  /**
+   * The kill switch's latch (phase D). Present means engaged; absent means not.
+   * An operator clears it by deleting the file and restarting — so it is a
+   * cell, not a log line: there is no history to keep, only a current fact.
+   */
+  readonly killSwitch: JsonCell;
 
   private constructor(directory: string) {
     mkdirSync(directory, { recursive: true });
@@ -245,6 +264,7 @@ export class StateStore {
     this.fills = FillJournal.open(join(directory, FILLS));
     this.session = new JsonCell(join(directory, SESSION), { mode: 0o600 });
     this.runtime = new JsonCell(join(directory, RUNTIME));
+    this.killSwitch = new JsonCell(join(directory, KILL_SWITCH));
   }
 
   static open(options: StateStoreOptions): StateStore {

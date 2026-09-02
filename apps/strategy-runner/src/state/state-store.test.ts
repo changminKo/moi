@@ -88,6 +88,38 @@ describe('StateStore decisions', () => {
   });
 
   /**
+   * The kill switch's verdict. A decision the barrier refused is finished: the
+   * operator who clears the latch and restarts must not have yesterday's entry
+   * resubmitted at them. So it settles, and it survives a reopen as settled.
+   */
+  it('treats a halted submission as settled, across a reopen', () => {
+    const directory = scratch();
+    const first = store(directory);
+
+    first.appendDecision(decision('d-1'));
+    first.appendSubmission({
+      decisionId: 'd-1',
+      at: '2026-09-02T01:00:01.000Z',
+      outcome: 'halted',
+      code: 'KILL_SWITCH',
+    });
+
+    expect(first.pendingDecisions()).toStrictEqual([]);
+
+    first.close();
+
+    expect(store(directory).pendingDecisions()).toStrictEqual([]);
+  });
+
+  it('exposes the kill-switch cell at a fixed name in the state directory', () => {
+    const directory = scratch();
+
+    expect(store(directory).killSwitch.path).toBe(
+      join(directory, 'kill-switch.json'),
+    );
+  });
+
+  /**
    * The restart the criterion is about. A decision that was written down and
    * never submitted comes back, with its `decisionId` intact — which is the only
    * input the idempotency key needs.
