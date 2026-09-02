@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import { loadRunnerConfig, type RunnerConfig } from '../config.js';
 import type { StreamSocket } from '../feed/stream-client.js';
 import { DEFAULT_REGISTRY } from '../registry.js';
 import { createRecordingReporter } from '../reporter.js';
+import { StateStore } from '../state/state-store.js';
 import type { FetchLike } from '../transport/paper-api-client.js';
 import { RunnerSupervisor } from './supervisor.js';
 
@@ -278,5 +279,143 @@ describe('the tick recorder', () => {
     await expect(supervisor.cycle()).resolves.toBeUndefined();
 
     supervisor.close();
+  });
+});
+
+/** Design §6's kill switch, wired (kill-switch design §2.5). */
+describe('the kill switch in the runner', () => {
+  it('engages from an operator file and then hands no tick to any strategy', async () => {
+    const stub = api({ '005930': ['70800', '70600', '70400'] });
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    await supervisor.cycle(); // primes the grid
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({ reason: 'operator drill' }),
+    );
+    time.advance(HALF_A_FRESHNESS_WINDOW);
+    await supervisor.cycle(); // would have crossed a level and bought
+    time.advance(HALF_A_FRESHNESS_WINDOW);
+    await supervisor.cycle();
+    supervisor.close();
+
+    expect(stub.placed).toStrictEqual([]);
+    expect(supervisor.killSwitch.engagement).toMatchObject({
+      source: 'operator',
+      reason: 'operator drill',
+    });
+    expect(reporter.lines).toContain(
+      '[error] the kill switch is engaged; new orders are refused and resting orders are being cancelled source=operator reason=operator drill',
+    );
+    expect(reporter.lines).toContain(
+      '[info] the cancel sweep found no resting orders passes=0',
+    );
+    // The feed still ran: cursors moved on the engaged cycles.
+    expect(
+      (supervisor.state.runtime.read() as { cursors: Record<string, unknown> })
+        .cursors,
+    ).not.toStrictEqual({});
+  });
+
+  it('engages from a tripped loss limit at the start of a cycle', async () => {
+    const seeded = StateStore.open({ directory });
+
+    for (const sequence of [1, 2, 3]) {
+      seeded.fills.commit({
+        accountSequence: String(sequence),
+        at: '2026-08-31T00:59:00.000Z',
+        eventId: `event-${sequence}`,
+        eventType: 'ORDER_FILLED',
+        fills: [
+          {
+            fillId: `f-${sequence}`,
+            orderId: `o-${sequence}`,
+            market: 'KR',
+            symbol: '005930',
+            side: 'SELL',
+            quantity: '1',
+            price: '70000',
+            fee: '0',
+            realizedDelta: '-100',
+          },
+        ],
+        positions: {},
+        decisions: [],
+      });
+    }
+
+    seeded.close();
+
+    const stub = api({ '005930': ['70800', '70600'] });
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    await supervisor.cycle();
+    time.advance(HALF_A_FRESHNESS_WINDOW);
+    await supervisor.cycle();
+    supervisor.close();
+
+    expect(stub.placed).toStrictEqual([]);
+    expect(supervisor.killSwitch.engagement).toMatchObject({
+      source: 'loss-limit',
+      reason: '3 closing fills in a row lost, at the limit of 3',
+    });
+  });
+
+  it('comes back engaged after a restart and says so', async () => {
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({
+        engagedAt: '2026-08-30T00:00:00.000Z',
+        source: 'fill-wedge',
+        reason: 'a fill record could not be read',
+      }),
+    );
+
+    const stub = api({ '005930': ['70800', '70600'] });
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: () => Date.parse('2026-08-31T01:00:00.000Z'),
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    await supervisor.cycle();
+    supervisor.close();
+
+    expect(supervisor.killSwitch.engaged).toBe(true);
+    expect(reporter.lines.join('\n')).toContain(
+      'the kill switch is still engaged from a previous run; delete kill-switch.json and restart to resume trading source=fill-wedge',
+    );
+    expect(stub.placed).toStrictEqual([]);
   });
 });

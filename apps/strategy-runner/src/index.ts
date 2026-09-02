@@ -58,7 +58,11 @@ export {
 export { FillProcessor, fillDecisionId } from './fills/fill-processor.js';
 export { FillResolver, isFillEvent } from './fills/fill-resolver.js';
 export { deriveIdempotencyKey } from './gateway/idempotency.js';
-export { OrderGateway } from './gateway/order-gateway.js';
+export {
+  type ExhaustedSubmissions,
+  KILL_SWITCH_AFTER_FAILED_ATTEMPTS,
+  OrderGateway,
+} from './gateway/order-gateway.js';
 export { createStrategy, DEFAULT_REGISTRY } from './registry.js';
 export {
   createLineReporter,
@@ -72,6 +76,14 @@ export {
   RiskGate,
   type RiskLedgerSource,
 } from './risk/risk-gate.js';
+export {
+  type Engagement,
+  HEARTBEAT_MS,
+  KillSwitch,
+  type KillSwitchSource,
+  type KillSwitchTrigger,
+  MAX_SWEEP_PASSES,
+} from './runner/kill-switch.js';
 export { RunnerContext } from './runner/runner-context.js';
 export { StrategyHost } from './runner/strategy-host.js';
 export { RunnerSupervisor } from './runner/supervisor.js';
@@ -81,7 +93,7 @@ export {
   type FillCommit,
   FillJournal,
 } from './state/fill-journal.js';
-export { StateStore } from './state/state-store.js';
+export { KILL_SWITCH_FILE, StateStore } from './state/state-store.js';
 export {
   type FetchLike,
   PaperApiClient,
