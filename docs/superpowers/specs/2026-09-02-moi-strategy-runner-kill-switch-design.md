@@ -43,6 +43,8 @@ class KillSwitch {
   observeOperatorFile(): Promise<void>;
   /** 걸린 채 30분마다 warn 한 줄. cycle 마다 호출, 시간은 주입된 시계. */
   heartbeat(): void;
+  /** start() 에서: 파일로 걸려 있으면 보고 한 줄 + 재스윕. 아니면 조용. */
+  resume(): Promise<void>;
 }
 ```
 
@@ -51,7 +53,7 @@ class KillSwitch {
 - **해제는 사람이 파일을 지우고 재시작한다**(설계 §6, 자동 해제 없음). 프로세스가 도는 동안 파일이 사라져도 래치는 풀리지 않는다 — 메모리의 `engaged` 가 진실이고 파일은 재시작을 위한 것이다. "지우면 바로 재개" 는 반쯤 지운 운영자에게 반쯤 도는 봇을 준다.
 - **전이에서만 보고한다.** 첫 `engage` 가 `error` 한 줄(`the kill switch is engaged; new orders are refused and resting orders are being cancelled`, fields: `source`, `reason`, 추가 필드). 이후 `engage` 호출은 조용하다 — wedge 는 재연결마다 같은 이벤트를 다시 던지고, 그때마다 임베드를 내면 신호가 죽는다. 30분 heartbeat 는 별도의 `warn` 이다.
 - **운영자 트립**: 사람이 `{"reason":"…"}` 를 `kill-switch.json` 에 쓰면 다음 cycle 에 `engage('operator', reason)`. 해제와 대칭이고 비용은 stat 하나다. 파일에 `reason` 이 없거나 JSON 이 아니면 `reason: 'operator file present'` 로 건다 — 킬 스위치 파일을 읽지 못해서 거래를 계속하는 쪽이 틀린 방향이다.
-- 재시작 시 파일이 있으면 생성자에서 `engaged = true` 로 시작하고 `start()` 가 그 사실을 `error` 로 한 번 보고한다(재시작마다 한 번 — 컨테이너가 다시 뜰 때마다 사람이 봐야 하는 상태다).
+- 재시작 시 파일이 있으면 생성자에서 `engaged = true` 로 시작하고 `start()` 의 `resume()` 이 그 사실을 `error` 로 한 번 보고한다(재시작마다 한 번 — 컨테이너가 다시 뜰 때마다 사람이 봐야 하는 상태다). 그리고 `resume()` 이 스윕을 **다시** 돈다 — 첫 스윕 도중 죽었을 때 기록되지 못한 주문을 잡는 유일한 길이고, id 가 같아 두 번 기록·제출되지 않는다.
 
 ### 2.2 `OrderGateway` — 배리어와 정산
 
@@ -101,7 +103,7 @@ heartbeat()
 2. 최대 `MAX_SWEEP_PASSES = 5` 패스. 각 패스: `portfolio()` 재조회 → `isOpenOrder` 필터 → 각 주문에 대해 게이트웨이 경로로 `record('kill-switch', { kind: 'cancel', orderId, reason }, tick?, { decisionId: 'kill:' + engagedAt + ':' + orderId })` 후 `submit()`. 빈 스캔이면 종료.
    - 게이트웨이 경로를 쓰는 이유: 결정 로그에 남고(감사), `decisionId` 가 결정론적이라 `appendDecision` 이 멱등하며, 실패한 취소는 pending cancel 로 남아 **재시작의 `recoverPending` 이 재시도**한다. 스윕이 자기만의 취소 코드를 갖지 않는다.
    - `record()` 는 `tick` 을 `notionalOf` 에만 쓰고 cancel 은 notional 을 기록하지 않으므로, cancel 에 한해 `tick` 을 선택으로 완화한다.
-3. 5패스 뒤에도 열린 주문이 남으면 `error` 로 남은 `orderId` 목록을 보고한다. 러너는 계속 산다(§0.3); 다음 재시작이 pending cancel 을 다시 낸다.
+3. 5패스 뒤에도 열린 주문이 남으면 `error` 로 남은 `orderId` 목록을 보고한다. 러너는 계속 산다(§0.3); 다음 재시작이 pending cancel 을 다시 낸다 — 정확히는 `recoverPending` 이 기록된 취소를 재제출하고, 이어지는 `resume()` 의 재스윕이 기록되지 못한 나머지를 읽는다.
 4. 스윕 중 취소가 `rejected` 되는 경우(예: 이미 체결됨) 는 정상이다 — 다음 패스의 포트폴리오에 없다.
 
 스윕 실패가 게이트웨이 연속 실패 카운터를 올려 `onExhausted` 를 다시 부를 수 있다 — `engage` 가 멱등이라 무해하다.
