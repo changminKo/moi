@@ -1,3 +1,4 @@
+import { asCurrency, withCurrency } from '../../lib/currency';
 import { formatDecimal } from '../../lib/format-number';
 import type { MessageKey } from '../../lib/i18n';
 
@@ -58,6 +59,8 @@ export type FillAnnouncement = Readonly<{
   /** This delivery's own quantity and price — only when it carried one fill. */
   quantity?: string;
   price?: string;
+  /** What that price is denominated in, as the fill row states it. */
+  currency?: string;
   /** Cumulative, exactly as the server reported it. Never computed here. */
   filledQuantity: string;
   orderQuantity: string;
@@ -172,12 +175,13 @@ function announcementFor(
   const only = fresh.length === 1 ? fresh[0] : undefined;
   const quantity = only ? asString(only.quantity) : undefined;
   const price = only ? asString(only.price) : undefined;
+  const currency = only ? asString(only.currency) : undefined;
   return {
     id,
     symbol,
     side,
     ...(quantity !== undefined && price !== undefined
-      ? { quantity, price }
+      ? { quantity, price, ...(currency === undefined ? {} : { currency }) }
       : {}),
     filledQuantity,
     orderQuantity,
@@ -230,9 +234,10 @@ export function announceFill(
  * every decimal passes `formatDecimal` at this one render boundary — the
  * quantities and prices stay the exact strings the server sent until here.
  *
- * No currency symbol: neither the fill row nor the order row carries a
- * currency, and `lib/currency.ts` is explicit that deriving one from `market`
- * would restate a server invariant. A bare number is the honest option.
+ * The currency comes from the fill row itself — the server states it, so
+ * nothing here derives one from `market`, which `lib/currency.ts` refuses for
+ * good reason. A row stating a currency this client does not know leaves the
+ * amount bare rather than picking a symbol.
  */
 export function fillToastMessage(announcement: FillAnnouncement): Readonly<{
   key: MessageKey;
@@ -257,7 +262,10 @@ export function fillToastMessage(announcement: FillAnnouncement): Readonly<{
           values: { symbol, filled, total },
         };
   const quantity = formatDecimal(announcement.quantity);
-  const price = formatDecimal(announcement.price);
+  const price = withCurrency(
+    asCurrency(announcement.currency),
+    formatDecimal(announcement.price),
+  );
   return announcement.complete
     ? {
         key: 'fillToast.complete',

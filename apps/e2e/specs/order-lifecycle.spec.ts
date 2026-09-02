@@ -68,7 +68,7 @@ test('deduplicates a duplicate US fill delivery', async ({
     price: '200',
     duplicate: true,
   });
-  await expect(page.getByText('AAPL 1 @ 200')).toHaveCount(1);
+  await expect(page.getByText('AAPL 1 @ $200')).toHaveCount(1);
 });
 
 test('cancels the OCO sibling and releases its reservation', async ({

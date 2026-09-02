@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import {
   createServer,
   type IncomingMessage,
@@ -809,12 +809,21 @@ async function main(): Promise<void> {
     password: 'moi',
     database: 'moi',
   });
-  for (const migration of ['001_ledger.sql', '002_audit_partitions.sql']) {
+  // Every migration, read from the directory in order, rather than a hardcoded
+  // list: a list silently drifts from production the moment a migration is
+  // added — it had already missed `003_leader_release`, and a schema the API
+  // expects but the harness never applied fails as an opaque 500 in a browser
+  // test rather than as a migration error.
+  const migrationsDirectory = resolve(
+    workspaceRoot,
+    'apps/paper-api/src/db/migrations',
+  );
+  const migrations = (await readdir(migrationsDirectory))
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+  for (const migration of migrations) {
     await pool.query(
-      await readFile(
-        resolve(workspaceRoot, 'apps/paper-api/src/db/migrations', migration),
-        'utf8',
-      ),
+      await readFile(resolve(migrationsDirectory, migration), 'utf8'),
     );
   }
   // The harness is the only leader: production fill/trigger persistence

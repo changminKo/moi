@@ -27,16 +27,34 @@ import { utcDay } from '../state/state-store.js';
  * - trading-hours-only, from `phase === 'REGULAR'`
  * - quote freshness
  *
- * The two that are **not** here are §6.4's consecutive-loss and daily-loss
- * limits. They are measured in realised PnL, realised PnL comes from fills,
- * and fills come from the account-event stream and its `accountSequence`
- * cursor — which design §11 puts in phase C. It is possible to approximate them
- * from the `fills` arrays hanging off `activeOrders`, and that is exactly what
- * should not be done: it is the fill path in disguise, without the cursor that
- * makes it exactly-once, and phase C would then have a second PnL derived a
- * different way to reconcile against. §1 row 7 is the record of what happens
- * when a loss limit is kept somewhere it cannot survive a restart; the answer to
- * that is to build it on the durable cursor, not to build it twice.
+ * §6.4's consecutive-loss and daily-loss limits joined them in phase C, once
+ * the `accountSequence` cursor existed to make realised PnL trustworthy. Both
+ * are read straight off `FillJournal`, which is to say off the same durable
+ * records that hold the cursor:
+ *
+ * - `maxConsecutiveLosses` over `consecutiveLosses()`
+ * - `maxDailyLoss` over `realizedPnlOn(today)`
+ *
+ * Phase B was right to refuse to approximate them from the `fills` arrays
+ * hanging off `activeOrders`: that would have been the fill path in disguise,
+ * without the cursor that makes it exactly-once, and phase C would have
+ * inherited a second PnL derived a different way. What is here is the first
+ * one, and there is no second.
+ *
+ * Because both are folds over a file, they survive a restart by construction —
+ * which is all §1 row 7 ever asked for. Nothing is counted in memory, so there
+ * is nothing for a restart to reset.
+ *
+ * ## What a tripped loss limit does, and what it does not do yet
+ *
+ * It refuses new entries, like every other limit here, and exits stay open. It
+ * does **not** cancel the resting orders that are already out, and it does not
+ * stop the runner: that is the submission barrier of §7.2, which design §11
+ * puts in phase D. The split is deliberate rather than a gap left open — a
+ * limit that refuses entries is complete and safe on its own, and the barrier
+ * is a different mechanism with a different failure mode (an in-flight
+ * submission racing a cancel sweep) that deserves its own phase and its own
+ * test.
  *
  * ## The gate limits risk-increasing orders
  *
@@ -175,6 +193,32 @@ export class RiskGate {
     if (wouldSpend.gt(this.#limits.maxDailyNotional)) {
       return refuse(
         `${wouldSpend.toString()} would exceed today's notional limit of ${this.#limits.maxDailyNotional}`,
+      );
+    }
+
+    const losses = this.#state.fills.consecutiveLosses();
+
+    if (losses >= this.#limits.maxConsecutiveLosses) {
+      return refuse(
+        `${losses} closing fills in a row lost, at the limit of ${this.#limits.maxConsecutiveLosses}`,
+      );
+    }
+
+    const realizedToday = moneyDecimal(
+      this.#state.fills.realizedPnlOn(
+        utcDay(new Date(this.#now()).toISOString()),
+      ),
+    );
+
+    // Only a *loss* trips it. A day up on the session is not a day to stop
+    // trading, and comparing a signed PnL against a positive limit directly
+    // would refuse every entry on a profitable day.
+    if (
+      realizedToday.isNegative() &&
+      realizedToday.abs().gte(this.#limits.maxDailyLoss)
+    ) {
+      return refuse(
+        `today has realised ${realizedToday.toString()}, at the daily loss limit of ${this.#limits.maxDailyLoss}`,
       );
     }
 

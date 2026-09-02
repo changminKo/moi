@@ -1750,8 +1750,12 @@ async function insertAccountSequenceRow(sessionId: string): Promise<string> {
 async function insertFillRow(orderId: string): Promise<string> {
   const id = randomUUID();
   await sql`
-    insert into fills (id, order_id, quantity, price, fee, slippage)
-    values (${id}, ${orderId}, '1', '100', '0', '0')
+    insert into fills (id, order_id, session_id, quantity, price, fee, slippage)
+    values (
+      ${id}, ${orderId},
+      (select session_id from orders where id = ${orderId}),
+      '1', '100', '0', '0'
+    )
   `.execute(db);
   return id;
 }

@@ -161,7 +161,14 @@ export interface BrokerFill {
   readonly quantity: Quantity;
   readonly price: DecimalString;
   readonly fee: DecimalString;
-  readonly recoveryFill: boolean;
+  /**
+   * The server's own name. It was `recoveryFill` on both sides while the
+   * portfolio snapshot hand-assembled its fills; now that the snapshot is
+   * built by `fillRecord()` like `GET /api/v1/fills`, the wire says
+   * `isRecoveryFill` and so does this. One name rather than a translation,
+   * because a translation is what §16.32 is about.
+   */
+  readonly isRecoveryFill: boolean;
 }
 
 /**

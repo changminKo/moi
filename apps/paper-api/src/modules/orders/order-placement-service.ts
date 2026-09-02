@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   type Currency,
+  currencyFor,
   DomainError,
   type FeeModel,
   type Market,
@@ -73,9 +74,6 @@ export interface PlaceOrderCommand {
   readonly requestHash: string;
   readonly input: PlaceOrderInput;
 }
-
-const currencyFor = (market: Market): Currency =>
-  market === 'KR' ? 'KRW' : 'USD';
 
 export class OrderPlacementService {
   readonly #deps: OrderPlacementServiceDependencies;

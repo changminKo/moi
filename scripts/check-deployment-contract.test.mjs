@@ -35,6 +35,13 @@ const TRACKED = [
   'packages/market-data/src/toss',
   'apps/paper-api/src/config.ts',
   'apps/paper-api/src/config.test.ts',
+  // The workspace-dependency coverage check walks the app manifests.
+  'apps/paper-api/package.json',
+  'apps/web/package.json',
+  'apps/strategy-runner/package.json',
+  'packages/trading-core/package.json',
+  'packages/market-data/package.json',
+  'packages/strategy-sdk/package.json',
 ];
 
 function copyRepo(mutate) {
@@ -102,6 +109,28 @@ describe('check-deployment-contract (A8)', () => {
       }
     });
   }
+  it('fails when the api build context misses a workspace dependency', () => {
+    // The exact mutation that broke the #43 deploy: apps/strategy-runner is a
+    // dev dependency of paper-api, and without its COPY the image build dies
+    // with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND while `main` stays stale on GHCR.
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/paper-api/Dockerfile');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /^COPY apps\/strategy-runner .*\n/m,
+          '',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /misses apps\/strategy-runner/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('fails when a Toss secret is not a required interpolation', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/compose.yaml');

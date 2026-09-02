@@ -46,6 +46,14 @@ export interface RiskLimits {
   readonly tradingHoursOnly: boolean;
   /** A tick older than this cannot justify an entry (§6.3). */
   readonly maxQuoteAgeMs: number;
+  /**
+   * Closing fills that lost, in a row, after which no new entry is allowed
+   * (§6.4). Counted over the fill journal, so it survives a restart — which is
+   * the whole of design §1 row 7.
+   */
+  readonly maxConsecutiveLosses: number;
+  /** How much may be realised as loss on one UTC day before entries stop (§6.4). */
+  readonly maxDailyLoss: DecimalString;
 }
 
 export interface ConfiguredStrategy {
@@ -233,6 +241,16 @@ function readRiskLimits(value: unknown): RiskLimits {
       1_000,
       3_600_000,
     ),
+    // At least one: a limit of zero would refuse every entry from the first
+    // cycle, which reads as a runner that is broken rather than one that has
+    // been turned off. Turning it off is `docker compose stop`.
+    maxConsecutiveLosses: boundedInteger(
+      source.maxConsecutiveLosses,
+      'risk.maxConsecutiveLosses',
+      1,
+      1_000,
+    ),
+    maxDailyLoss: moneyLimit(source.maxDailyLoss, 'risk.maxDailyLoss'),
   });
 }
 

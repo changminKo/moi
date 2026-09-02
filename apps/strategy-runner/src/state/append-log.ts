@@ -153,9 +153,12 @@ export function readAppendLog(path: string): readonly LogRecord[] {
   const lines = text.split('\n');
 
   // A complete record ends in a newline, so the final element is the empty
-  // string. Anything else there is a record whose bytes did not all land — the
-  // torn tail — and it is dropped whether or not it happens to parse, because
-  // an fsynced record is always followed by its newline.
+  // string. Anything else there is the tail, and whether it is a whole record
+  // that lost only its newline or a fragment is decided below by parsing it —
+  // not here. (This comment used to claim the tail was dropped "whether or not
+  // it happens to parse", which the code below has never done and should not:
+  // a record whose bytes all landed is still that record, and discarding it
+  // would throw away a decision the gateway may already have submitted.)
   const last = lines.pop();
   const records: LogRecord[] = [];
 
@@ -187,10 +190,19 @@ export function readAppendLog(path: string): readonly LogRecord[] {
     records.push(Object.freeze(parsed as Record<string, unknown>));
   }
 
-  // A file whose final record has no trailing newline: it either survived
-  // whole — a writer that was killed between the record and its newline cannot
-  // happen, the two go in one `write` — or it is torn. Parsing decides which,
-  // and only here, where a failure means the tail rather than the middle.
+  // A file whose final record has no trailing newline either survived whole or
+  // is torn, and **parsing is what decides which**. It is a sound
+  // discriminator: a fragment is cut at an arbitrary byte, so it parses as a
+  // whole JSON object only by an accident that `encode`'s one-line-per-record
+  // rule makes vanishingly unlikely.
+  //
+  // Keeping a tail that parses is the safe direction. Losing the newline alone
+  // costs nothing — the record is complete — while discarding it would drop a
+  // `place` decision that `append()` already fsynced and returned from, which
+  // is exactly the order the gateway may have submitted on the strength of that
+  // return. Failing closed belongs in the *middle* of the file, where damage
+  // cannot be a crash; here it would manufacture the loss it is guarding
+  // against.
   if (last !== undefined && last.length > 0) {
     try {
       const parsed: unknown = JSON.parse(last);
@@ -203,7 +215,7 @@ export function readAppendLog(path: string): readonly LogRecord[] {
         records.push(Object.freeze(parsed as Record<string, unknown>));
       }
     } catch {
-      // A torn tail. Discarded, as documented above.
+      // A fragment: it did not parse, so it is not a record. Discarded.
     }
   }
 

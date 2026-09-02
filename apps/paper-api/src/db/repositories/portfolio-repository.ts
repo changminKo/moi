@@ -1,5 +1,11 @@
 import { decimal } from '@moi/trading-core';
 import { sql } from 'kysely';
+import {
+  type FillRecord,
+  type FillsPage,
+  type FillsQuery,
+  fillRecord,
+} from '../../modules/portfolio/fill-schemas.js';
 import type {
   HistoricalOrdersPage,
   PortfolioQuery,
@@ -43,6 +49,34 @@ function order(row: Row): Record<string, string | null> {
   };
 }
 
+function fill(row: Row): FillRecord {
+  // Built through the shared builder, not hand-assembled: the event payload,
+  // the portfolio snapshot and `GET /api/v1/fills` must describe the same fill
+  // the same way, and a second derivation of its currency here is exactly the
+  // drift that module exists to prevent.
+  return fillRecord(
+    {
+      id: text(row.id),
+      fillSequence: text(row.fill_sequence),
+      price: numeric(row.price) as FillRecord['price'],
+      quantity: numeric(row.quantity) as FillRecord['quantity'],
+      fee: numeric(row.fee) as FillRecord['fee'],
+    },
+    {
+      orderId: text(row.order_id),
+      market: text(row.market_code) as FillRecord['market'],
+      symbol: text(row.symbol),
+      side: text(row.side) as FillRecord['side'],
+      accountSequence: nullable(row.account_sequence),
+      isRecoveryFill: row.is_recovery_fill === true,
+      // `pg` hands back a Date and no type parser is registered, so
+      // `String(date)` would print a locale string with no milliseconds and
+      // collapse two fills a millisecond apart into one timestamp.
+      occurredAt: (row.occurred_at as Date).toISOString(),
+    },
+  );
+}
+
 export interface PortfolioReadRepository extends PortfolioReadTransaction {}
 
 export const createPortfolioRepository = (
@@ -81,7 +115,7 @@ export const createPortfolioRepository = (
       sql<Row>`select distinct on (o.market_code) o.market_code, f.is_recovery_fill from orders o join fills f on f.order_id = o.id where o.session_id = ${sessionId} order by o.market_code, f.occurred_at desc`.execute(
         connection.executor,
       ),
-      sql<Row>`select f.id, f.order_id, o.symbol, f.quantity, f.price, f.fee, f.is_recovery_fill from fills f join orders o on o.id = f.order_id where o.session_id = ${sessionId} order by f.occurred_at, f.id`.execute(
+      sql<Row>`select f.id::text as id, f.fill_sequence::text as fill_sequence, f.account_sequence::text as account_sequence, f.order_id::text as order_id, o.market_code, o.symbol, o.side, f.quantity, f.price, f.fee, f.is_recovery_fill, f.occurred_at from fills f join orders o on o.id = f.order_id where o.session_id = ${sessionId} order by f.occurred_at, f.id`.execute(
         connection.executor,
       ),
       sql<Row>`select a.id as order_id, b.id as sibling_id from orders a join orders b on b.oco_group_id = a.oco_group_id and b.id <> a.id where a.session_id = ${sessionId}`.execute(
@@ -125,16 +159,12 @@ export const createPortfolioRepository = (
       })),
       activeOrders: activeOrders.rows.map((row) => ({
         ...order(row),
+        // The same builder `GET /api/v1/fills` uses. This used to be a second,
+        // narrower hand-assembly of the same row — six fields and no currency —
+        // so the two endpoints answered differently about one fill.
         fills: fills.rows
-          .filter((fill) => text(fill.order_id) === text(row.id))
-          .map((fill) => ({
-            id: text(fill.id),
-            symbol: text(fill.symbol),
-            quantity: numeric(fill.quantity),
-            price: numeric(fill.price),
-            fee: numeric(fill.fee),
-            recoveryFill: fill.is_recovery_fill === true,
-          })),
+          .filter((row_) => text(row_.order_id) === text(row.id))
+          .map(fill),
         siblingOrderIds: ocoSiblings.rows
           .filter((sibling) => text(sibling.order_id) === text(row.id))
           .map((sibling) => text(sibling.sibling_id)),
@@ -167,6 +197,27 @@ export const createPortfolioRepository = (
               rows[rows.length - 1]?.id,
             ),
           }
+        : {}),
+    };
+  },
+  async listFills(sessionId, query: FillsQuery): Promise<FillsPage> {
+    const limit = query.limit;
+    // `fill_sequence` is monotonic per session (every write holds the session
+    // row `for update`), so an exclusive `>` is a complete, gap-free page.
+    const result =
+      query.after === undefined
+        ? await sql<Row>`select f.id::text as id, f.fill_sequence::text as fill_sequence, f.account_sequence::text as account_sequence, f.order_id::text as order_id, o.market_code, o.symbol, o.side, f.quantity, f.price, f.fee, f.is_recovery_fill, f.occurred_at from fills f join orders o on o.id = f.order_id where f.session_id = ${sessionId}::uuid order by f.fill_sequence limit ${limit + 1}`.execute(
+            connection.executor,
+          )
+        : await sql<Row>`select f.id::text as id, f.fill_sequence::text as fill_sequence, f.account_sequence::text as account_sequence, f.order_id::text as order_id, o.market_code, o.symbol, o.side, f.quantity, f.price, f.fee, f.is_recovery_fill, f.occurred_at from fills f join orders o on o.id = f.order_id where f.session_id = ${sessionId}::uuid and f.fill_sequence > ${query.after}::bigint order by f.fill_sequence limit ${limit + 1}`.execute(
+            connection.executor,
+          );
+    const rows = result.rows.slice(0, limit);
+    const last = rows[rows.length - 1];
+    return {
+      items: rows.map(fill),
+      ...(result.rows.length > limit && last !== undefined
+        ? { nextCursor: text(last.fill_sequence) }
         : {}),
     };
   },

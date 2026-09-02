@@ -164,6 +164,12 @@ function runnerConfig(stateDir: string): RunnerConfig {
           // calendar the test controls.
           tradingHoursOnly: false,
           maxQuoteAgeMs: 600_000,
+          // §6.4's two limits, added in phase C. Set far out of reach: this
+          // suite is about the round trip and the restart, and a loss limit
+          // that fired here would be testing phase C's arithmetic through
+          // phase B's fixture.
+          maxConsecutiveLosses: 100,
+          maxDailyLoss: '100000000',
         },
         strategies: [
           {
@@ -183,6 +189,46 @@ function runnerConfig(stateDir: string): RunnerConfig {
 }
 
 const scratch = (): string => mkdtempSync(join(tmpdir(), 'moi-runner-b-'));
+
+/** The feed cursors the last cycle persisted, as a value a test can compare. */
+const observed = (supervisor: RunnerSupervisor): string =>
+  JSON.stringify(
+    (supervisor.state.runtime.read() as { cursors?: unknown } | null)
+      ?.cursors ?? {},
+  );
+
+/**
+ * Publishes a price and drives cycles until the runner has actually observed it.
+ *
+ * Phase B could publish and cycle once, because the cycle polled every
+ * instrument over REST. Phase C's cycle consumes what the *stream* delivered and
+ * only re-reads an instrument that has gone quiet — which is the point of having
+ * a subscription — so a frame arrives on its own schedule and "one publish, one
+ * cycle, one tick" is no longer true. Waiting for the observation is what this
+ * suite meant all along; it was previously able to assume it.
+ */
+async function feedPrice(
+  supervisor: RunnerSupervisor,
+  price: string,
+): Promise<void> {
+  const before = observed(supervisor);
+
+  await publishPrice(price);
+
+  const deadline = Date.now() + 30_000;
+
+  while (Date.now() < deadline) {
+    await supervisor.cycle();
+
+    if (observed(supervisor) !== before) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`the runner never observed ${price}`);
+}
 
 interface Placed {
   readonly id: string;
@@ -251,8 +297,7 @@ describe('the strategy runner against the real paper API', () => {
         await supervisor.start();
 
         for (const price of PRICES) {
-          await publishPrice(price);
-          await supervisor.cycle();
+          await feedPrice(supervisor, price);
         }
 
         const accepted = reporter.lines.filter((line) =>
@@ -320,8 +365,7 @@ describe('the strategy runner against the real paper API', () => {
         await supervisor.start();
 
         for (const price of PRICES) {
-          await publishPrice(price);
-          await supervisor.cycle();
+          await feedPrice(supervisor, price);
         }
 
         expect(

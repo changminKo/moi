@@ -19,6 +19,11 @@ COPY package.json tsconfig.base.json turbo.json biome.json ./
 COPY scripts ./scripts
 COPY packages ./packages
 COPY apps/paper-api ./apps/paper-api
+# The runner is a dev dependency (integration tests), but `pnpm deploy`
+# resolves the whole manifest: a workspace: entry whose directory is missing
+# from the context fails the build with ERR_PNPM_WORKSPACE_PKG_NOT_FOUND.
+# The deploy below is --prod, so nothing from it reaches the runtime stage.
+COPY apps/strategy-runner ./apps/strategy-runner
 RUN pnpm install --offline --frozen-lockfile --filter @moi/paper-api...
 RUN pnpm turbo run build --filter=@moi/paper-api...
 RUN pnpm --filter @moi/paper-api deploy --prod --legacy /out/paper-api \

@@ -9,6 +9,7 @@ import {
   moneyDecimal,
 } from '@moi/trading-core';
 import { AppendLog, type LogRecord, readAppendLog } from './append-log.js';
+import { FillJournal } from './fill-journal.js';
 import { JsonCell } from './json-cell.js';
 
 /**
@@ -48,6 +49,7 @@ import { JsonCell } from './json-cell.js';
 
 const DECISIONS = 'decisions.ndjson';
 const SUBMISSIONS = 'submissions.ndjson';
+const FILLS = 'fills.ndjson';
 const SESSION = 'session.json';
 const RUNTIME = 'runtime.json';
 
@@ -209,6 +211,13 @@ export class StateStore {
   readonly #submissions: AppendLog;
   readonly #decided: DecisionRecord[];
   readonly #settled: Set<string>;
+  readonly #recorded = new Set<string>();
+  /**
+   * The account-event cursor and everything that commits with it (§6.4). Its
+   * own file because its unit of atomicity is one *event*, not one decision:
+   * see `FillJournal` for what "the same transaction" means on this substrate.
+   */
+  readonly fills: FillJournal;
   readonly session: JsonCell;
   readonly runtime: JsonCell;
 
@@ -227,8 +236,13 @@ export class StateStore {
         .map(readSubmissionRecord)
         .map((record) => record.decisionId),
     );
+    for (const record of this.#decided) {
+      this.#recorded.add(record.decisionId);
+    }
+
     this.#decisions = AppendLog.open(join(directory, DECISIONS));
     this.#submissions = AppendLog.open(join(directory, SUBMISSIONS));
+    this.fills = FillJournal.open(join(directory, FILLS));
     this.session = new JsonCell(join(directory, SESSION), { mode: 0o600 });
     this.runtime = new JsonCell(join(directory, RUNTIME));
   }
@@ -244,9 +258,28 @@ export class StateStore {
    * recompute, and before it returns, a crash leaves nothing at all. There is no
    * window in which an order exists that the state does not know about.
    */
-  appendDecision(record: DecisionRecord): void {
+  /**
+   * Idempotent by `decisionId`, and that is what makes an uncommitted fill step
+   * safe to replay (§6.4). A decision derived from an account event takes an id
+   * derived from that event, so re-running `onFill` after a crash recomputes the
+   * *same* id; writing the line twice would put one order in `dailyEntryNotional`
+   * twice and leave two log lines an operator has to recognise as one decision.
+   *
+   * Answers whether it wrote, so a caller can tell a fresh decision from a
+   * replayed one. A repeat is not an error: it is the expected shape of a
+   * recovery, and treating it as one would make the replay path throw on the
+   * very case it exists for.
+   */
+  appendDecision(record: DecisionRecord): boolean {
+    if (this.#recorded.has(record.decisionId)) {
+      return false;
+    }
+
     this.#decisions.append(toRecord(record), { durable: true });
     this.#decided.push(Object.freeze(record));
+    this.#recorded.add(record.decisionId);
+
+    return true;
   }
 
   appendSubmission(record: SubmissionRecord): void {
@@ -335,6 +368,7 @@ export class StateStore {
   close(): void {
     this.#decisions.close();
     this.#submissions.close();
+    this.fills.close();
   }
 }
 
