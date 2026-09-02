@@ -45,7 +45,16 @@ export interface ReporterWiringOptions {
 }
 
 export function wireReporter(options: ReporterWiringOptions): ReporterWiring {
-  const lines = createLineReporter(options.write, options.secrets);
+  // A secrets provider that throws (a torn session cell, say) must cost the
+  // masking of that one line, never the line — or the message behind it.
+  const secrets = (): readonly string[] => {
+    try {
+      return options.secrets();
+    } catch {
+      return [];
+    }
+  };
+  const lines = createLineReporter(options.write, secrets);
   const config = readReporterConfig(options.env);
 
   if (!config.ok) {
@@ -68,7 +77,7 @@ export function wireReporter(options: ReporterWiringOptions): ReporterWiring {
     ...(options.transport === undefined
       ? {}
       : { transport: options.transport }),
-    secrets: options.secrets,
+    secrets,
     source: options.source ?? hostname(),
     // A diagnostic carries a counter and a status, never reported content, so
     // it is safe on stdout and useful there: it is how a dead webhook is seen.

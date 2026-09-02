@@ -280,9 +280,24 @@ check('deploy verifies an enabled bot', () => {
   const script = read('infra/oracle/deploy.sh');
   assert.ok(
     /COMPOSE_PROFILES/.test(script) &&
-      /ps --status running --services/.test(script) &&
-      /grep -qx bot/.test(script),
-    'deploy.sh must fail the release when COMPOSE_PROFILES enables the bot but the container is not running',
+      /bot_steady/.test(script) &&
+      /RestartCount/.test(script),
+    'deploy.sh must fail the release when COMPOSE_PROFILES enables the bot but the container is not running steadily (RestartCount 0)',
+  );
+  assert.ok(
+    /com\.docker\.compose\.service=bot/.test(script) &&
+      /rm -sf bot/.test(script),
+    'deploy.sh must fail the release when the bot profile is off but a bot container is still there',
+  );
+  assert.match(
+    read('infra/oracle/deploy-lib.sh'),
+    /bot_steady\(\)/,
+    'deploy-lib.sh must define bot_steady (tested in status-check.test.mjs)',
+  );
+  const status = read('infra/oracle/status-check.sh');
+  assert.ok(
+    /COMPOSE_PROFILES/.test(status) && /bot=\$bot/.test(status),
+    'status-check.sh must report the bot when COMPOSE_PROFILES enables it',
   );
 });
 

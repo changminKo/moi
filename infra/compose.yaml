@@ -108,16 +108,15 @@ services:
   # The strategy runner (자동매매 봇) — strategy-runner design §3, §7.3, §8.1.
   #
   # Declared here so the deployment contract covers it, and gated behind the
-  # `bot` profile so it does NOT start on `docker compose up` or on
-  # infra/oracle/deploy.sh: the runner is incomplete, and an unfinished trader
+  # `bot` profile so it does NOT start on a bare `docker compose up`: a trader
   # is not something a routine release should quietly bring up. Starting it is
-  # an explicit act:
+  # an explicit act — locally:
   #
   #     docker compose -f infra/compose.yaml --profile bot up -d bot
   #
-  # The image is built from apps/strategy-runner/Dockerfile, which the runner's
-  # own phase adds together with the strategy configuration mount; until then
-  # the profile has nothing to start.
+  # and on the reference host `COMPOSE_PROFILES=bot` in /etc/moi/moi.env, which
+  # systemd and deploy.sh both read (docs/operations/deployment.md). The image
+  # is apps/strategy-runner/Dockerfile, published to GHCR with the other two.
   bot:
     profiles:
       - bot
@@ -154,7 +153,8 @@ services:
       # §7.4: the runner's own Discord channel. Never DISCORD_WEBHOOK_URL —
       # trading noise must not bury an incident alert, and the contract checker
       # asserts the operational webhook never reaches this service. Optional:
-      # absent, the reporter is a silent no-op and the runner still starts.
+      # absent, the runner reports to stdout only; malformed, or equal to the
+      # operational webhook, it refuses to start.
       DISCORD_WEBHOOK_TRADE_URL: "${DISCORD_WEBHOOK_TRADE_URL:-}"
     volumes:
       - bot-state:/var/lib/moi-bot

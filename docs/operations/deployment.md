@@ -365,18 +365,27 @@ Before enabling it:
    and refuses to start without the file. It is mounted read-only at
    `/etc/moi-bot` and is not committed (`infra/bot/README.md`).
 2. Put `DISCORD_WEBHOOK_TRADE_URL` in the sops file: the bot's **own** channel,
-   never `DISCORD_WEBHOOK_URL` (the preflight, the contract checker and the
-   runner itself all refuse the same URL under both names; a malformed URL is a
-   refusal to start). Without it the bot still runs and reports to
+   never `DISCORD_WEBHOOK_URL` (the preflight and the runner itself refuse the
+   same URL under both names, and the contract checker keeps the operational
+   variable out of the bot's environment; a malformed URL is a refusal to
+   start). Without it the bot still runs and reports to
    `docker logs` only.
 3. `sudo /opt/moi/infra/oracle/deploy.sh main`.
 
 The bot's own reports — every decision, refusal, fill, and the kill switch —
-go to that channel and to `docker compose … logs bot`. Clearing the kill switch
+go to that channel and to `docker logs`. The status timer's line carries
+`bot=<status>/<restarts>` while the profile is on and turns `fail` when the
+container is not running. Clearing the kill switch
 (`apps/strategy-runner/README.md`, "The kill switch"): remove
-`kill-switch.json` from the `bot-state` volume and restart the bot —
-`docker compose -f infra/compose.yaml -f infra/oracle/compose.override.yaml exec bot rm /var/lib/moi-bot/kill-switch.json`
-then `… restart bot`.
+`kill-switch.json` from the `bot-state` volume and restart the bot. Address the
+container through Docker labels — plain `docker compose` would need the sops
+environment just to load the file:
+
+```bash
+bot="$(sudo docker ps -q --filter label=com.docker.compose.project=moi --filter label=com.docker.compose.service=bot)"
+sudo docker exec "$bot" rm /var/lib/moi-bot/kill-switch.json
+sudo docker restart "$bot"
+```
 
 What the deployment surface guarantees:
 

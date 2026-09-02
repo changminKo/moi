@@ -24,7 +24,9 @@
 #   MOI_STATUS_NOW              epoch seconds override (tests)
 #   MOI_STATUS_DEPLOY_LOCK      default /run/moi-deploy.lock (fresh → exit 0, no probe)
 #   MOI_STATUS_LOCK_MAX_AGE     default 1800 s; an older lock is ignored (stale deploy)
-#   PATH                        `curl`, `free`, `df`, `jq` are resolved from PATH
+#   MOI_STATUS_BOT_STATE        "<status> <restartCount>" override for the bot probe (tests)
+#   COMPOSE_PROFILES            from moi.env (systemd EnvironmentFile); `bot` turns the bot probe on
+#   PATH                        `curl`, `free`, `df`, `jq`, `docker` are resolved from PATH
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 api="${MOI_STATUS_API_BASE:-https://${API_DOMAIN:-localhost}}"
@@ -66,6 +68,29 @@ kr="$(field "$md" '.KR.state')"
 us="$(field "$md" '.US.state')"
 placement="$(field "$tr" '.placement')"
 
+# Phase D: the bot, when the host enables it (COMPOSE_PROFILES=bot in moi.env,
+# which this timer's unit reads as well). Its own Discord channel would simply
+# go quiet in a restart loop; the operational line must not stay ok while it
+# does. Probed through docker labels rather than compose so a stray container
+# left behind after the profile was removed is seen too.
+bot=n/a; bot_status=n/a
+case ",${COMPOSE_PROFILES:-}," in
+  *,bot,*)
+    if [ -n "${MOI_STATUS_BOT_STATE:-}" ]; then
+      bot_state="$MOI_STATUS_BOT_STATE"
+    else
+      bot_id="$(docker ps -aq --filter label=com.docker.compose.project=moi --filter label=com.docker.compose.service=bot 2>/dev/null | head -1)"
+      if [ -n "$bot_id" ]; then
+        bot_state="$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$bot_id" 2>/dev/null || echo 'unknown -1')"
+      else
+        bot_state="missing -1"
+      fi
+    fi
+    bot_status="${bot_state%% *}"
+    bot="${bot_status}/${bot_state#* }"
+    ;;
+esac
+
 # free -m: "Mem: total used free shared buff/cache available" / "Swap: total used free"
 read -r mem_total mem_avail < <(free -m | awk '/^Mem:/ {print $2, $7}')
 read -r swap_total swap_used < <(free -m | awk '/^Swap:/ {print $2, $3}')
@@ -76,14 +101,15 @@ disk_used_pct="${disk_used_pct:-0}"
 
 level=ok
 if [ "$ready" != 200 ] || [ "$runtime" != SERVING ] || [ "$kr" != NORMAL ] \
-   || [ "$us" != NORMAL ] || [ "$placement" != true ]; then
+   || [ "$us" != NORMAL ] || [ "$placement" != true ] \
+   || { [ "$bot_status" != n/a ] && [ "$bot_status" != running ]; }; then
   level=fail
 elif [ "$mem_avail_pct" -lt "$MEM_AVAIL_MIN" ] || [ "$swap_used_pct" -gt "$SWAP_USED_MAX" ] \
      || [ "$disk_used_pct" -gt "$DISK_USED_MAX" ]; then
   level=warn
 fi
 
-line="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement mem_avail=${mem_avail_pct}% swap_used=${swap_used_pct}% disk_used=${disk_used_pct}%"
+line="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement bot=$bot mem_avail=${mem_avail_pct}% swap_used=${swap_used_pct}% disk_used=${disk_used_pct}%"
 echo "$line"
 
 # Change detection compares a *signature* — level, probe results and which
@@ -92,7 +118,7 @@ echo "$line"
 mem_flag=ok; [ "$mem_avail_pct" -lt "$MEM_AVAIL_MIN" ] && mem_flag=low
 swap_flag=ok; [ "$swap_used_pct" -gt "$SWAP_USED_MAX" ] && swap_flag=high
 disk_flag=ok; [ "$disk_used_pct" -gt "$DISK_USED_MAX" ] && disk_flag=high
-signature="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement mem=$mem_flag swap=$swap_flag disk=$disk_flag"
+signature="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement bot=$bot_status mem=$mem_flag swap=$swap_flag disk=$disk_flag"
 
 # State file: line 1 = signature of the last delivered status, line 2 = epoch
 # of that post.

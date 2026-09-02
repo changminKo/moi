@@ -364,7 +364,7 @@ describe('check-deployment-contract (A8)', () => {
       assert.equal(result.status, 1);
       assert.match(
         result.stderr,
-        /deploy\.sh must fail the release when COMPOSE_PROFILES enables the bot/,
+        /deploy\.sh must fail the release when COMPOSE_PROFILES enables the bot but the container is not running steadily/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

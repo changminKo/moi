@@ -1,3 +1,4 @@
+import { maskOutbound } from '@moi/strategy-reporter';
 import { DomainError } from '@moi/trading-core';
 import { openTickRecorder } from './backtest/tick-log.js';
 import { loadRunnerConfig } from './config.js';
@@ -94,7 +95,15 @@ if (isEntryModule(import.meta)) {
     });
 
     if (!(error instanceof DomainError)) {
-      console.error(error);
+      // The stack goes through the same masker as every line: a message from
+      // the server, or a header echoed into an error, must not bypass it here.
+      console.error(
+        maskOutbound(
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error),
+        ),
+      );
     }
 
     process.exitCode = 1;

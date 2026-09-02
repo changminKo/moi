@@ -70,6 +70,31 @@ describe('wireReporter', () => {
     expect(lines[0]).toBe('[info] token *** seen');
   });
 
+  it('keeps reporting when the secrets provider throws', async () => {
+    const lines: string[] = [];
+    const sent: unknown[] = [];
+    const wiring = wireReporter({
+      env: { DISCORD_WEBHOOK_TRADE_URL: WEBHOOK },
+      write: (line) => lines.push(line),
+      secrets: () => {
+        throw new Error('the session cell is torn');
+      },
+      transport: {
+        send: async (payload) => {
+          sent.push(payload);
+
+          return { delivered: true, status: 204 };
+        },
+      },
+    });
+
+    wiring.reporter.report('warn', 'a strategy threw on a tick');
+    await wiring.close();
+
+    expect(lines).toStrictEqual(['[warn] a strategy threw on a tick']);
+    expect(sent).toHaveLength(1);
+  });
+
   it('refuses a malformed trade webhook instead of starting silent', () => {
     expect(() =>
       wireReporter({

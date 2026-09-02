@@ -507,6 +507,55 @@ describe('notify.sh', () => {
   });
 });
 
+describe('status-check.sh bot probe (phase D)', () => {
+  it('ignores the bot when the profile is off', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runStatus(sb);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /^ok .* bot=n\/a /);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is ok with a steadily running bot and fails on a restart loop', () => {
+    const sb = makeSandbox(API);
+    try {
+      const up = runStatus(sb, {
+        COMPOSE_PROFILES: 'bot',
+        MOI_STATUS_BOT_STATE: 'running 0',
+      });
+      assert.equal(up.status, 0, up.stderr);
+      assert.match(up.stdout, /^ok .* bot=running\/0 /);
+
+      const looping = runStatus(sb, {
+        COMPOSE_PROFILES: 'bot',
+        MOI_STATUS_BOT_STATE: 'restarting 7',
+      });
+      assert.equal(looping.status, 0, looping.stderr);
+      assert.match(looping.stdout, /^fail .* bot=restarting\/7 /);
+      assert.equal(posted(sb).length, 2, 'the flip to fail is announced');
+      assert.equal(embed(posted(sb)[1]).title, 'Moi status FAIL');
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when the profile is on but no bot container exists', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runStatus(sb, {
+        COMPOSE_PROFILES: 'bot',
+        MOI_STATUS_BOT_STATE: 'missing -1',
+      });
+      assert.match(r.stdout, /^fail .* bot=missing\/-1 /);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('deploy-lib.sh', () => {
   // A stand-in for deploy.sh: sources the library and runs `body`.
   function runDeploy(sb, body, { signal } = {}) {
@@ -542,6 +591,39 @@ describe('deploy-lib.sh', () => {
     });
   }
   const titles = (sb) => posted(sb).map((p) => embed(p).title);
+
+  /**
+   * `bot_steady` is the deploy's answer to a runner in a restart loop: one
+   * `running` is not enough, it has to hold with RestartCount 0.
+   */
+  it('bot_steady needs consecutive running/0 polls and fails a restart loop', () => {
+    const sb = makeSandbox(API);
+    try {
+      const probe = join(sb.dir, 'probe.sh');
+      const seq = join(sb.dir, 'seq');
+      writeFileSync(
+        probe,
+        `#!/usr/bin/env bash\nline="$(head -n1 ${JSON.stringify(seq)})"\ntail -n +2 ${JSON.stringify(seq)} > ${JSON.stringify(seq)}.tmp && mv ${JSON.stringify(seq)}.tmp ${JSON.stringify(seq)}\nprintf '%s\\n' "\${line:-running 0}"\n`,
+      );
+      chmodSync(probe, 0o755);
+      const body = `deploy_begin main\nstep verify\nif MOI_BOT_STEADY_SLEEP=0 MOI_BOT_STEADY_POLLS=3 MOI_BOT_STEADY_MAX=6 bot_steady ${JSON.stringify(probe)}; then echo STEADY; else echo LOOPING; fi\ndeploy_verified x\nexit 0`;
+
+      writeFileSync(
+        seq,
+        'running 0\nrestarting 1\nrunning 1\nrunning 1\nrunning 1\nrunning 1\n',
+      );
+      const looping = runDeploy(sb, body);
+      assert.equal(looping.status, 0, looping.stderr);
+      assert.match(looping.stdout, /LOOPING/);
+
+      writeFileSync(seq, 'running 0\nrunning 0\nrunning 0\n');
+      const steady = runDeploy(sb, body);
+      assert.equal(steady.status, 0, steady.stderr);
+      assert.match(steady.stdout, /STEADY/);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
 
   it('reports success only after deploy_verified and removes the lock', () => {
     const sb = makeSandbox(API);
