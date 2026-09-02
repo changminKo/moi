@@ -1,0 +1,26 @@
+{
+  "pollIntervalMs": 5000,
+  "gapAfterMs": 60000,
+  "risk": {
+    "symbolAllowList": [{ "market": "KR", "symbol": "005930" }],
+    "maxOrderNotional": "500000",
+    "maxDailyNotional": "2000000",
+    "maxPositionQuantity": "50",
+    "maxOpenOrders": 2,
+    "tradingHoursOnly": true,
+    "maxQuoteAgeMs": 30000
+  },
+  "strategies": [
+    {
+      "name": "samsung-sma",
+      "strategyId": "sma-crossover",
+      "params": {
+        "market": "KR",
+        "symbol": "005930",
+        "fastPeriod": 5,
+        "slowPeriod": 20,
+        "quantity": "1"
+      }
+    }
+  ]
+}

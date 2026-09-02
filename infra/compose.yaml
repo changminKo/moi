@@ -105,6 +105,72 @@ services:
       moi.liveness-path: /health/live
       moi.readiness-path: /health/ready
 
+  # The strategy runner (자동매매 봇) — strategy-runner design §3, §7.3, §8.1.
+  #
+  # Declared here so the deployment contract covers it, and gated behind the
+  # `bot` profile so it does NOT start on `docker compose up` or on
+  # infra/oracle/deploy.sh: the runner is incomplete, and an unfinished trader
+  # is not something a routine release should quietly bring up. Starting it is
+  # an explicit act:
+  #
+  #     docker compose -f infra/compose.yaml --profile bot up -d bot
+  #
+  # The image is built from apps/strategy-runner/Dockerfile, which the runner's
+  # own phase adds together with the strategy configuration mount; until then
+  # the profile has nothing to start.
+  bot:
+    profiles:
+      - bot
+    build:
+      context: ..
+      dockerfile: apps/strategy-runner/Dockerfile
+    image: moi/strategy-runner:local
+    environment:
+      NODE_ENV: production
+      # §4.1: where the runner connects. A committed literal, not an
+      # interpolation — `paper-api` is the compose service name, reachable only
+      # on this project's internal network, and it is already on the runner's
+      # ALLOWED_API_HOSTS constant. Two consequences worth being explicit
+      # about: the bot never leaves the compose network to place an order, and
+      # no environment variable can move it, because there is nothing here to
+      # substitute. The contract checker reads the runner's allow-list and
+      # fails if this host is not on it, so the two can never drift.
+      BOT_API_ORIGIN: "http://paper-api:3000"
+      # §4.2: the `Origin` **header** value, which is a different thing from
+      # the connect target above and must not be confused with it. The paper
+      # API's CSRF check compares it against its own PUBLIC_ORIGIN — the
+      # browser app's origin — so sending the connect target here would be a
+      # 403 on every mutation the bot ever made. It is deliberately not
+      # allow-listed: a header value reaches nothing.
+      BOT_PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?public web origin, e.g. https://app.moi.example}"
+      # §8.1: append-only NDJSON state on a named volume, so a restart resumes
+      # the session, the fill cursor and the kill switch instead of resetting.
+      BOT_STATE_DIR: /var/lib/moi-bot
+      # The operator's strategy and risk configuration, mounted read-only. The
+      # runner refuses to start without it (there are no default risk limits),
+      # so copy infra/bot/runner.example.json to infra/bot/runner.json and edit
+      # it before enabling the profile.
+      BOT_CONFIG_PATH: /etc/moi-bot/runner.json
+      # §7.4: the runner's own Discord channel. Never DISCORD_WEBHOOK_URL —
+      # trading noise must not bury an incident alert, and the contract checker
+      # asserts the operational webhook never reaches this service. Optional:
+      # absent, the reporter is a silent no-op and the runner still starts.
+      DISCORD_WEBHOOK_TRADE_URL: "${DISCORD_WEBHOOK_TRADE_URL:-}"
+    volumes:
+      - bot-state:/var/lib/moi-bot
+      - ./bot:/etc/moi-bot:ro
+    depends_on:
+      paper-api:
+        condition: service_healthy
+    # §7.3: the bot dying may not touch paper-api, web or the ledger. The
+    # ledger is the source of truth; this state is a cache and an audit trail.
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    labels:
+      moi.role: strategy-runner
+
   postgres:
     image: postgres:17.5-alpine
     environment:
@@ -140,3 +206,4 @@ services:
 volumes:
   postgres-data: {}
   redis-data: {}
+  bot-state: {}

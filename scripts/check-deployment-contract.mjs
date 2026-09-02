@@ -26,6 +26,15 @@ const NODE_VERSION = '24.19.0';
 const PNPM_VERSION = '11.22.0';
 const PUBLIC_SERVICES = ['web', 'paper-api'];
 const PRIVATE_SERVICES = ['postgres', 'redis'];
+/**
+ * Declared in compose but gated behind a profile, so `docker compose up` and
+ * infra/oracle/deploy.sh leave it alone. The strategy runner is here because a
+ * service outside the contract is a service nobody checks.
+ */
+const OPT_IN_SERVICES = ['bot'];
+/** Nothing on this list may reach the bot: it trades through the public API. */
+const BOT_FORBIDDEN_ENV =
+  /TOSS|DATABASE|REDIS|POSTGRES|SECRET|ADMIN|SESSION|CSRF|MARKET_DATA|FEE_|ALLOW_?LIST/i;
 const BOUNDED_ALERT_LABELS = new Set([
   'severity',
   'market',
@@ -268,14 +277,25 @@ let compose;
 check('compose topology', () => {
   compose = readYaml('infra/compose.yaml');
   const services = compose.services ?? {};
-  for (const name of [...PUBLIC_SERVICES, ...PRIVATE_SERVICES]) {
+  for (const name of [
+    ...PUBLIC_SERVICES,
+    ...PRIVATE_SERVICES,
+    ...OPT_IN_SERVICES,
+  ]) {
     assert.ok(services[name], `compose must define service ${name}`);
   }
   assert.deepEqual(
     Object.keys(services).sort(),
-    [...PUBLIC_SERVICES, ...PRIVATE_SERVICES].sort(),
-    'compose must define exactly web, paper-api, postgres, redis',
+    [...PUBLIC_SERVICES, ...PRIVATE_SERVICES, ...OPT_IN_SERVICES].sort(),
+    'compose must define exactly web, paper-api, postgres, redis, bot',
   );
+  for (const name of [...PUBLIC_SERVICES, ...PRIVATE_SERVICES]) {
+    assert.equal(
+      services[name].profiles,
+      undefined,
+      `${name} must start by default; only ${OPT_IN_SERVICES.join(', ')} is opt-in`,
+    );
+  }
   for (const name of PRIVATE_SERVICES) {
     assert.equal(
       services[name].ports,
@@ -346,6 +366,166 @@ check('compose topology', () => {
   assert.deepEqual(api.depends_on?.postgres, { condition: 'service_healthy' });
   assert.deepEqual(api.depends_on?.redis, { condition: 'service_healthy' });
 });
+
+check(
+  'strategy runner is declared, gated, and cannot be aimed elsewhere',
+  () => {
+    const bot = compose?.services?.bot;
+    assert.ok(bot, 'compose must define the bot service');
+
+    // Opt-in only. The runner is incomplete; a release must not start it.
+    assert.deepEqual(
+      bot.profiles,
+      ['bot'],
+      'bot must sit behind exactly the `bot` profile so no default up starts it',
+    );
+    assert.equal(bot.ports, undefined, 'bot must not publish a port');
+    assert.equal(
+      bot.restart,
+      'unless-stopped',
+      'design §7.3: the bot restarts on its own and never takes the stack with it',
+    );
+    assert.deepEqual(bot.depends_on?.['paper-api'], {
+      condition: 'service_healthy',
+    });
+
+    // §8.1: append-only state survives a restart, on a declared named volume.
+    // Anything bound in from the host is the operator's configuration, and it
+    // is read-only: the bot reads its limits, it does not get to rewrite them.
+    const mounts = (bot.volumes ?? []).map((volume) => {
+      if (typeof volume !== 'string')
+        return {
+          source: volume.source,
+          target: volume.target,
+          mode: volume.read_only === true ? 'ro' : '',
+        };
+      const [source, target, mode = ''] = volume.split(':');
+      return { source, target, mode };
+    });
+    const isBind = (mount) => /^[./]/.test(mount.source ?? '');
+    const named = mounts.filter((mount) => !isBind(mount));
+    const binds = mounts.filter(isBind);
+    assert.ok(named.length > 0, 'bot needs a state volume');
+    for (const mount of named)
+      assert.ok(
+        compose.volumes?.[mount.source],
+        `bot volume ${mount.source} must be a declared named volume`,
+      );
+    for (const mount of binds)
+      assert.equal(
+        mount.mode,
+        'ro',
+        `bot bind mount ${mount.source} must be read-only`,
+      );
+
+    const env = bot.environment ?? {};
+
+    // §4.1: the connect target. A committed literal, so there is nothing here
+    // for an environment to substitute, and the host is the compose service
+    // name — reachable only on this project's internal network. Together those
+    // are what turn "the bot cannot reach a real exchange" from a hope into a
+    // property of the deployment surface. The allow-list it is checked against
+    // is a code constant in the runner; this reads that constant so compose and
+    // it cannot drift, and the bot cannot be handed a host it will refuse.
+    const apiOrigin = String(env.BOT_API_ORIGIN ?? '');
+    assert.ok(
+      apiOrigin.length > 0 && !apiOrigin.includes('${'),
+      'BOT_API_ORIGIN must be a committed literal: an interpolation is a value the environment can move',
+    );
+    let apiHost;
+    try {
+      apiHost = new URL(apiOrigin).hostname;
+    } catch {
+      assert.fail(`BOT_API_ORIGIN is not a URL: ${apiOrigin}`);
+    }
+    const originModule = 'apps/strategy-runner/src/api-origin.ts';
+    if (existsSync(path(originModule))) {
+      const block = /ALLOWED_API_HOSTS[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/.exec(
+        read(originModule),
+      );
+      assert.ok(block, `cannot locate ALLOWED_API_HOSTS in ${originModule}`);
+      // Comments first: an apostrophe in prose ("the operator's own machine")
+      // reads as a quoted entry otherwise, which puts junk in the parsed list
+      // and would let a host slip in on a comment's wording.
+      const listing = block[1].replace(/\/\/[^\n]*/g, '');
+      const allowed = [...listing.matchAll(/'([^']+)'/g)].map(
+        ([, host]) => host,
+      );
+      assert.ok(
+        allowed.length > 0,
+        `parsed no hosts out of ALLOWED_API_HOSTS in ${originModule}; the parser or the constant changed`,
+      );
+      assert.ok(
+        allowed.includes(apiHost),
+        `BOT_API_ORIGIN host ${apiHost} is not on the runner's ALLOWED_API_HOSTS (${allowed.join(', ')}); the bot would refuse to start`,
+      );
+    }
+
+    // §4.2: the Origin *header*, which is a different value from the connect
+    // target — the paper API compares it against its own PUBLIC_ORIGIN, the
+    // browser app's origin. Conflating the two is a 403 on every mutation the
+    // bot ever makes, so they are asserted apart.
+    assert.match(
+      String(env.BOT_PUBLIC_ORIGIN ?? ''),
+      /^\$\{PUBLIC_ORIGIN:\?/,
+      "BOT_PUBLIC_ORIGIN must be the deployment's own PUBLIC_ORIGIN",
+    );
+    assert.notEqual(
+      env.BOT_PUBLIC_ORIGIN,
+      env.BOT_API_ORIGIN,
+      'the Origin header and the connect target are different values (design §4.2)',
+    );
+
+    // The runner has no default risk limits and refuses to start without its
+    // configuration, so the path must be set and must resolve inside one of the
+    // read-only mounts above.
+    const configPath = String(env.BOT_CONFIG_PATH ?? '');
+    assert.ok(configPath.length > 0, 'BOT_CONFIG_PATH must be set');
+    assert.ok(
+      binds.some((mount) => configPath.startsWith(`${mount.target}/`)),
+      `BOT_CONFIG_PATH ${configPath} must live inside a read-only bind mount`,
+    );
+    assert.ok(
+      existsSync(path('infra/bot/runner.example.json')),
+      'infra/bot/runner.example.json must exist for the operator to copy',
+    );
+    assert.ok(
+      !existsSync(path('infra/bot/runner.json')),
+      "infra/bot/runner.json is the operator's file and must not be committed",
+    );
+
+    const widening = Object.keys(env).filter((key) =>
+      BOT_FORBIDDEN_ENV.test(key),
+    );
+    assert.deepEqual(
+      widening,
+      [],
+      'the bot receives no ledger credential, no provider credential, and no allow-list override',
+    );
+
+    // §7.4: its own channel, and never the operational one notify.sh posts to.
+    assert.equal(
+      env.DISCORD_WEBHOOK_URL,
+      undefined,
+      'the operational Discord webhook must never reach the bot (design §7.4)',
+    );
+    assert.match(
+      String(env.DISCORD_WEBHOOK_TRADE_URL ?? ''),
+      /^\$\{DISCORD_WEBHOOK_TRADE_URL:-\}$/,
+      'DISCORD_WEBHOOK_TRADE_URL must be an optional interpolation, never a literal',
+    );
+
+    // The image is the runner's own. Its Dockerfile arrives with the runner; the
+    // moment it does it answers to the same rules as web and paper-api.
+    const dockerfile = bot.build?.dockerfile;
+    assert.equal(
+      dockerfile,
+      'apps/strategy-runner/Dockerfile',
+      'bot must build from the strategy runner Dockerfile',
+    );
+    if (existsSync(path(dockerfile))) checkDockerfile(dockerfile);
+  },
+);
 
 check('shutdown grace exceeds drain deadline', () => {
   const source = read('apps/paper-api/src/lifecycle/shutdown-coordinator.ts');
@@ -438,6 +618,49 @@ check('no committed secrets', () => {
   );
 });
 
+/**
+ * Everything `notify.sh` needs must actually be on the host.
+ *
+ * The alerting path is fail-closed by design: a missing dependency means no
+ * message rather than a wrong one. That is the right trade, and it is also why
+ * this check exists — a host that has quietly stopped alerting looks exactly
+ * like a host with nothing to report. `perl` is the live example: it masks
+ * every outbound field, and it arrived in the alerting path long after
+ * bootstrap.sh's package list was written.
+ *
+ * Rather than pin today's list, this reads the guards out of `notify.sh` and
+ * requires each one to be provisioned by `bootstrap.sh` (a fresh host) or by
+ * `deploy.sh` (a host bootstrapped before the tool joined the list). Adding a
+ * dependency to the alerting path without provisioning it fails the build.
+ */
+check('host alerting dependencies are provisioned', () => {
+  const guards = [
+    ...read('infra/oracle/notify.sh').matchAll(
+      /command -v (\S+) >\/dev\/null 2>&1 \|\| soft_fail/g,
+    ),
+  ].map(([, tool]) => tool);
+  assert.ok(
+    guards.length > 0,
+    'cannot locate notify.sh dependency guards; the parser or the script changed',
+  );
+
+  const words = (text, pattern) =>
+    [...text.matchAll(pattern)].flatMap(([, list]) => list.trim().split(/\s+/));
+  const provisioned = new Set([
+    ...words(
+      read('infra/oracle/bootstrap.sh'),
+      /apt-get install -y -qq ([^\n]*)/g,
+    ),
+    ...words(read('infra/oracle/deploy.sh'), /for tool in ([^;\n]*);/g),
+  ]);
+
+  for (const tool of guards)
+    assert.ok(
+      provisioned.has(tool),
+      `notify.sh requires ${tool}, but neither bootstrap.sh nor deploy.sh installs it; alerting would fail closed and the host would look quiet`,
+    );
+});
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(
@@ -499,6 +722,10 @@ check('secret-manager template holds references only', () => {
     'ADMIN_API_KEY',
     'TOSS_CLIENT_ID',
     'TOSS_CLIENT_SECRET',
+    // The runner's own Discord channel (design §7.4). Optional at run time,
+    // but the operator must be told it exists and that it is not the
+    // operational DISCORD_WEBHOOK_URL.
+    'DISCORD_WEBHOOK_TRADE_URL',
   ])
     assert.ok(declared.has(key), `secrets.env.tpl must reference ${key}`);
   assert.ok(
