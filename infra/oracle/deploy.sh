@@ -32,10 +32,13 @@ cd "$REPO"
 . "$REPO/infra/oracle/deploy-lib.sh"
 deploy_begin "$REF"
 
-step "fetch ${REF}"
-as_owner git fetch -q origin "$REF"
-as_owner git checkout -q --detach FETCH_HEAD
-as_owner git log --oneline -1
+if [ "${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then
+  step "fetch ${REF}"
+  as_owner git fetch -q origin "$REF"
+  as_owner git checkout -q --detach FETCH_HEAD
+  as_owner git log --oneline -1
+  deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"
+fi
 
 step toolchain
 # Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and

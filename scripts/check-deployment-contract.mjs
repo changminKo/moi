@@ -929,6 +929,28 @@ check('host alerting dependencies are provisioned', () => {
     );
 });
 
+check('reference deploy re-executes the checked-out script', () => {
+  const script = read('infra/oracle/deploy.sh');
+  const guard = script.indexOf(`if [ "\${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then`);
+  const fetch = script.indexOf('as_owner git fetch -q origin "$REF"');
+  const checkout = script.indexOf(
+    'as_owner git checkout -q --detach FETCH_HEAD',
+  );
+  const reexec = script.indexOf(
+    'deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"',
+  );
+  const toolchain = script.indexOf('step toolchain');
+
+  assert.ok(
+    guard >= 0 &&
+      guard < fetch &&
+      fetch < checkout &&
+      checkout < reexec &&
+      reexec < toolchain,
+    'deploy.sh must re-exec the checked-out script once after checkout and before toolchain work',
+  );
+});
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(

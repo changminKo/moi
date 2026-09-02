@@ -59,6 +59,15 @@ deploy_begin() {
     echo "FAIL: flock is required to serialize deploys (install util-linux)" >&2
     return 69
   fi
+  if [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ]; then
+    if [ ! -e /dev/fd/9 ] || [ ! -e "$DEPLOY_LOCK" ] || ! flock -n 9; then
+      echo "FAIL: deploy re-exec lost its inherited mutex or active marker" >&2
+      return 70
+    fi
+    DEPLOY_OWNS_MUTEX=1
+    DEPLOY_REF="$1"
+    return 0
+  fi
   exec 9>"$DEPLOY_MUTEX"
   if ! flock -n 9; then
     echo "FAIL: another deploy is already in progress" >&2
@@ -68,6 +77,15 @@ deploy_begin() {
   DEPLOY_REF="$1"
   : > "$DEPLOY_LOCK"
   notify info "deploy started: ${DEPLOY_REF}" "host $(hostname)"
+}
+
+# Replace the pre-fetch process with the script from the checked-out release.
+# Descriptor 9 is intentionally inherited across exec; deploy_begin validates
+# and adopts it in the replacement process without posting a second start.
+deploy_reexec() {
+  [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ] && return 0
+  export MOI_DEPLOY_REEXEC=1
+  exec "$@"
 }
 
 # Called by deploy.sh only after readiness, both markets NORMAL and placement

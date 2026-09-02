@@ -78,8 +78,18 @@ esac
     `#!/usr/bin/env bash
 lock="\${MOI_DEPLOY_MUTEX}.held"
 case "\${1:-}" in
-  -n) mkdir "$lock" 2>/dev/null;;
-  -u) rmdir "$lock" 2>/dev/null || true;;
+  -n)
+    if mkdir "$lock" 2>/dev/null; then
+      printf '%s' "$PPID" > "$lock/owner"
+      exit 0
+    fi
+    [ "$(cat "$lock/owner" 2>/dev/null)" = "$PPID" ]
+    ;;
+  -u)
+    if [ "$(cat "$lock/owner" 2>/dev/null)" = "$PPID" ]; then
+      rm -rf "$lock"
+    fi
+    ;;
   *) exit 2;;
 esac
 `,
@@ -586,7 +596,7 @@ describe('deploy-lib.sh', () => {
   }
 
   // A stand-in for deploy.sh: sources the library and runs `body`.
-  function runDeploy(sb, body, { signal } = {}) {
+  function runDeploy(sb, body, { signal, extraEnv = {} } = {}) {
     const script = join(sb.dir, 'deploy-under-test.sh');
     writeFileSync(
       script,
@@ -599,6 +609,7 @@ describe('deploy-lib.sh', () => {
       MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
       MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
       MOI_DEPLOY_MANAGE_TIMER: '0',
+      ...extraEnv,
     };
     if (!signal) return spawnSync('bash', [script], { env, encoding: 'utf8' });
     return new Promise((done) => {
@@ -784,6 +795,89 @@ wait
     } finally {
       if (holder.exitCode === null) process.kill(-holder.pid, 'SIGTERM');
       await holderExit;
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-execs the freshly checked-out deploy script once while preserving the active mutex', () => {
+    const sb = makeSandbox(API);
+    const oldScript = join(sb.dir, 'old-deploy.sh');
+    const freshSource = join(sb.dir, 'fresh-source.sh');
+    const checkedOutScript = join(sb.dir, 'checkout', 'deploy.sh');
+    const oldTail = join(sb.dir, 'old-tail-ran');
+    const freshBody = join(sb.dir, 'fresh-body-ran');
+    mkdirSync(dirname(checkedOutScript), { recursive: true });
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      freshSource,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin "$1"
+deploy_reexec "$0" "$1"
+: > ${JSON.stringify(freshBody)}
+deploy_verified fresh123
+`,
+    );
+    chmodSync(freshSource, 0o755);
+    writeFileSync(
+      oldScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin main
+cp ${JSON.stringify(freshSource)} ${JSON.stringify(checkedOutScript)}
+deploy_reexec ${JSON.stringify(checkedOutScript)} main
+: > ${JSON.stringify(oldTail)}
+`,
+    );
+
+    try {
+      const r = spawnSync('bash', [oldScript], {
+        env,
+        encoding: 'utf8',
+        timeout: 5_000,
+      });
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(existsSync(freshBody), 'the checked-out script body must run');
+      assert.ok(
+        !existsSync(oldTail),
+        'the pre-fetch script body must not resume',
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy finished: fresh123',
+      ]);
+      assert.ok(!existsSync(env.MOI_DEPLOY_LOCK));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a forged re-exec guard without an inherited mutex descriptor', () => {
+    const sb = makeSandbox(API);
+    const marker = join(sb.dir, 'deploy.lock');
+    writeFileSync(marker, 'owned elsewhere');
+    try {
+      const r = runDeploy(sb, 'deploy_begin main', {
+        extraEnv: { MOI_DEPLOY_REEXEC: '1' },
+      });
+
+      assert.equal(r.status, 70, r.stderr);
+      assert.match(r.stderr, /re-exec lost its inherited mutex/u);
+      assert.equal(readFileSync(marker, 'utf8'), 'owned elsewhere');
+      assert.deepEqual(posted(sb), []);
+    } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });

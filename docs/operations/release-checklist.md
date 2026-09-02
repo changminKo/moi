@@ -55,6 +55,11 @@ handoff therefore remains unchecked below.
   `infra/oracle/status-check.test.mjs` holds one real deploy-lib process open,
   proves a second invocation exits 75 without running its body, and proves the
   rejected process cannot remove the active process's status marker.
+- [x] A reference-host deploy executes the freshly checked-out deploy script
+  in the same invocation. Evidence: `infra/oracle/status-check.test.mjs`
+  proves only the replacement body runs, the mutex descriptor survives, and
+  start/finish notifications remain single; the deployment-contract mutation
+  test fails when the `deploy.sh` wiring is removed.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`

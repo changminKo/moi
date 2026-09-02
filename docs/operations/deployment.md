@@ -312,6 +312,15 @@ requires, and the artefacts are the same ones the local smoke uses.
    status alerts during the active deploy and is owned and removed by the
    process that acquired the mutex.
 
+   The first-stage process fetches and checks out the requested ref, then
+   `exec`s that checkout's `infra/oracle/deploy.sh` before toolchain, preflight,
+   migration, or restart work. Descriptor 9 and the status marker survive the
+   `exec`; the replacement process validates both before adopting the mutex.
+   The `MOI_DEPLOY_REEXEC=1` guard prevents a loop, and the replacement neither
+   recreates the marker nor posts a second `deploy started` notification. This
+   makes deploy-script changes effective in the same release instead of one
+   invocation later.
+
    fetch the exact ref (detached checkout; a non-fast-forward is an error,
    never a silent stale deploy) → `preflight --environment production`
    (also requires `PUBLIC_ORIGIN`/`PUBLIC_API_ORIGIN` to equal

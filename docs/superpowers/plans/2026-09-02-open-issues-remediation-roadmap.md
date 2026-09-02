@@ -26,7 +26,7 @@ acceptance criteria. Behaviour changes still follow TDD, the gates in
 - [x] **#44 P0 — serialize deploys.** Acquire an exclusive non-blocking mutex
   before fetch; a rejected second deploy must not touch the repository, the
   status marker, timers, or notifications.
-- [ ] **#28 P1 — re-exec the fetched deploy script.** Preserve the #44 mutex
+- [x] **#28 P1 — re-exec the fetched deploy script.** Preserve the #44 mutex
   across `exec` and guard against a second re-exec.
 - [ ] **#83 P0 — verify image provenance.** Publish OCI revision labels and
   refuse an image whose revision differs from the requested checkout SHA.
@@ -136,3 +136,4 @@ The order above is strict. PR #97 currently computes realised PnL from
 | Date | Issue | State | Evidence |
 |---|---:|---|---|
 | 2026-09-02 | #44 | Complete locally | TDD RED→GREEN; `pnpm check`, `pnpm check:deployment`, and `pnpm test:deployment` (55/55) |
+| 2026-09-02 | #28 | Complete locally | TDD RED→GREEN; fresh-script exec, inherited-mutex, forged-guard, and contract-mutation coverage; deployment tests 58/58 |

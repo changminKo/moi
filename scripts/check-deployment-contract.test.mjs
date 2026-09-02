@@ -686,4 +686,27 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('fails when deploy stops re-executing the freshly checked-out script', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          'deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"\n',
+          '',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must re-exec the checked-out script/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
