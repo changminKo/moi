@@ -54,12 +54,6 @@ import {
  * `sessionId`, which is the same divergence in the other direction and wants
  * closing when the cache write lands.
  */
-// TODO(rebase): `feat/fill-currency` puts the snapshot's `activeOrders[].fills`
-// through `fillRecord()`, so a fill row widens from six fields to the whole
-// `FillRecord` and `recoveryFill` becomes `isRecoveryFill`. This file's
-// fixtures and this key list have to be re-read against that shape when this
-// branch is rebased onto it — otherwise these stay red for a reason that has
-// nothing to do with the cache.
 const REST_SNAPSHOT_KEYS = [
   'accountSequence',
   'activeOrders',
@@ -84,7 +78,42 @@ const restSnapshot = (accountSequence: string) =>
       },
     ],
     reservations: [],
-    activeOrders: [],
+    // A whole order with a fill on it, spelled as `fillRecord()` now emits one
+    // (§16.45). The point of the key assertions below is what reaches the
+    // cache, so the fixture has to be the shape that actually reaches it.
+    activeOrders: [
+      {
+        id: 'o-1',
+        market: 'US',
+        symbol: 'AAPL',
+        type: 'MARKET',
+        side: 'BUY',
+        quantity: '1',
+        filledQuantity: '1',
+        status: 'FILLED',
+        limitPrice: null,
+        stopPrice: null,
+        terminalReason: null,
+        fills: [
+          {
+            id: 'f-1',
+            fillSequence: '1',
+            accountSequence,
+            orderId: 'o-1',
+            market: 'US',
+            symbol: 'AAPL',
+            side: 'BUY',
+            quantity: '1',
+            price: '325.26',
+            fee: '0',
+            currency: 'USD',
+            isRecoveryFill: false,
+            occurredAt: '2026-09-02T00:00:00.000Z',
+          },
+        ],
+        siblingOrderIds: [],
+      },
+    ],
     accountSequence,
     market: { health: { US: 'HEALTHY' }, recoveryFill: { US: false } },
   }) as unknown as PortfolioSnapshot;

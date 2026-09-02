@@ -32,6 +32,7 @@ class FakeSocket {
 }
 
 const snapshot = (accountSequence: string): PortfolioSnapshot => ({
+  sessionId: 's-1',
   wallets: [],
   positions: [],
   reservations: [],
@@ -110,13 +111,16 @@ describe('usePortfolioStream stream protocol (§7.5)', () => {
         heartbeatIntervalMs: 30_000,
       }),
     );
+    // A whole snapshot, as `#enrichPayload` sends: a partial payload is
+    // refused and refetched now, so `{ wallets: [] }` would never advance the
+    // sequence this test is about.
     for (const sequence of ['43', '44', '45'])
       act(() =>
         first.receive({
           type: 'event',
           eventId: `e${sequence}`,
           accountSequence: sequence,
-          payload: { wallets: [] },
+          payload: snapshot(sequence),
         }),
       );
     act(() => first.onclose?.({ code: 1006 } as CloseEvent));
@@ -355,6 +359,28 @@ describe('usePortfolioStream writing through to the query cache', () => {
       'sessionId',
       'wallets',
     ]);
+  });
+
+  it('never writes back over a refetch that did not advance the sequence', () => {
+    // An FX conversion moves balances through `invalidateQueries` and is
+    // answered by a refetch that does not advance the account sequence — the
+    // stream carries no event for it. Publishing a snapshot that merely
+    // restates the cached sequence would put the pre-conversion balances back
+    // over that refetch, which is exactly what an e2e journey caught.
+    const { queryClient } = setup(complete('42', '1000'));
+    const socket = FakeSocket.instances[0] as FakeSocket;
+    act(() => socket.open());
+    act(() => socket.receive(patch('43', '900')));
+
+    // The refetch answers the same sequence with balances only it knows about.
+    act(() => {
+      queryClient.setQueryData(PORTFOLIO_QUERY_KEY, complete('43', '800'));
+    });
+
+    expect(
+      (queryClient.getQueryData(PORTFOLIO_QUERY_KEY) as PortfolioSnapshot)
+        .wallets[0]?.available,
+    ).toBe('800');
   });
 
   it('leaves the cache alone when the patch is refused', () => {

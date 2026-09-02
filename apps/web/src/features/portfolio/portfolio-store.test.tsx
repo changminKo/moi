@@ -6,6 +6,7 @@ import {
 } from './portfolio-store';
 
 const snapshot = (accountSequence: string): PortfolioSnapshot => ({
+  sessionId: 's-1',
   wallets: [],
   positions: [],
   reservations: [],
