@@ -74,6 +74,17 @@ esac
   };
   stub('curl', fakeCurl);
   stub(
+    'flock',
+    `#!/usr/bin/env bash
+lock="\${MOI_DEPLOY_MUTEX}.held"
+case "\${1:-}" in
+  -n) mkdir "$lock" 2>/dev/null;;
+  -u) rmdir "$lock" 2>/dev/null || true;;
+  *) exit 2;;
+esac
+`,
+  );
+  stub(
     'free',
     `#!/usr/bin/env bash\nprintf '%s\\n' '${api.free.replace(/\n/g, "' '")}'\n`,
   );
@@ -557,6 +568,23 @@ describe('status-check.sh bot probe (phase D)', () => {
 });
 
 describe('deploy-lib.sh', () => {
+  function waitForFile(path) {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const deadline = Date.now() + 5_000;
+      const tick = setInterval(() => {
+        if (existsSync(path)) {
+          clearInterval(tick);
+          resolvePromise();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(tick);
+          rejectPromise(new Error(`timed out waiting for ${path}`));
+        }
+      }, 25);
+    });
+  }
+
   // A stand-in for deploy.sh: sources the library and runs `body`.
   function runDeploy(sb, body, { signal } = {}) {
     const script = join(sb.dir, 'deploy-under-test.sh');
@@ -569,11 +597,12 @@ describe('deploy-lib.sh', () => {
       DISCORD_WEBHOOK_URL: WEBHOOK,
       NOTIFY_BIN: notify,
       MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
       MOI_DEPLOY_MANAGE_TIMER: '0',
     };
     if (!signal) return spawnSync('bash', [script], { env, encoding: 'utf8' });
     return new Promise((done) => {
-      const child = spawn('bash', [script], { env });
+      const child = spawn('bash', [script], { env, detached: true });
       let stderr = '';
       child.stderr.on('data', (d) => {
         stderr += d;
@@ -582,12 +611,20 @@ describe('deploy-lib.sh', () => {
       const tick = setInterval(() => {
         if (existsSync(`${env.MOI_DEPLOY_LOCK}.ready`)) {
           clearInterval(tick);
-          child.kill(signal);
+          process.kill(-child.pid, signal);
         }
       }, 50);
-      child.on('exit', (code, sig) =>
-        done({ status: code, signal: sig, stderr }),
-      );
+      child.on('exit', (code, sig) => {
+        // A background child inherits SIGINT as ignored. Once the shell has
+        // reported the trap's exit code, remove anything still holding the
+        // detached test process group's pipes open.
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+        done({ status: code, signal: sig, stderr });
+      });
     });
   }
   const titles = (sb) => posted(sb).map((p) => embed(p).title);
@@ -673,6 +710,80 @@ describe('deploy-lib.sh', () => {
         /step: preflight \(production\) \(exit 1\)/,
       );
     } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails clearly without touching deploy state when flock is unavailable', () => {
+    const sb = makeSandbox(API);
+    try {
+      rmSync(join(sb.bin, 'flock'));
+
+      const r = runDeploy(sb, 'deploy_begin main');
+
+      assert.equal(r.status, 69, r.stderr);
+      assert.match(r.stderr, /flock is required to serialize deploys/u);
+      assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
+      assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a concurrent deploy without touching the active deploy marker or running its body', async () => {
+    const sb = makeSandbox(API);
+    const holderScript = join(sb.dir, 'deploy-holder.sh');
+    const activeMarker = join(sb.dir, 'deploy.lock');
+    const holderReady = `${activeMarker}.holder-ready`;
+    const rejectedBody = `${activeMarker}.rejected-body-ran`;
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: activeMarker,
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      holderScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin first
+: > ${JSON.stringify(holderReady)}
+sleep 30 &
+wait
+`,
+    );
+    const holder = spawn('bash', [holderScript], { env, detached: true });
+    const holderExit = new Promise((resolvePromise) => {
+      holder.on('exit', (code, signal) => resolvePromise({ code, signal }));
+    });
+
+    try {
+      await waitForFile(holderReady);
+      assert.ok(existsSync(activeMarker), 'the active deploy owns the marker');
+
+      const rejected = runDeploy(
+        sb,
+        `deploy_begin second
+: > ${JSON.stringify(rejectedBody)}`,
+      );
+
+      assert.equal(rejected.status, 75, rejected.stderr);
+      assert.match(rejected.stderr, /another deploy is already in progress/u);
+      assert.ok(
+        !existsSync(rejectedBody),
+        'a rejected deploy must not run commands after deploy_begin',
+      );
+      assert.ok(
+        existsSync(activeMarker),
+        'a rejected deploy must not remove the active deploy marker',
+      );
+    } finally {
+      if (holder.exitCode === null) process.kill(-holder.pid, 'SIGTERM');
+      await holderExit;
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });

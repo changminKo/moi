@@ -6,11 +6,14 @@
 #
 # Requires REPO. Uses withsecrets() when the caller defines it (deploy.sh runs
 # notify.sh under sops exec-env so DISCORD_WEBHOOK_URL is present). Overrides
-# for tests: NOTIFY_BIN, MOI_DEPLOY_LOCK, MOI_DEPLOY_MANAGE_TIMER=0.
+# for tests: NOTIFY_BIN, MOI_DEPLOY_LOCK, MOI_DEPLOY_MUTEX,
+# MOI_DEPLOY_MANAGE_TIMER=0.
 STEP=start
 VERIFIED=0
 DEPLOY_REF=""
 DEPLOY_LOCK="${MOI_DEPLOY_LOCK:-/run/moi-deploy.lock}"
+DEPLOY_MUTEX="${MOI_DEPLOY_MUTEX:-/run/moi-deploy.mutex}"
+DEPLOY_OWNS_MUTEX=0
 MANAGE_TIMER="${MOI_DEPLOY_MANAGE_TIMER:-1}"
 
 step() { STEP="$1"; echo "== $1"; }
@@ -52,6 +55,16 @@ status_timer() {
 }
 
 deploy_begin() {
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "FAIL: flock is required to serialize deploys (install util-linux)" >&2
+    return 69
+  fi
+  exec 9>"$DEPLOY_MUTEX"
+  if ! flock -n 9; then
+    echo "FAIL: another deploy is already in progress" >&2
+    return 75
+  fi
+  DEPLOY_OWNS_MUTEX=1
   DEPLOY_REF="$1"
   : > "$DEPLOY_LOCK"
   notify info "deploy started: ${DEPLOY_REF}" "host $(hostname)"
@@ -67,12 +80,19 @@ deploy_verified() {
 on_exit() {
   local code=$?
   trap - EXIT INT TERM HUP
+  # A process rejected by the mutex owns none of the active deploy's state.
+  # In particular it must not remove the marker that silences status alerts.
+  if [ "$DEPLOY_OWNS_MUTEX" != 1 ]; then exit "$code"; fi
   rm -f "$DEPLOY_LOCK"
   status_timer start
-  if [ "$code" = 0 ] && [ "$VERIFIED" = 1 ]; then exit 0; fi
+  if [ "$code" = 0 ] && [ "$VERIFIED" = 1 ]; then
+    flock -u 9 || true
+    exit 0
+  fi
   # Reaching the end without verification is a failure, never a silent success.
   [ "$code" = 0 ] && code=1
   notify fail "deploy failed: ${DEPLOY_REF:-unknown}" "step: ${STEP} (exit ${code}) on $(hostname)"
+  flock -u 9 || true
   exit "$code"
 }
 trap on_exit EXIT

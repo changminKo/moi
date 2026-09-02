@@ -304,6 +304,14 @@ requires, and the artefacts are the same ones the local smoke uses.
    repository owner) and fails — never reports success — unless readiness,
    both markets `NORMAL` and `placement: true` are observed.
 
+   Before fetch or checkout it takes a non-blocking exclusive `flock` on
+   `/run/moi-deploy.mutex` and holds descriptor 9 until its exit trap finishes.
+   A second invocation exits 75 without touching the checkout, status marker,
+   timer, or notifications. This mutex is distinct from
+   `/run/moi-deploy.lock`: the latter is only a marker that suppresses expected
+   status alerts during the active deploy and is owned and removed by the
+   process that acquired the mutex.
+
    fetch the exact ref (detached checkout; a non-fast-forward is an error,
    never a silent stale deploy) → `preflight --environment production`
    (also requires `PUBLIC_ORIGIN`/`PUBLIC_API_ORIGIN` to equal
@@ -447,7 +455,9 @@ chat, or a shell history line that echoes it.
      This is the only producer that sees a container dying after start-up
      (compose `restart: unless-stopped` restarts it; a restart loop shows up as
      readiness/market flapping in the status line). The check is skipped while
-     `deploy.sh` holds `/run/moi-deploy.lock`.
+     `deploy.sh` holds the `/run/moi-deploy.lock` status marker. Actual mutual
+     exclusion between deploy processes is provided separately by the
+     `/run/moi-deploy.mutex` `flock`.
    - `OnFailure=moi-alert@%n.service` on `moi.service` and
      `moi-status.service`: fires **only** when systemd fails to start or stop
      the oneshot unit (sops key, compose interpolation, Docker down) and posts

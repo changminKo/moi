@@ -51,6 +51,10 @@ handoff therefore remains unchecked below.
   with identical ledger/audit counts and zero checked invariant violations.
 - [x] The previous read surface and a pre-backup anonymous-session cookie read
   the forward-compatible restored schema without rolling migrations back.
+- [x] Reference-host deploys are mutually exclusive before fetch. Evidence:
+  `infra/oracle/status-check.test.mjs` holds one real deploy-lib process open,
+  proves a second invocation exits 75 without running its body, and proves the
+  rejected process cannot remove the active process's status marker.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`
