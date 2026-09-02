@@ -69,6 +69,8 @@ export const MAX_SUBMIT_ATTEMPTS = 4;
  */
 export const KILL_SWITCH_AFTER_FAILED_ATTEMPTS = 10;
 const BASE_BACKOFF_MS = 200;
+/** Design §7.2: "지수 백오프(최대 5분)". A server's `Retry-After` is honoured up to this. */
+export const MAX_BACKOFF_MS = 5 * 60 * 1_000;
 
 export interface ExhaustedSubmissions {
   readonly code: string;
@@ -269,16 +271,27 @@ export class OrderGateway {
       } catch (error) {
         const failure = asDomainError(error);
 
+        if (failure.retryable) {
+          this.#noteFailure(failure.code);
+        }
+
+        // The latch may have come down while this attempt was in flight — or
+        // this very failure may have been the tenth. A place is then settled
+        // as halted here rather than re-established, retried or left pending:
+        // pending is exactly what a cleared restart would resubmit.
+        if (
+          (failure.retryable || failure.code === 'SESSION_EXPIRED') &&
+          !this.#barrier(record.kind)
+        ) {
+          return this.#halt(record);
+        }
+
         // One re-establishment, then the 401 is treated like any other verdict.
         // The key does not change, so the retry replays rather than duplicates.
         if (failure.code === 'SESSION_EXPIRED' && !reestablished) {
           reestablished = true;
           await this.#reestablish();
           continue;
-        }
-
-        if (failure.retryable) {
-          this.#noteFailure(failure.code);
         }
 
         if (!failure.retryable || attempt === this.#maxAttempts) {
@@ -456,11 +469,11 @@ function asDomainError(error: unknown): DomainError {
   );
 }
 
-/** Exponential, and the server's own `Retry-After` wins when it gave one. */
+/** Exponential, and the server's own `Retry-After` wins when it gave one — both under the cap. */
 function backoffMs(attempt: number, retryAfterSeconds?: number): number {
   if (retryAfterSeconds !== undefined && retryAfterSeconds > 0) {
-    return retryAfterSeconds * 1_000;
+    return Math.min(MAX_BACKOFF_MS, retryAfterSeconds * 1_000);
   }
 
-  return BASE_BACKOFF_MS * 2 ** (attempt - 1);
+  return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** (attempt - 1));
 }

@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createRecordingReporter } from '../reporter.js';
 import { StateStore } from '../state/state-store.js';
 import { deriveIdempotencyKey } from './idempotency.js';
-import { OrderGateway } from './order-gateway.js';
+import { MAX_BACKOFF_MS, OrderGateway } from './order-gateway.js';
 
 const NOW_MS = Date.parse('2026-09-02T02:00:00.000Z');
 
@@ -580,6 +580,67 @@ describe('OrderGateway under the kill switch barrier', () => {
     expect(broker.calls).toHaveLength(1);
   });
 
+  /**
+   * The barrier is also asked *after* a failed attempt, before the decision is
+   * left pending or put to sleep. A latch that came down while the request was
+   * in flight must settle the place as halted — a pending place is exactly what
+   * `recoverPending` would resubmit after the operator clears the latch.
+   */
+  it('halts an in-flight place whose final retryable attempt loses the barrier', async () => {
+    let down = false;
+    const { broker, gateway, state } = harness({
+      barrier: () => !down,
+      maxAttempts: 1,
+    });
+
+    broker.placeOrder = async () => {
+      down = true;
+      throw new DomainError('SERVICE_UNAVAILABLE', 'gone');
+    };
+
+    await expect(gateway.place('samsung', BUY, TICK)).resolves.toMatchObject({
+      outcome: 'halted',
+    });
+    expect(state.pendingDecisions()).toStrictEqual([]);
+  });
+
+  it('does not sleep out a backoff once the barrier is down', async () => {
+    let down = false;
+    const slept: number[] = [];
+    const directory = mkdtempSync(join(tmpdir(), 'moi-gateway-nosleep-'));
+    const state = StateStore.open({ directory });
+
+    stores.push(state);
+
+    const broker = fakeBroker();
+    const gateway = new OrderGateway({
+      broker,
+      state,
+      sessionId: () => 's-1',
+      reporter: createRecordingReporter(),
+      reestablishSession: async () => {},
+      now: () => NOW_MS,
+      newDecisionId: () => 'd-1',
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+      maxAttempts: 4,
+      barrier: () => !down,
+    });
+
+    broker.placeOrder = async () => {
+      down = true;
+      throw new DomainError('RATE_LIMITED', 'slow down', {
+        retryAfterSeconds: 300,
+      });
+    };
+
+    await expect(gateway.place('samsung', BUY, TICK)).resolves.toMatchObject({
+      outcome: 'halted',
+    });
+    expect(slept).toStrictEqual([]);
+  });
+
   it('resolves idle() only after every in-flight submission has settled', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -658,5 +719,38 @@ describe('OrderGateway under the kill switch barrier', () => {
     await gateway.place('samsung', BUY, TICK); // 9 more, still under 10
 
     expect(exhausted).toStrictEqual([]);
+  });
+});
+
+/** Design §7.2: exponential backoff, "최대 5분". The server's `Retry-After` is honoured up to that cap. */
+describe('OrderGateway backoff cap', () => {
+  it('caps a Retry-After above five minutes at the cap', async () => {
+    const slept: number[] = [];
+    const directory = mkdtempSync(join(tmpdir(), 'moi-gateway-cap-'));
+    const state = StateStore.open({ directory });
+
+    stores.push(state);
+
+    const gateway = new OrderGateway({
+      broker: fakeBroker([
+        new DomainError('RATE_LIMITED', 'slow down', {
+          retryAfterSeconds: 3_600,
+        }),
+        { id: 'o-1', status: 'OPEN' } as BrokerOrder,
+      ]),
+      state,
+      sessionId: () => 's-1',
+      reporter: createRecordingReporter(),
+      reestablishSession: async () => {},
+      now: () => NOW_MS,
+      newDecisionId: () => 'd-1',
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+    });
+
+    await gateway.place('samsung', BUY, TICK);
+
+    expect(slept).toStrictEqual([MAX_BACKOFF_MS]);
   });
 });

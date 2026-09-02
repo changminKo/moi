@@ -144,11 +144,16 @@ export class FillProcessor {
       ) {
         // Not awaited: the sweep is network work, and this is the event drain
         // chain. `engage` is idempotent, so the replay on every reconnect is
-        // silent after the first.
-        void this.#options.killSwitch?.engage('fill-wedge', error.message, {
-          accountSequence: event.accountSequence,
-          eventType: event.eventType,
-        });
+        // silent after the first. Guarded too: whatever the trigger does, the
+        // error that leaves here is the wedge's own — that is the diagnosis.
+        try {
+          void this.#options.killSwitch?.engage('fill-wedge', error.message, {
+            accountSequence: event.accountSequence,
+            eventType: event.eventType,
+          });
+        } catch {
+          // Reported by the kill switch itself; nothing to add here.
+        }
       }
 
       throw error;

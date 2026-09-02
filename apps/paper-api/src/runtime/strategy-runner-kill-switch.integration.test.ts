@@ -19,9 +19,11 @@ import {
   PaperApiClient,
   type RunnerConfig,
   RunnerSupervisor,
+  StateStore,
 } from '@moi/strategy-runner';
 import { PaperBroker } from '@moi/strategy-sdk';
 import { SMA_CROSSOVER_ID } from '@moi/strategy-sdk/strategies/sma-crossover';
+import { moneyDecimal } from '@moi/trading-core';
 import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
@@ -79,7 +81,8 @@ const PRICES = ['70000', '69000', '68000', '80000'] as const;
 
 async function publishPrice(price: string): Promise<void> {
   const deadline = Date.now() + 30_000;
-  const bid = String(Number(price) - 100);
+  // Exact money, even in a fixture (AGENTS.md rule 5).
+  const bid = moneyDecimal(price).minus('100').toString();
 
   while (Date.now() < deadline) {
     bundle.streamFor('KR').emitOrderBook({
@@ -320,16 +323,68 @@ describe('the kill switch against the real paper API', () => {
         supervisor.close();
       }
 
+      // Before the restart: a place the previous process recorded and never
+      // settled, and a cancel from an interrupted sweep. `recoverPending` meets
+      // the restored barrier — the place must settle as halted without reaching
+      // the ledger, the cancel must go out. This is the gateway barrier's one
+      // path in this suite: once engaged, no tick reaches a strategy, so
+      // nothing else here can produce a place decision.
+      const cancelledId = (
+        await brokerOf(supervisor).broker.getPortfolio(
+          brokerOf(supervisor).sessionId,
+        )
+      ).activeOrders.find((order) => order.symbol === SYMBOL)?.id as string;
+      const seeded = StateStore.open({ directory: stateDir });
+
+      seeded.appendDecision({
+        decisionId: 'd-before-trip',
+        at: new Date().toISOString(),
+        strategy: 'samsung',
+        kind: 'place',
+        reason: 'golden-cross',
+        intent: {
+          market: 'KR',
+          symbol: SYMBOL,
+          side: 'BUY',
+          type: 'MARKET',
+          quantity: '1',
+        },
+        notional: '80000',
+      });
+      seeded.appendDecision({
+        decisionId: `kill:seeded:${cancelledId}`,
+        at: new Date().toISOString(),
+        strategy: 'kill-switch',
+        kind: 'cancel',
+        reason: 'kill switch: interrupted sweep',
+        orderId: cancelledId,
+      });
+      seeded.close();
+
       // Restart on the same state: still engaged, still nothing placed.
+      const restartedReporter = createRecordingReporter();
       const restarted = new RunnerSupervisor({
         config: runnerConfig(stateDir),
-        reporter: createRecordingReporter(),
+        reporter: restartedReporter,
       });
 
       try {
         await restarted.start();
 
         expect(restarted.killSwitch.engaged).toBe(true);
+        expect(restarted.state.pendingDecisions()).toStrictEqual([]);
+        expect(
+          restartedReporter.lines.filter((line) =>
+            line.includes('the place was halted by the kill switch'),
+          ),
+        ).toHaveLength(1);
+        expect(
+          restartedReporter.lines.some(
+            (line) =>
+              line.includes('the cancel was accepted') ||
+              line.includes('the cancel was rejected'),
+          ),
+        ).toBe(true);
 
         for (const price of PRICES) {
           await feedPrice(restarted, price);
@@ -353,12 +408,16 @@ describe('the kill switch against the real paper API', () => {
         source: 'operator',
         reason: 'integration drill',
       });
-      // The sweep's cancels are ordinary, recorded decisions.
+      // The sweep's cancels are ordinary, recorded decisions (two from the
+      // sweep, one seeded above), and the pre-trip place settled as halted.
       expect(
         readFileSync(join(stateDir, 'decisions.ndjson'), 'utf8').match(
           /"decisionId":"kill:[^"]+"/gu,
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(3);
+      expect(
+        readFileSync(join(stateDir, 'submissions.ndjson'), 'utf8'),
+      ).toMatch(/"decisionId":"d-before-trip".*"outcome":"halted"/u);
     },
     TEST_TIMEOUT_MS,
   );

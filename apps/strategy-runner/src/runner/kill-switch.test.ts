@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -9,12 +10,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrokerPortfolio } from '@moi/strategy-sdk';
 import type { StrategyDecision, Tick } from '@moi/strategy-sdk/strategy';
+import { DomainError } from '@moi/trading-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SubmitResult } from '../gateway/order-gateway.js';
 import { createRecordingReporter } from '../reporter.js';
 import { JsonCell } from '../state/json-cell.js';
 import type { DecisionRecord } from '../state/state-store.js';
-import { HEARTBEAT_MS, KillSwitch, MAX_SWEEP_PASSES } from './kill-switch.js';
+import {
+  HEARTBEAT_MS,
+  KillSwitch,
+  MAX_SWEEP_PASSES,
+  SWEEP_IDLE_WAIT_MS,
+} from './kill-switch.js';
 
 const ENGAGED_AT_MS = Date.parse('2026-09-02T02:00:00.000Z');
 const ENGAGED_AT = '2026-09-02T02:00:00.000Z';
@@ -106,6 +113,9 @@ function build(
     readonly portfolios?: readonly BrokerPortfolio[];
     readonly gateway?: ReturnType<typeof fakeGateway>;
     readonly nowMs?: () => number;
+    readonly cell?: JsonCell;
+    /** How the sweep waits out an in-flight submission. Never resolves by default. */
+    readonly wait?: (ms: number) => Promise<void>;
   } = {},
 ) {
   const reporter = createRecordingReporter();
@@ -113,7 +123,7 @@ function build(
   const snapshots = [...(options.portfolios ?? [portfolioOf([])])];
   let reads = 0;
   const killSwitch = new KillSwitch({
-    cell: new JsonCell(join(directory, 'kill-switch.json')),
+    cell: options.cell ?? new JsonCell(join(directory, 'kill-switch.json')),
     gateway,
     portfolio: async () => {
       reads += 1;
@@ -124,9 +134,26 @@ function build(
     },
     reporter,
     now: options.nowMs ?? (() => ENGAGED_AT_MS),
+    wait: options.wait ?? (() => new Promise(() => undefined)),
   });
 
   return { killSwitch, gateway, reporter, reads: () => reads };
+}
+
+/** A cell whose writes fail the way a full or read-only disk fails them. */
+function unwritableCell(): JsonCell {
+  const cell = new JsonCell(join(directory, 'kill-switch.json'));
+
+  cell.write = () => {
+    const error = new Error(
+      'ENOSPC: no space left on device',
+    ) as NodeJS.ErrnoException;
+
+    error.code = 'ENOSPC';
+    throw error;
+  };
+
+  return cell;
 }
 
 const latch = (): Record<string, unknown> =>
@@ -198,6 +225,37 @@ describe('KillSwitch engagement', () => {
     expect(reads).toBe(1);
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(seen.every(Boolean)).toBe(true);
+  });
+
+  /**
+   * Fail closed even when the disk fails: the in-memory barrier closes before
+   * the write, a write failure is reported rather than thrown, and persistence
+   * is retried on later observations so a restart still comes up engaged.
+   */
+  it('stays engaged in memory when the latch cannot be written, reports it, and retries', async () => {
+    const cell = unwritableCell();
+    const { killSwitch, reporter } = build({ cell });
+
+    await expect(
+      killSwitch.engage('operator', 'drill'),
+    ).resolves.toBeUndefined();
+
+    expect(killSwitch.engaged).toBe(true);
+    expect(killSwitch.permits('place')).toBe(false);
+    expect(existsSync(join(directory, 'kill-switch.json'))).toBe(false);
+    expect(reporter.lines).toContain(
+      '[error] the kill switch could not be persisted; it holds in memory but a restart would come up trading code=ENOSPC',
+    );
+
+    // The disk comes back: the next observation writes the latch.
+    cell.write = JsonCell.prototype.write;
+    await killSwitch.observeOperatorFile();
+
+    expect(latch()).toStrictEqual({
+      engagedAt: ENGAGED_AT,
+      source: 'operator',
+      reason: 'drill',
+    });
   });
 
   it('is idempotent: a second engage neither rewrites nor re-reports', async () => {
@@ -288,10 +346,15 @@ describe('KillSwitch operator file', () => {
     });
   });
 
-  it('adopts an operator file found at construction as an operator engagement', () => {
+  /**
+   * Construction reads; `resume` writes. A supervisor being *built* must not
+   * rewrite an operator's file, and when the file is normalised the operator's
+   * own fields (`by`, a ticket) survive beside the runner's three.
+   */
+  it('adopts an operator file found at construction, and normalises it on resume keeping its fields', async () => {
     writeFileSync(
       join(directory, 'kill-switch.json'),
-      JSON.stringify({ reason: 'written before start' }),
+      JSON.stringify({ reason: 'written before start', by: 'oncall' }),
     );
 
     const { killSwitch } = build();
@@ -302,10 +365,45 @@ describe('KillSwitch operator file', () => {
       reason: 'written before start',
     });
     expect(latch()).toStrictEqual({
+      reason: 'written before start',
+      by: 'oncall',
+    });
+
+    await killSwitch.resume();
+
+    expect(latch()).toStrictEqual({
+      by: 'oncall',
       engagedAt: ENGAGED_AT,
       source: 'operator',
       reason: 'written before start',
     });
+  });
+
+  /** A transient read fault is not a kill switch: it is reported and re-read next cycle. */
+  it('does not engage on a read fault that is neither absence nor bad JSON', async () => {
+    mkdirSync(join(directory, 'kill-switch.json'));
+
+    const { killSwitch, reporter } = build();
+
+    await killSwitch.observeOperatorFile();
+
+    expect(killSwitch.engaged).toBe(false);
+    expect(reporter.lines).toStrictEqual([
+      '[warn] the kill-switch file could not be read and will be retried next cycle code=EISDIR',
+    ]);
+  });
+
+  it('masks the reason before it is written to disk', async () => {
+    const { killSwitch } = build();
+
+    await killSwitch.engage(
+      'fill-wedge',
+      'record carried cookie moi_session=abcdef0123456789abcdef0123456789',
+    );
+
+    expect(
+      readFileSync(join(directory, 'kill-switch.json'), 'utf8'),
+    ).not.toContain('abcdef0123456789abcdef0123456789');
   });
 
   it('stays engaged even if the file disappears while running', async () => {
@@ -424,11 +522,42 @@ describe('KillSwitch cancel sweep', () => {
     );
   });
 
-  it('reports a sweep that throws instead of rejecting engage', async () => {
+  /**
+   * A sweep failure is reported by code, never by message: the portfolio read
+   * is a broker call and its message is the server's prose.
+   */
+  it('reports a sweep that throws by its code, not its message, instead of rejecting engage', async () => {
+    const gateway = fakeGateway();
+    let calls = 0;
+    const { killSwitch, reporter } = build({
+      gateway,
+      portfolios: [portfolioOf([order('o-1')])],
+    });
+
+    gateway.submit = async () => {
+      calls += 1;
+      throw new DomainError(
+        'SERVICE_UNAVAILABLE',
+        'opaque-sensitive-server-text',
+      );
+    };
+
+    await expect(
+      killSwitch.engage('operator', 'drill'),
+    ).resolves.toBeUndefined();
+    expect(killSwitch.engaged).toBe(true);
+    expect(calls).toBe(1);
+    expect(reporter.lines.at(-1)).toBe(
+      '[error] the cancel sweep failed code=SERVICE_UNAVAILABLE',
+    );
+    expect(reporter.lines.join('\n')).not.toContain('opaque-sensitive');
+  });
+
+  it('names a non-domain sweep failure by its class only', async () => {
     const gateway = fakeGateway();
 
     gateway.submit = async () => {
-      throw new Error('boom');
+      throw new TypeError('secret-looking detail');
     };
 
     const { killSwitch, reporter } = build({
@@ -436,13 +565,36 @@ describe('KillSwitch cancel sweep', () => {
       portfolios: [portfolioOf([order('o-1')])],
     });
 
-    await expect(
-      killSwitch.engage('operator', 'drill'),
-    ).resolves.toBeUndefined();
-    expect(killSwitch.engaged).toBe(true);
+    await killSwitch.engage('operator', 'drill');
+
     expect(reporter.lines.at(-1)).toBe(
-      '[error] the cancel sweep failed error=boom',
+      '[error] the cancel sweep failed error=TypeError',
     );
+  });
+
+  /**
+   * `idle()` has no upper bound of its own — a submission in a long backoff
+   * holds it — so the sweep waits at most `SWEEP_IDLE_WAIT_MS` and then reads
+   * anyway. An order that settles later is caught by the re-scan or by the next
+   * start's `resume`; leaving resting orders out for the length of a backoff is
+   * the worse failure.
+   */
+  it('stops waiting for idle after the cap and sweeps anyway', async () => {
+    const gateway = fakeGateway({ idle: new Promise(() => undefined) });
+    const waited: number[] = [];
+    const { killSwitch, reads } = build({
+      gateway,
+      portfolios: [portfolioOf([order('o-1')]), portfolioOf([])],
+      wait: async (ms) => {
+        waited.push(ms);
+      },
+    });
+
+    await killSwitch.engage('operator', 'drill');
+
+    expect(waited).toStrictEqual([SWEEP_IDLE_WAIT_MS]);
+    expect(reads()).toBe(2);
+    expect(gateway.submitted).toStrictEqual([`kill:${ENGAGED_AT}:o-1`]);
   });
 });
 

@@ -338,6 +338,24 @@ describe('processing one account event', () => {
     });
   };
 
+  /** The wedge's diagnosis survives a trigger that throws: the original error is what leaves. */
+  it('keeps the wedge error even when the kill switch throws', async () => {
+    const { processor, state } = build(scratch(), {
+      killSwitch: {
+        engage: (() => {
+          throw new Error('disk gone');
+        }) as unknown as (...args: unknown[]) => Promise<void>,
+      },
+    });
+
+    await expect(
+      processor.process(
+        fillEvent('12', [{ id: 'fill-1', accountSequence: '11' }]),
+      ),
+    ).rejects.toMatchObject({ code: 'INVARIANT_VIOLATION' });
+    expect(state.fills.cursor).toBeNull();
+  });
+
   it('processes an ordinary fill without touching the kill switch', async () => {
     const engaged: unknown[] = [];
     const { processor } = build(scratch(), {

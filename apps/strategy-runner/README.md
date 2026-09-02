@@ -4,7 +4,8 @@ The trading bot's process: it reads the market through the paper API, asks each
 configured strategy what to do, filters that through a risk gate, and places the
 orders that survive. It is the runner of
 [`docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md`](../../docs/superpowers/specs/2026-08-30-moi-strategy-runner-design.md),
-at its **phase C** scope, plus **phase E**'s backtest harness in `src/backtest`.
+at its **phase C** scope, plus **phase D**'s kill-switch core (`src/runner/kill-switch.ts`)
+and **phase E**'s backtest harness in `src/backtest`.
 
 ## What is here, and what is not
 
@@ -105,7 +106,7 @@ instrument (§6.3), more than four subscriptions (§5.3), a strategy subscribed 
 an instrument the gate would refuse every order for, a money limit outside the
 exact money domain, and anything the strategy's own parameter schema rejects.
 
-## What the state store holds after phase C
+## What the state store holds after phase D
 
 | File | Shape | Unit of atomicity |
 |---|---|---|
@@ -332,8 +333,10 @@ engaged, no host receives a tick anyway).
 
 ## The kill switch
 
-Design §6's "킬 스위치가 걸리면", in phase D. The latch is written to
-`kill-switch.json` **first**, reported once at `error`, every resting order is
+Design §6's "킬 스위치가 걸리면", in phase D. The in-memory barrier closes, the
+latch is written to `kill-switch.json` (a write the disk refuses is reported and
+retried every cycle — the runner holds engaged in memory meanwhile), it is
+reported once at `error`, every resting order is
 cancelled through the ordinary gateway path (`decisionId`
 `kill:{engagedAt}:{orderId}`, so a re-sweep records nothing twice and a failed
 cancel is a pending decision the next start resubmits), and from then on the
@@ -344,7 +347,12 @@ says `the kill switch is still engaged` every 30 minutes.
 Four things trip it: `maxConsecutiveLosses` or `maxDailyLoss` (design §6 calls
 both "킬 스위치"; the BUY refusal stays too), ten failed submission attempts in a
 row across decisions (design §7.2), an unexplainable fill (§16.46 — the wedge now
-brings the barrier down with it), and an operator.
+brings the barrier down with it), and an operator. The gateway asks the barrier
+before every attempt **and after every failed one**, so a latch that comes down
+while a request is in flight still settles that place as halted rather than
+leaving it pending for a cleared restart to resubmit; backoffs are capped at
+five minutes (§7.2) and the sweep waits at most five seconds for in-flight
+submissions before it reads the portfolio.
 
 **To engage it by hand**, write `{"reason": "…"}` to `kill-switch.json` in
 `BOT_STATE_DIR`; the runner notices on its next cycle. **To clear it**, delete the
