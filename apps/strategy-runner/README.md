@@ -440,6 +440,15 @@ real one, and each is stated in the module that causes it:
   replay cannot reproduce a tick that was already stale when the runner saw it,
   because the log has no second timestamp to say so.
 
+What it *does* guarantee, because the report is worthless without it: **a
+simulated wallet never goes negative.** A resting buy reserves what the fill
+will cost — notional *plus* the fee that fill charges, which a resting limit
+determines exactly at submit time — so an order the account cannot pay for is
+refused when it is placed rather than discovered when it fills. Reserving the
+notional alone was a real defect, found by a reviewer who ran the code: the
+wallet went to `-690` with no refusal and no flag. `#settle` asserts the
+invariant independently and fails closed if anything ever reaches it again.
+
 `src/backtest/boundary.test.ts` pins the rule that makes the harness safe to
 point at anything: **no module under `src/backtest` may reach the network.** The
 package manifest cannot express that — `PaperApiClient` is legitimately in the

@@ -69,11 +69,25 @@ import {
  * public fee endpoint, so the schedule comes from the backtest plan and can
  * simply be wrong. §8.3 requires the report to say so, and it does.
  *
- * **Cash is reserved at notional, without the fee.** A resting buy holds
- * `limitPrice × quantity`; the fee comes out of what is left when it fills. The
- * real ledger's reservation is its own business and this does not claim to
- * mirror it — it exists so that two resting buys cannot both spend the same
- * money.
+ * **Cash is reserved at what the fill will cost, fee included.** A resting buy
+ * holds `limitPrice × quantity` *plus* the commission that fill will charge.
+ * That is exact rather than conservative: a resting limit fills at its own
+ * limit price, for its own quantity, in its own market, so the fee is fully
+ * determined the moment the order is accepted — it is the same `notional + fee`
+ * the immediate-fill path checks, so one rule covers both. Reserving the
+ * notional alone was a real defect, found by a reviewer who ran the code: the
+ * fill paid a fee nothing had been held for and the wallet went to `-690` with
+ * no refusal and no flag. The real ledger's reservation is its own business and
+ * this does not claim to mirror it — this one exists so that two resting buys
+ * cannot both spend the same money, and so that an accepted order is one the
+ * account can actually pay for.
+ *
+ * **A wallet never goes negative.** The reservation above makes that true by
+ * construction, and `#settle` asserts it anyway, because an invariant that
+ * holds only by construction is one a later change can quietly break. A
+ * settlement that would take a balance below zero fails closed (AGENTS.md rule
+ * 6): an aborted replay is a message, where a negative wallet is a report
+ * nobody can tell is wrong.
  */
 
 export const BACKTEST_SESSION_ID = 'backtest';
@@ -134,7 +148,7 @@ interface RestingOrder {
   readonly side: Side;
   readonly quantity: Quantity;
   readonly limitPrice: DecimalString;
-  /** Cash held against a buy, or `null` for a sell. */
+  /** What the fill will cost — notional plus fee — or `null` for a sell. */
   readonly reservedCash: DecimalString | null;
 }
 
@@ -256,11 +270,11 @@ export class SimulatedExchange {
       'simulated order notional',
     );
 
-    if (intent.side === 'BUY') {
-      const spendable = this.#cash.get(model.currency) ?? '0';
-      // A fill also pays the fee, so it is charged against the same balance the
-      // notional was checked against; a resting order holds the notional alone.
-      const needed = fills
+    // What this order costs when it settles, whether that is now or later. A
+    // resting limit fills at `price` — its own limit — so this is the same
+    // number either way, which is exactly why the reservation can be exact.
+    const cost =
+      intent.side === 'BUY'
         ? exact(
             money(notional).plus(
               model.calculate({
@@ -274,10 +288,13 @@ export class SimulatedExchange {
           )
         : notional;
 
-      if (money(spendable).lt(needed)) {
+    if (intent.side === 'BUY') {
+      const spendable = this.#cash.get(model.currency) ?? '0';
+
+      if (money(spendable).lt(cost)) {
         return refuse(
           'INSUFFICIENT_CASH',
-          `${needed} ${model.currency} is needed and ${spendable} is available`,
+          `${cost} ${model.currency} is needed and ${spendable} is available`,
         );
       }
     }
@@ -299,7 +316,7 @@ export class SimulatedExchange {
       side: intent.side,
       quantity: intent.quantity,
       limitPrice: price,
-      reservedCash: intent.side === 'BUY' ? notional : null,
+      reservedCash: intent.side === 'BUY' ? cost : null,
     });
 
     this.#resting.push(order);
@@ -594,10 +611,21 @@ export class SimulatedExchange {
         ? money(notional).plus(fee).negated()
         : money(notional).minus(fee);
 
-    this.#cash.set(
-      model.currency,
-      exact(money(this.#cash.get(model.currency) ?? '0').plus(delta), 'cash'),
+    const settled = exact(
+      money(this.#cash.get(model.currency) ?? '0').plus(delta),
+      'cash',
     );
+
+    // Checked before it is stored, so the refusal names a balance that never
+    // existed rather than one this method already wrote.
+    if (money(settled).isNegative()) {
+      throw new DomainError(
+        'INVARIANT_VIOLATION',
+        `settling ${order.side} ${order.quantity} ${instrumentKey(order)} at ${price} would take the ${model.currency} balance below zero to ${settled}; a simulated wallet may not go negative`,
+      );
+    }
+
+    this.#cash.set(model.currency, settled);
     this.#paid.set(
       model.currency,
       exact(

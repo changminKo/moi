@@ -183,12 +183,14 @@ describe('a limit order', () => {
       tick('70000', { ask: '70100' }),
     );
 
+    // 69000 × 10 = 690000 of notional, plus the 690 commission the fill will
+    // charge — the reservation is what the fill costs, not part of it.
     expect(market.portfolio().wallets).toStrictEqual([
       {
         currency: 'KRW',
         total: '700000',
-        available: '10000',
-        reserved: '690000',
+        available: '9310',
+        reserved: '690690',
       },
     ]);
     expect(
@@ -221,6 +223,86 @@ describe('a limit order', () => {
       available: '6',
       reserved: '4',
     });
+  });
+
+  /**
+   * The case a Codex review found by running the code: a resting buy reserved
+   * its notional and nothing else, so the fill — which also pays the fee —
+   * took the wallet to `-690` with no refusal and no flag. A negative wallet is
+   * the one thing this harness must never report, because the whole reason it
+   * models cash at all is to answer "did the strategy have the money".
+   *
+   * The reservation is now what the fill will *cost*. That is exact rather than
+   * conservative: a resting limit fills at its own limit price for its own
+   * quantity in its own market, so the fee is fully determined at submit time —
+   * the same `notional + fee` the immediate-fill path already checks. One rule,
+   * both paths, and the failure is removed rather than detected.
+   */
+  it('refuses a resting buy that could not pay the fee when it fills', () => {
+    // Exactly the notional and not a won more.
+    const market = exchange('690000');
+    const result = market.submit(
+      intent('BUY', '10', '69000'),
+      tick('70000', { ask: '70100' }),
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'rejected',
+      code: 'INSUFFICIENT_CASH',
+    });
+    expect(market.portfolio().wallets[0]).toStrictEqual({
+      currency: 'KRW',
+      total: '690000',
+      available: '690000',
+      reserved: '0',
+    });
+  });
+
+  it('spends a fully reserved buy down to exactly zero, never below', () => {
+    // 690000 notional + 690 commission, to the won.
+    const market = exchange('690690');
+
+    expect(
+      market.submit(
+        intent('BUY', '10', '69000'),
+        tick('70000', { ask: '70100' }),
+      ),
+    ).toMatchObject({ outcome: 'resting' });
+    expect(market.portfolio().wallets[0]).toMatchObject({
+      available: '0',
+      reserved: '690690',
+    });
+
+    expect(market.match(tick('68900', { ask: '68950' }, 1))).toHaveLength(1);
+    expect(market.portfolio().wallets[0]).toStrictEqual({
+      currency: 'KRW',
+      total: '0',
+      available: '0',
+      reserved: '0',
+    });
+  });
+
+  /**
+   * The guard behind the fix. Reserving the fill cost makes the resting-buy
+   * path safe by construction, but "no wallet goes negative" is the invariant
+   * this class claims, and an invariant that is only true by construction is
+   * one a later change can quietly break. So a settlement that would take a
+   * wallet below zero fails closed (AGENTS.md rule 6) rather than reporting the
+   * negative balance — an aborted replay is a message, a negative wallet is a
+   * report nobody can tell is wrong.
+   */
+  it('fails closed rather than settling a wallet below zero', () => {
+    const market = new SimulatedExchange({
+      fees: [{ ...(FEES[0] as FeeScheduleConfig), sellTaxRate: '2' }],
+      cash: [{ currency: 'KRW', amount: '700700' }],
+    });
+
+    market.submit(intent('BUY', '10'), tick('70000', { ask: '70000' }));
+
+    expect(market.portfolio().wallets[0]).toMatchObject({ available: '0' });
+    expect(() =>
+      market.submit(intent('SELL', '10'), tick('70000', { bid: '70000' }, 1)),
+    ).toThrow(/below zero|negative/u);
   });
 
   it('lists a resting order as open so the risk gate can count it', () => {
