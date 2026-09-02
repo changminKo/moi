@@ -119,7 +119,10 @@ PostgreSQL, and Redis. Its `finally` path cancelled all test orders and restored
 - [x] Trivy 0.74.0 reports zero HIGH/CRITICAL findings for both final images:
   paper-api Alpine OS `0`, Node packages `0`; web Alpine OS `0`, language
   packages `0`.
-- [ ] Trivy reports zero HIGH/CRITICAL findings for the third image, `strategy-runner`, on its first publish (phase D, #93) — recorded from the `Publish images` run on `main`.
+- [x] Trivy reports zero HIGH/CRITICAL findings for the third image,
+  `strategy-runner`, on its first publish (phase D, #101): Alpine 3.23.5 OS `0`,
+  node packages `0` (`Publish images` run 33656031983 on `main` `4217556`,
+  2026-09-02T16:42Z; the `main` tag moved only after that clean scan).
 - [x] Deployment contract, production build, and Playwright verify that browser
   artifacts contain no provider credential, admin credential, database URL,
   or real-account order route.
