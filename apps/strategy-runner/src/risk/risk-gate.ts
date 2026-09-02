@@ -43,16 +43,15 @@ import { utcDay } from '../state/state-store.js';
  * which is all §1 row 7 ever asked for. Nothing is counted in memory, so there
  * is nothing for a restart to reset.
  *
- * ## What a tripped loss limit does, and what it does not do yet
+ * ## What a tripped loss limit does
  *
- * It refuses new entries, like every other limit here, and exits stay open. It
- * does **not** cancel the resting orders that are already out, and it does not
- * stop the runner: that is the submission barrier of §7.2, which design §11
- * puts in phase D. The split is deliberate rather than a gap left open — a
- * limit that refuses entries is complete and safe on its own, and the barrier
- * is a different mechanism with a different failure mode (an in-flight
- * submission racing a cancel sweep) that deserves its own phase and its own
- * test.
+ * It refuses new entries, like every other limit here, and exits stay open.
+ * Since phase D it also engages the kill switch — design §6 calls both limits
+ * "킬 스위치", not "거부" — but not from here: the gate does not know the kill
+ * switch exists. It answers `lossLimitBreach()` and the supervisor asks that
+ * once a cycle, so cancelling the resting orders and stopping the runner stay
+ * a different mechanism with its own failure mode (an in-flight submission
+ * racing a cancel sweep) and its own tests.
  *
  * ## The gate limits risk-increasing orders
  *
@@ -235,30 +234,10 @@ export class RiskGate {
       );
     }
 
-    const losses = this.#state.fills.consecutiveLosses();
+    const breach = this.lossLimitBreach();
 
-    if (losses >= this.#limits.maxConsecutiveLosses) {
-      return refuse(
-        `${losses} closing fills in a row lost, at the limit of ${this.#limits.maxConsecutiveLosses}`,
-      );
-    }
-
-    const realizedToday = moneyDecimal(
-      this.#state.fills.realizedPnlOn(
-        utcDay(new Date(this.#now()).toISOString()),
-      ),
-    );
-
-    // Only a *loss* trips it. A day up on the session is not a day to stop
-    // trading, and comparing a signed PnL against a positive limit directly
-    // would refuse every entry on a profitable day.
-    if (
-      realizedToday.isNegative() &&
-      realizedToday.abs().gte(this.#limits.maxDailyLoss)
-    ) {
-      return refuse(
-        `today has realised ${realizedToday.toString()}, at the daily loss limit of ${this.#limits.maxDailyLoss}`,
-      );
+    if (breach !== null) {
+      return refuse(breach);
     }
 
     const held =
@@ -274,6 +253,38 @@ export class RiskGate {
     }
 
     return allow;
+  }
+
+  /**
+   * §6.4's two loss limits, asked as a question rather than as a verdict on an
+   * order. `evaluate` refuses a BUY on the same answer; phase D's supervisor
+   * asks it once a cycle and hands a non-null answer to the kill switch (design
+   * §6: both limits are "킬 스위치", not merely "거부"). One reading, two callers.
+   */
+  lossLimitBreach(): string | null {
+    const losses = this.#state.fills.consecutiveLosses();
+
+    if (losses >= this.#limits.maxConsecutiveLosses) {
+      return `${losses} closing fills in a row lost, at the limit of ${this.#limits.maxConsecutiveLosses}`;
+    }
+
+    const realizedToday = moneyDecimal(
+      this.#state.fills.realizedPnlOn(
+        utcDay(new Date(this.#now()).toISOString()),
+      ),
+    );
+
+    // Only a *loss* trips it. A day up on the session is not a day to stop
+    // trading, and comparing a signed PnL against a positive limit directly
+    // would refuse every entry on a profitable day.
+    if (
+      realizedToday.isNegative() &&
+      realizedToday.abs().gte(this.#limits.maxDailyLoss)
+    ) {
+      return `today has realised ${realizedToday.toString()}, at the daily loss limit of ${this.#limits.maxDailyLoss}`;
+    }
+
+    return null;
   }
 
   async #tradingHours(market: Market): Promise<RiskVerdict | null> {
