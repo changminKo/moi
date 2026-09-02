@@ -3,12 +3,9 @@ import {
   capFractionDigits,
   formatDecimal,
   isZeroDecimal,
+  MONEY_DISPLAY_FRACTION_DIGITS,
 } from '../../lib/format-number';
 import type { RealizedPnlEntry } from './realized-pnl';
-
-// The same render cap the positions table applies to money: the fold's figure
-// is exact and stays so; only what is drawn is shortened.
-const MAX_DISPLAYED_FRACTION_DIGITS = 2;
 
 export type PnlTone = 'pnl-gain' | 'pnl-loss' | undefined;
 
@@ -24,7 +21,7 @@ export function formatRealizedPnl(entry: RealizedPnlEntry): {
 } {
   const capped = capFractionDigits(
     entry.realizedPnl,
-    MAX_DISPLAYED_FRACTION_DIGITS,
+    MONEY_DISPLAY_FRACTION_DIGITS,
   );
   const tone: PnlTone = isZeroDecimal(capped)
     ? undefined

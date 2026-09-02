@@ -6,7 +6,7 @@ import {
   type PositionCost,
 } from '@moi/trading-core';
 import type { Decimal } from 'decimal.js';
-import { asCurrency, type Currency } from '../../lib/currency';
+import { asCurrency, CURRENCIES, type Currency } from '../../lib/currency';
 
 /**
  * Realized profit and loss, folded on the client from the session's fills.
@@ -31,14 +31,23 @@ import { asCurrency, type Currency } from '../../lib/currency';
  * session `fillSequence` is assigned in commit order (§16.37), which is the
  * order the ledger itself applied the fills in.
  *
+ * ## Keying
+ *
+ * Positions are keyed by `(market, symbol)`, as the ledger keys them
+ * (`unique (session_id, market_code, symbol)`), never by symbol alone: the
+ * same ticker on two markets settles in two currencies and is two positions.
+ * `realizedKey` is the one place the composite key is spelled.
+ *
  * ## Failure shape
  *
- * A symbol whose rows cannot be folded — a field missing or unreadable, a
+ * A position whose rows cannot be folded — a field missing or unreadable, a
  * sell larger than what was held, fills that disagree about their currency —
- * is reported in `unavailable` and left out of `bySymbol` and `totals`. The
- * other symbols are unaffected. Nothing here throws: this runs on the render
- * path of a page with no error boundary (#73), and a dash beside one symbol
- * is the right size of failure for one bad row.
+ * is reported in `unavailable` with the reason, and left out of `byPosition`
+ * and `totals`. The other positions are unaffected. Nothing here throws:
+ * this runs on the render path of a page with no error boundary (#73), and a
+ * dash beside one row is the right size of failure for one bad row. The
+ * reason is kept rather than swallowed so the cell can say it and a reader
+ * can tell a data fault from a coding one.
  *
  * ## Precision caveat (#81)
  *
@@ -60,13 +69,18 @@ export interface RealizedPnlTotal {
   readonly realizedPnl: DecimalString;
 }
 
-export interface RealizedPnlSummary {
-  readonly bySymbol: ReadonlyMap<string, RealizedPnlEntry>;
-  /** One row per currency any folded symbol settled in; KRW first. */
+export interface RealizedPnlReport {
+  /** Keyed by `realizedKey(market, symbol)`. */
+  readonly byPosition: ReadonlyMap<string, RealizedPnlEntry>;
+  /** One row per currency any folded position settled in; KRW first. */
   readonly totals: readonly RealizedPnlTotal[];
-  /** Symbols whose fills could not be folded; see the module comment. */
-  readonly unavailable: ReadonlySet<string>;
+  /** `realizedKey` → why that position could not be folded. */
+  readonly unavailable: ReadonlyMap<string, string>;
 }
+
+/** The composite position key; U+0000 cannot occur in a market or symbol. */
+export const realizedKey = (market: string, symbol: string): string =>
+  `${market}\u0000${symbol}`;
 
 type Row = Readonly<Record<string, unknown>>;
 
@@ -79,9 +93,8 @@ interface OrderedFill {
   readonly currency: Currency;
 }
 
-const CURRENCY_ORDER: readonly Currency[] = ['KRW', 'USD'];
 const FILL_SEQUENCE = /^\d{1,19}$/;
-const EMPTY_POSITION = (symbol: string): PositionCost => ({
+const emptyPosition = (symbol: string): PositionCost => ({
   symbol,
   quantity: '0',
   totalCost: '0',
@@ -91,53 +104,64 @@ const EMPTY_POSITION = (symbol: string): PositionCost => ({
 const text = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined;
 
-/** The fields the fold needs, or `undefined` when any is missing. */
-function readFill(row: Row): OrderedFill | undefined {
+/** The fields the fold needs; throws naming the first one that is unusable. */
+function readFill(row: Row): OrderedFill {
   const sequence = text(row.fillSequence);
+  if (sequence === undefined || !FILL_SEQUENCE.test(sequence))
+    throw new Error('fill has no readable fillSequence');
   const side = row.side;
+  if (side !== 'BUY' && side !== 'SELL')
+    throw new Error('fill has no readable side');
   const price = text(row.price);
+  if (price === undefined) throw new Error('fill has no readable price');
   const quantity = text(row.quantity);
+  if (quantity === undefined) throw new Error('fill has no readable quantity');
   const fee = text(row.fee);
+  if (fee === undefined) throw new Error('fill has no readable fee');
   const currency = asCurrency(row.currency);
-  if (
-    sequence === undefined ||
-    !FILL_SEQUENCE.test(sequence) ||
-    (side !== 'BUY' && side !== 'SELL') ||
-    price === undefined ||
-    quantity === undefined ||
-    fee === undefined ||
-    currency === undefined
-  )
-    return undefined;
+  if (currency === undefined) throw new Error('fill has no known currency');
   return { sequence: BigInt(sequence), side, price, quantity, fee, currency };
 }
 
-/** Every fill row in the snapshot, grouped by symbol, unread. */
-function groupBySymbol(orders: readonly Row[]): ReadonlyMap<string, Row[]> {
-  const groups = new Map<string, Row[]>();
+interface Group {
+  readonly market: string;
+  readonly symbol: string;
+  readonly rows: Row[];
+}
+
+/**
+ * Every fill row in the snapshot, grouped by position key, unread. A row with
+ * no market or symbol has no position to belong to and is reported under a key
+ * of its own rather than dropped. The arrays are appended in place: they are
+ * local to this function, and a copy per row would make the grouping
+ * quadratic in the session's fill count on the render path.
+ */
+function groupByPosition(orders: readonly Row[]): ReadonlyMap<string, Group> {
+  const groups = new Map<string, Group>();
   for (const order of orders) {
     if (!Array.isArray(order.fills)) continue;
     for (const fill of order.fills as unknown[]) {
       if (typeof fill !== 'object' || fill === null) continue;
       const row = fill as Row;
-      const symbol = text(row.symbol);
-      if (symbol === undefined) continue;
-      groups.set(symbol, [...(groups.get(symbol) ?? []), row]);
+      const market = text(row.market) ?? '';
+      const symbol = text(row.symbol) ?? '';
+      const key = realizedKey(market, symbol);
+      const group = groups.get(key);
+      if (group) group.rows.push(row);
+      else groups.set(key, { market, symbol, rows: [row] });
     }
   }
   return groups;
 }
 
-function foldSymbol(symbol: string, rows: readonly Row[]): RealizedPnlEntry {
-  const fills = rows.map((row) => {
-    const fill = readFill(row);
-    if (fill === undefined) throw new Error('unreadable fill');
-    return fill;
-  });
+function foldPosition({ market, symbol, rows }: Group): RealizedPnlEntry {
+  if (market === '') throw new Error('fill has no readable market');
+  if (symbol === '') throw new Error('fill has no readable symbol');
+  const fills = rows.map(readFill);
   const [first] = fills;
   if (first === undefined) throw new Error('no fills');
   if (fills.some((fill) => fill.currency !== first.currency))
-    throw new Error('mixed currencies');
+    throw new Error('fills disagree about the currency');
   const ordered = [...fills].sort((a, b) =>
     a.sequence < b.sequence ? -1 : a.sequence > b.sequence ? 1 : 0,
   );
@@ -150,7 +174,7 @@ function foldSymbol(symbol: string, rows: readonly Row[]): RealizedPnlEntry {
         quantity: fill.quantity,
         fee: fill.fee,
       }),
-    EMPTY_POSITION(symbol),
+    emptyPosition(symbol),
   );
   return { realizedPnl: position.realizedPnl, currency: first.currency };
 }
@@ -169,7 +193,7 @@ function sumByCurrency(
       ),
     );
   }
-  return CURRENCY_ORDER.flatMap((currency) => {
+  return CURRENCIES.flatMap((currency) => {
     const total = sums.get(currency);
     return total === undefined
       ? []
@@ -177,21 +201,29 @@ function sumByCurrency(
   });
 }
 
+/** What a fold failure says: the core's error code when it has one. */
+const reasonOf = (error: unknown): string =>
+  error instanceof Error
+    ? 'code' in error && typeof error.code === 'string'
+      ? `${error.code}: ${error.message}`
+      : error.message
+    : String(error);
+
 export function realizedPnlFromOrders(
   orders: readonly Row[],
-): RealizedPnlSummary {
-  const bySymbol = new Map<string, RealizedPnlEntry>();
-  const unavailable = new Set<string>();
-  for (const [symbol, rows] of groupBySymbol(orders)) {
+): RealizedPnlReport {
+  const byPosition = new Map<string, RealizedPnlEntry>();
+  const unavailable = new Map<string, string>();
+  for (const [key, group] of groupByPosition(orders)) {
     try {
-      bySymbol.set(symbol, foldSymbol(symbol, rows));
-    } catch {
-      unavailable.add(symbol);
+      byPosition.set(key, foldPosition(group));
+    } catch (error) {
+      unavailable.set(key, reasonOf(error));
     }
   }
   return {
-    bySymbol,
-    totals: sumByCurrency(bySymbol.values()),
+    byPosition,
+    totals: sumByCurrency(byPosition.values()),
     unavailable,
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { realizedPnlFromOrders } from './realized-pnl';
+import { realizedKey, realizedPnlFromOrders } from './realized-pnl';
 
 // Fill rows as the snapshot's `activeOrders[].fills` carries them: the full
 // `FillRecord` from `fillRecord()` (spec §16.45), typed `unknown` at this
@@ -38,7 +38,7 @@ describe('realizedPnlFromOrders', () => {
       ),
     ]);
     // (220 − 1) − (200 + 1)
-    expect(summary.bySymbol.get('AAPL')).toEqual({
+    expect(summary.byPosition.get(realizedKey('US', 'AAPL'))).toEqual({
       realizedPnl: '18',
       currency: 'USD',
     });
@@ -62,7 +62,9 @@ describe('realizedPnlFromOrders', () => {
     // The sell's order comes first in `activeOrders`; a naive array walk would
     // sell before buying and reject the sequence.
     const summary = realizedPnlFromOrders([order(sell), order(buy)]);
-    expect(summary.bySymbol.get('AAPL')?.realizedPnl).toBe('20');
+    expect(summary.byPosition.get(realizedKey('US', 'AAPL'))?.realizedPnl).toBe(
+      '20',
+    );
     expect(summary.unavailable.size).toBe(0);
   });
 
@@ -73,14 +75,16 @@ describe('realizedPnlFromOrders', () => {
         fill({ side: 'SELL', quantity: '1', price: '110' }),
       ),
     ]);
-    expect(summary.bySymbol.get('AAPL')?.realizedPnl).toBe('10');
+    expect(summary.byPosition.get(realizedKey('US', 'AAPL'))?.realizedPnl).toBe(
+      '10',
+    );
   });
 
   it('reports zero for a symbol that has only been bought', () => {
     const summary = realizedPnlFromOrders([
       order(fill({ side: 'BUY', quantity: '3', price: '100' })),
     ]);
-    expect(summary.bySymbol.get('AAPL')).toEqual({
+    expect(summary.byPosition.get(realizedKey('US', 'AAPL'))).toEqual({
       realizedPnl: '0',
       currency: 'USD',
     });
@@ -117,6 +121,52 @@ describe('realizedPnlFromOrders', () => {
     ]);
   });
 
+  it('keeps the same symbol on two markets apart, as the ledger does', () => {
+    const summary = realizedPnlFromOrders([
+      order(
+        fill({ symbol: 'DUAL', market: 'US', currency: 'USD', side: 'BUY' }),
+        fill({
+          symbol: 'DUAL',
+          market: 'US',
+          currency: 'USD',
+          side: 'SELL',
+          price: '105',
+        }),
+      ),
+      order(
+        fill({
+          symbol: 'DUAL',
+          market: 'KR',
+          currency: 'KRW',
+          side: 'BUY',
+          price: '1000',
+        }),
+        fill({
+          symbol: 'DUAL',
+          market: 'KR',
+          currency: 'KRW',
+          side: 'SELL',
+          price: '900',
+        }),
+      ),
+    ]);
+    expect(summary.byPosition.get(realizedKey('US', 'DUAL'))?.realizedPnl).toBe(
+      '5',
+    );
+    expect(summary.byPosition.get(realizedKey('KR', 'DUAL'))?.realizedPnl).toBe(
+      '-100',
+    );
+    expect(summary.unavailable.size).toBe(0);
+  });
+
+  it('marks a row without a market unavailable rather than guessing one', () => {
+    const summary = realizedPnlFromOrders([
+      order(fill({ market: undefined, side: 'BUY' })),
+    ]);
+    expect(summary.byPosition.size).toBe(0);
+    expect(summary.unavailable.size).toBe(1);
+  });
+
   it('marks a symbol unavailable when one of its rows cannot be read, leaving the others intact', () => {
     const summary = realizedPnlFromOrders([
       order(
@@ -128,9 +178,14 @@ describe('realizedPnlFromOrders', () => {
         fill({ symbol: 'MSFT', side: 'SELL', quantity: '1', price: '310' }),
       ),
     ]);
-    expect(summary.unavailable).toEqual(new Set(['AAPL']));
-    expect(summary.bySymbol.has('AAPL')).toBe(false);
-    expect(summary.bySymbol.get('MSFT')?.realizedPnl).toBe('10');
+    expect([...summary.unavailable.keys()]).toEqual([
+      realizedKey('US', 'AAPL'),
+    ]);
+    expect(summary.unavailable.get(realizedKey('US', 'AAPL'))).toMatch(/side/);
+    expect(summary.byPosition.has(realizedKey('US', 'AAPL'))).toBe(false);
+    expect(summary.byPosition.get(realizedKey('US', 'MSFT'))?.realizedPnl).toBe(
+      '10',
+    );
     expect(summary.totals).toEqual([{ currency: 'USD', realizedPnl: '10' }]);
   });
 
@@ -141,7 +196,9 @@ describe('realizedPnlFromOrders', () => {
         fill({ side: 'SELL', quantity: '2', price: '110' }),
       ),
     ]);
-    expect(summary.unavailable).toEqual(new Set(['AAPL']));
+    expect(summary.unavailable.get(realizedKey('US', 'AAPL'))).toMatch(
+      /INSUFFICIENT_AVAILABLE_POSITION/,
+    );
     expect(summary.totals).toEqual([]);
   });
 
@@ -152,8 +209,10 @@ describe('realizedPnlFromOrders', () => {
         fill({ side: 'SELL', quantity: '1', price: '110', currency: 'KRW' }),
       ),
     ]);
-    expect(summary.unavailable).toEqual(new Set(['AAPL']));
-    expect(summary.bySymbol.has('AAPL')).toBe(false);
+    expect([...summary.unavailable.keys()]).toEqual([
+      realizedKey('US', 'AAPL'),
+    ]);
+    expect(summary.byPosition.has(realizedKey('US', 'AAPL'))).toBe(false);
   });
 
   it('marks a symbol unavailable when a row has no readable fillSequence to order it by', () => {
@@ -168,12 +227,14 @@ describe('realizedPnlFromOrders', () => {
         fill({ side: 'SELL', quantity: '1', price: '110' }),
       ),
     ]);
-    expect(summary.unavailable).toEqual(new Set(['AAPL']));
+    expect([...summary.unavailable.keys()]).toEqual([
+      realizedKey('US', 'AAPL'),
+    ]);
   });
 
   it('answers empty for a session with no fills', () => {
     const summary = realizedPnlFromOrders([order(), { id: 'no-fills-field' }]);
-    expect(summary.bySymbol.size).toBe(0);
+    expect(summary.byPosition.size).toBe(0);
     expect(summary.totals).toEqual([]);
     expect(summary.unavailable.size).toBe(0);
   });

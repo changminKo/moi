@@ -25,6 +25,14 @@ export function formatDecimal(value: string): string {
 }
 
 /**
+ * The one render cap every money column shares — wallet balances, the FX
+ * ticket, the order ticket's estimate, average cost, realized P&L. The values
+ * behind them are exact (ten-place quotients, eighty-digit sums); only what is
+ * drawn is shortened, and it is shortened the same everywhere.
+ */
+export const MONEY_DISPLAY_FRACTION_DIGITS = 2;
+
+/**
  * Rounds the fraction to at most `maxDigits` places without padding a
  * shorter fraction out to that length — "233.3" stays "233.3", only
  * "233.3331" becomes "233.33". This is a render-boundary cap: the value it

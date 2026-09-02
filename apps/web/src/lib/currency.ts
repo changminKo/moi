@@ -11,6 +11,9 @@ export type Currency = 'KRW' | 'USD';
  */
 const SYMBOLS: Readonly<Record<Currency, string>> = { KRW: '₩', USD: '$' };
 
+/** Every currency this client knows, in the order a list of them is shown. */
+export const CURRENCIES: readonly Currency[] = ['KRW', 'USD'];
+
 /**
  * Narrows a currency off the wire. The fill rows carry one now, but they are
  * `Record<string, unknown>` at this boundary and anything unrecognised must

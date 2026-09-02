@@ -237,11 +237,16 @@ test('reports the profit a round trip realized, per symbol and for the session',
   // realized column, and this is the client folding the snapshot's fills
   // (`realized-pnl.ts`) — the e2e is what proves the fold sees the same rows
   // the ledger wrote, in the order it wrote them.
-  const held = page
-    .getByRole('region', { name: 'Positions', exact: true })
-    .getByRole('row', { name: /AAPL/ });
-  await expect(held).toContainText('$10');
+  // Exact, not a substring: `$100` and `$10.50` must not pass for `$10`.
   await expect(
-    page.getByRole('region', { name: 'Realized P&L' }),
-  ).toContainText('$10');
+    page
+      .getByRole('region', { name: 'Positions', exact: true })
+      .getByRole('row', { name: /AAPL/ })
+      .getByText('$10', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole('region', { name: 'Realized P&L' })
+      .getByText('$10', { exact: true }),
+  ).toBeVisible();
 });
