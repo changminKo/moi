@@ -53,7 +53,7 @@ class KillSwitch {
 - **해제는 사람이 파일을 지우고 재시작한다**(설계 §6, 자동 해제 없음). 프로세스가 도는 동안 파일이 사라져도 래치는 풀리지 않는다 — 메모리의 `engaged` 가 진실이고 파일은 재시작을 위한 것이다. "지우면 바로 재개" 는 반쯤 지운 운영자에게 반쯤 도는 봇을 준다.
 - **전이에서만 보고한다.** 첫 `engage` 가 `error` 한 줄(`the kill switch is engaged; new orders are refused and resting orders are being cancelled`, fields: `source`, `reason`, 추가 필드). 이후 `engage` 호출은 조용하다 — wedge 는 재연결마다 같은 이벤트를 다시 던지고, 그때마다 임베드를 내면 신호가 죽는다. 30분 heartbeat 는 별도의 `warn` 이다.
 - **운영자 트립**: 사람이 `{"reason":"…"}` 를 `kill-switch.json` 에 쓰면 다음 cycle 에 `engage('operator', reason)`. 해제와 대칭이고 비용은 stat 하나다. 파일에 `reason` 이 없거나 JSON 이 아니면 `reason: 'operator file present'` 로 건다 — 킬 스위치 파일을 읽지 못해서 거래를 계속하는 쪽이 틀린 방향이다.
-- 재시작 시 파일이 있으면 생성자에서 `engaged = true` 로 시작하고 `start()` 의 `resume()` 이 그 사실을 `error` 로 한 번 보고한다(재시작마다 한 번 — 컨테이너가 다시 뜰 때마다 사람이 봐야 하는 상태다). 그리고 `resume()` 이 스윕을 **다시** 돈다 — 첫 스윕 도중 죽었을 때 기록되지 못한 주문을 잡는 유일한 길이고, id 가 같아 두 번 기록·제출되지 않는다.
+- 재시작 시 파일이 있으면 생성자에서 `engaged = true` 로 시작하고 `start()` 의 `resume()` 이 그 사실을 `error` 로 한 번 보고한다(재시작마다 한 번 — 컨테이너가 다시 뜰 때마다 사람이 봐야 하는 상태다). 그리고 `resume()` 이 스윕을 **다시** 돈다 — 첫 스윕 도중 죽었을 때 기록되지 못한 주문을 잡는 유일한 길이고, id 가 같아 두 번 기록·제출되지 않는다. `resume()` 은 **생성자에서 읽은 래치에만, 한 번만** 말한다: `recoverPending` 이 실패를 소진해 같은 실행에서 걸린 래치는 이미 `engage` 가 보고했고 스윕 중이므로, `resume()` 은 조용히 지나간다(없는 파일을 지우라고 하거나 스윕을 겹쳐 돌리지 않는다).
 
 ### 2.2 `OrderGateway` — 배리어와 정산
 
@@ -135,14 +135,14 @@ quarantine 은 킬 스위치를 **트립하지 않는다**(전략 하나의 결�
 
 - `kill-switch.test.ts`: 첫 `engage` 만 파일 쓰기·보고, 두 번째는 조용·같은 Promise; 파일이 있는 채 생성 → engaged; 운영자 파일(정상·`reason` 없음·깨진 JSON) 세 모양; heartbeat 30분 경계; 스윕 — `idle` 을 기다린 뒤 읽는다(in-flight 중엔 포트폴리오 읽기 0), 2패스에 걸쳐 새로 나타난 주문도 취소, `decisionId` 결정론, 5패스 잔존 보고.
 - `order-gateway.test.ts`: `barrier` 가 place 를 막으면 `halted` 정산 + 반환, cancel 은 통과; 백오프 사이에 배리어가 닫히면 다음 attempt 없음; `idle` 이 in-flight 정산 뒤 풀림; retryable 실패 10회 연속에 `onExhausted` 한 번, 성공이 카운터 리셋, `rejected` 는 안 셈; `recoverPending` 아래 래치 → place halted·cancel 재제출.
-- `state-store.test.ts`: `halted` 레코드가 읽히고 그 결정은 pending 이 아니다.
+- `state-store.test.ts`: `halted` 레코드가 읽히고 그 결정은 pending 이 아니다; halted 결정은 `dailyEntryNotional` 에 들지 않는다(킬 스위치가 잡은 결정은 내지 않을 결정이라 같은 날 래치를 푼 운영자의 예산을 깎지 않는다).
 - `risk-gate.test.ts`: `lossLimitBreach` 두 한도 각각, 경계값(같음 = 걸림), 둘 다 아니면 `null`.
 - `fill-processor.test.ts`: §16.46 세 모양 각각에서 `engage('fill-wedge')` 호출 + 재throw + 커서 불변.
-- `supervisor.test.ts`: 래치 cycle 에 `onTick` 0회·drain·persist 는 있음; 운영자 파일 → 다음 cycle 에 걸림; `lossLimitBreach` → engage.
+- `supervisor.test.ts`: 래치 cycle 에 `onTick` 0회·drain·persist 는 있음; 운영자 파일 → 다음 cycle 에 걸림; `lossLimitBreach` → engage; 재시작 시 `resume` 보고; **배선 고정** — 래치 아래 `recoverPending` 의 pending place 가 halted(배리어 배선), 503 연속으로 `submission-failures`(`onExhausted` 배선), 스트림의 설명 불가 fill 로 `fill-wedge`(`FillProcessor` 배선), 30분 뒤 heartbeat(`heartbeat()` 호출).
 
 통합(`apps/paper-api`, Testcontainers, 기존 `strategy-runner*.integration.test.ts` 옆): **"a tripped runner cancels its resting orders and places nothing afterwards, across a restart"** — 지정가 2건이 원장에 열린 상태에서 운영자 파일로 트립 → 원장에서 둘 다 `CANCELLED`, 이후 틱에 주문 0, 재시작 뒤에도 0, `kill-switch.json` 과 `submissions.ndjson` 의 `halted` 행 존재.
 
-변이 확인(리뷰 레인 증거): 배리어 분기 제거 → `order-gateway.test.ts` 와 통합 테스트가 문다; `halted` 정산을 `pending` 으로 바꾸면 `recoverPending` 테스트가 문다; `idle()` 대기 제거 → 스윕 in-flight 테스트가 문다.
+변이 확인(리뷰 레인 증거, 실제 결과): 게이트웨이의 배리어 분기 제거 → `order-gateway.test.ts` 2건 + `supervisor.test.ts`(운영자 파일) 가 문다 — 통합 테스트는 물지 **않는다**(래치 cycle 의 조기 반환이 먼저 틱을 막아 place 가 게이트웨이에 닿지 않는다); `#halt` 의 `outcome` 을 `rejected` 로 → `order-gateway.test.ts` 의 로그 행 단언이 문다(첫 시도엔 살아남아 보강); `idle()` 대기 제거 → `kill-switch.test.ts` in-flight 테스트가 문다; **배선** 넷(supervisor 의 `barrier`·`onExhausted`·`killSwitch`·`heartbeat()`) 은 각각 `supervisor.test.ts` 의 "recovered pending place", "ten failed submission attempts", "unexplainable fill on the stream", "heartbeat interval" 이 문다(레인 1 리뷰가 잡은 빈틈); 파일을 보고·스윕 뒤로 옮기면 `kill-switch.test.ts` "latch on disk before the first report" 가 문다.
 
 ## 6. 하지 않는 것
 

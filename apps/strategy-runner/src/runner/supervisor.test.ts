@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import { DEFAULT_REGISTRY } from '../registry.js';
 import { createRecordingReporter } from '../reporter.js';
 import { StateStore } from '../state/state-store.js';
 import type { FetchLike } from '../transport/paper-api-client.js';
+import { HEARTBEAT_MS } from './kill-switch.js';
 import { RunnerSupervisor } from './supervisor.js';
 
 const ORIGIN = 'http://127.0.0.1:3001';
@@ -75,15 +76,24 @@ function config(
  * the thinnest thing the supervisor will run against: what is under test here
  * is the supervisor's own routing, not the API.
  */
-function api(quotes: Readonly<Record<string, readonly string[]>>): {
+function api(
+  quotes: Readonly<Record<string, readonly string[]>>,
+  options: {
+    /** When set, every order is answered with this status and error code. */
+    readonly refuseOrders?: { readonly status: number; readonly code: string };
+  } = {},
+): {
   readonly fetch: FetchLike;
   readonly placed: { readonly symbol: string; readonly side: string }[];
+  readonly attempts: () => number;
 } {
   const cursor = new Map<string, number>();
   const placed: { readonly symbol: string; readonly side: string }[] = [];
+  let attempts = 0;
 
   return {
     placed,
+    attempts: () => attempts,
     fetch: async (url, init) => {
       const path = new URL(url).pathname;
       const reply = (
@@ -124,6 +134,17 @@ function api(quotes: Readonly<Record<string, readonly string[]>>): {
       }
 
       if (path === '/api/v1/orders') {
+        attempts += 1;
+
+        if (options.refuseOrders !== undefined) {
+          return reply(options.refuseOrders.status, {
+            code: options.refuseOrders.code,
+            message: 'refused by the test',
+            retryable: true,
+            requestId: 'r-1',
+          });
+        }
+
         const body = JSON.parse(init.body ?? '{}') as {
           readonly symbol: string;
           readonly side: string;
@@ -172,6 +193,33 @@ function api(quotes: Readonly<Record<string, readonly string[]>>): {
  * so it schedules no reconnect and leaves no timer behind.
  */
 const idleSocket = (): StreamSocket => ({ close: () => undefined });
+
+/** A socket the test drives: `open()` then `send()` frames as the server would. */
+class ScriptedSocket implements StreamSocket {
+  onopen?: () => void;
+  onclose?: (event: { code?: number; reason?: string }) => void;
+  onerror?: (event: { message?: string }) => void;
+  onmessage?: (event: { data: unknown }) => void;
+
+  close(): void {
+    // Nothing to tear down; the test owns the frames.
+  }
+
+  open(): void {
+    this.onopen?.();
+  }
+
+  send(frame: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(frame) });
+  }
+}
+
+/** Lets the event drain chain and the sweep it may have started run to rest. */
+const settle = async (): Promise<void> => {
+  for (let index = 0; index < 20; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
 
 /** A clock the test moves by hand, so "time passed" is an explicit step. */
 function clock(startedAt: string): {
@@ -327,6 +375,12 @@ describe('the kill switch in the runner', () => {
       (supervisor.state.runtime.read() as { cursors: Record<string, unknown> })
         .cursors,
     ).not.toStrictEqual({});
+    // And no strategy was asked: the grid would have decided to buy on those
+    // ticks, and a decision that reached the gateway would be on disk as
+    // halted. The barrier is the second line; this pins the first.
+    expect(
+      readFileSync(join(directory, 'decisions.ndjson'), 'utf8'),
+    ).not.toContain('"kind":"place"');
   });
 
   it('engages from a tripped loss limit at the start of a cycle', async () => {
@@ -417,5 +471,193 @@ describe('the kill switch in the runner', () => {
       'the kill switch is still engaged from a previous run; delete kill-switch.json and restart to resume trading source=fill-wedge',
     );
     expect(stub.placed).toStrictEqual([]);
+  });
+
+  /**
+   * Pins the barrier *wiring* (`barrier: (kind) => killSwitch.permits(kind)`):
+   * a place recorded before the trip and never settled is what `recoverPending`
+   * resubmits at start, and under the latch it must settle as halted instead of
+   * reaching the ledger. Delete the wiring and this places an order.
+   */
+  it('halts a recovered pending place under the latch instead of submitting it', async () => {
+    const seeded = StateStore.open({ directory });
+
+    seeded.appendDecision({
+      decisionId: 'd-before-trip',
+      at: '2026-08-31T00:59:00.000Z',
+      strategy: 'grid-samsung',
+      kind: 'place',
+      reason: 'level crossed',
+      intent: {
+        market: 'KR',
+        symbol: '005930',
+        side: 'BUY',
+        type: 'MARKET',
+        quantity: '1',
+      },
+      notional: '70000',
+    });
+    seeded.close();
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({ reason: 'tripped before the restart' }),
+    );
+
+    const stub = api({ '005930': ['70800'] });
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter: createRecordingReporter(),
+      fetch: stub.fetch,
+      now: () => Date.parse('2026-08-31T01:00:00.000Z'),
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    supervisor.close();
+
+    expect(stub.placed).toStrictEqual([]);
+    expect(supervisor.state.pendingDecisions()).toStrictEqual([]);
+    expect(readFileSync(join(directory, 'submissions.ndjson'), 'utf8')).toMatch(
+      /"decisionId":"d-before-trip".*"outcome":"halted"/u,
+    );
+  });
+
+  /** Pins the `onExhausted` wiring: design §7.2's ten failures reach the latch. */
+  it('engages from ten failed submission attempts in a row', async () => {
+    const stub = api(
+      { '005930': ['70800', '70600', '70400', '70100'] },
+      { refuseOrders: { status: 503, code: 'SERVICE_UNAVAILABLE' } },
+    );
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter: createRecordingReporter(),
+      fetch: stub.fetch,
+      now: time.now,
+      sleep: async () => {},
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+
+    for (
+      let cycle = 0;
+      cycle < 4 && !supervisor.killSwitch.engaged;
+      cycle += 1
+    ) {
+      await supervisor.cycle();
+      time.advance(HALF_A_FRESHNESS_WINDOW);
+    }
+
+    supervisor.close();
+
+    expect(supervisor.killSwitch.engagement).toMatchObject({
+      source: 'submission-failures',
+      reason: '10 submission attempts failed in a row',
+    });
+    expect(stub.attempts()).toBeGreaterThanOrEqual(10);
+  });
+
+  /** Pins the `killSwitch` wiring into `FillProcessor`: §16.46's wedge reaches the latch. */
+  it('engages from an unexplainable fill on the stream', async () => {
+    const sockets: ScriptedSocket[] = [];
+    const stub = api({ '005930': ['70800'] });
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: () => Date.parse('2026-08-31T01:00:00.000Z'),
+      socketFactory: () => {
+        const socket = new ScriptedSocket();
+
+        sockets.push(socket);
+
+        return socket;
+      },
+    });
+
+    await supervisor.start();
+
+    // The first connect is scheduled through the reconnect policy's jittered
+    // delay (up to ATTEMPT_BASE_MS), so the socket appears a moment later.
+    const deadline = Date.now() + 5_000;
+
+    while (sockets.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const socket = sockets[0] as ScriptedSocket;
+
+    socket.open();
+    socket.send({
+      type: 'ready',
+      accountSequence: '0',
+      heartbeatIntervalMs: 30_000,
+    });
+    // An ORDER_FILLED with no fill records: shape (c) of §16.46.
+    socket.send({
+      type: 'event',
+      eventId: 'event-1',
+      accountSequence: '1',
+      eventType: 'ORDER_FILLED',
+      payload: { orderId: 'order-a', filledQuantity: '1' },
+    });
+    await settle();
+    supervisor.close();
+
+    expect(supervisor.killSwitch.engagement).toMatchObject({
+      source: 'fill-wedge',
+    });
+    // The wedge itself is intact: the cursor did not move.
+    expect(supervisor.state.fills.cursor).toBeNull();
+    expect(reporter.lines.join('\n')).toContain(
+      'the kill switch is engaged; new orders are refused and resting orders are being cancelled source=fill-wedge',
+    );
+  });
+
+  /** Pins the `heartbeat()` call in the cycle. */
+  it('says it is still engaged once the heartbeat interval has passed', async () => {
+    writeFileSync(
+      join(directory, 'kill-switch.json'),
+      JSON.stringify({ reason: 'drill' }),
+    );
+
+    const stub = api({ '005930': ['70800', '70600', '70400'] });
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    await supervisor.cycle();
+    expect(
+      reporter.lines.filter((line) => line.includes('still engaged source=')),
+    ).toStrictEqual([]);
+
+    time.advance(HEARTBEAT_MS);
+    await supervisor.cycle();
+    supervisor.close();
+
+    expect(reporter.lines).toContain(
+      '[warn] the kill switch is still engaged source=operator reason=drill engagedAt=2026-08-31T01:00:00.000Z',
+    );
   });
 });
