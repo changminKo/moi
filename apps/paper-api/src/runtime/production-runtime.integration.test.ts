@@ -4,7 +4,7 @@ import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
 } from '@testcontainers/postgresql';
-import { Client } from 'pg';
+import { Client, type PoolClient } from 'pg';
 import {
   GenericContainer,
   type StartedTestContainer,
@@ -22,6 +22,11 @@ import {
 import WebSocket from 'ws';
 import type { AppConfig } from '../config.js';
 import { DEFAULT_FEE_SCHEDULES, ZERO_FEE_SCHEDULES } from '../config.js';
+import {
+  createDatabase,
+  type Database,
+  type PoolStats,
+} from '../db/database.js';
 import { OutboxPublisherLoop } from '../modules/stream/outbox-publisher-loop.js';
 import { publishFeeModelVersions } from './fee-schedule.js';
 import {
@@ -85,6 +90,7 @@ interface Started {
 async function start(
   options: {
     config?: Partial<AppConfig>;
+    database?: Database;
     deferSnapshots?: boolean;
     bundle?: FakeProviderBundle;
     awaitServing?: boolean;
@@ -106,6 +112,7 @@ async function start(
     ...(options.verifyInvariants
       ? { verifyInvariants: options.verifyInvariants }
       : {}),
+    ...(options.database ? { database: options.database } : {}),
   });
   running.push(runtime);
   const started = runtime.start();
@@ -364,6 +371,46 @@ describe('ProductionRuntime', () => {
       const metrics = await (await fetch(`${origin}/metrics`)).text();
       expect(metrics).toContain('leader_reelection_total{market="KR"} 1');
       expect(runtime.publisher.isRunning()).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // #65: a drill exit 1 came from `db.destroy` exceeding the shutdown budget
+  // with nothing else in the log to say why. `pool.end()` waits for every
+  // checked-out client, so a client nobody released pins the tail step for the
+  // whole budget; the forced stop now carries the pool counters.
+  it(
+    'A5b: a pool client nobody released pins db.destroy, and the forced stop reports the pool counters',
+    async () => {
+      const db = createDatabase(databaseUrl);
+      const factory = (
+        db as unknown as {
+          __leaderLeaseClientFactory: () => Promise<PoolClient>;
+        }
+      ).__leaderLeaseClientFactory;
+      const held = await factory();
+      try {
+        const { runtime, logs } = await start({ database: db });
+        const stopped = await runtime.stop();
+        expect(stopped.forced).toBe(true);
+        const timedOut = logs.find(
+          (l) =>
+            l.event === 'shutdown.step_timed_out' &&
+            l.fields.step === 'db.destroy',
+        );
+        expect(
+          timedOut,
+          'db.destroy must be the step that timed out',
+        ).toBeDefined();
+        const pool = timedOut?.fields.pool as PoolStats | undefined;
+        expect(pool).toBeDefined();
+        expect(pool?.total).toBeGreaterThanOrEqual(1);
+        expect(pool?.idle).toBe(0);
+        expect(pool?.waiting).toBe(0);
+      } finally {
+        held.release();
+        await db.destroy().catch(() => undefined);
+      }
     },
     TEST_TIMEOUT_MS,
   );

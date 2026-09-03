@@ -96,6 +96,23 @@ export function toJsonText(value: unknown, subject: string): string {
  */
 export type PoolErrorReporter = (error: Error) => void;
 
+/** Live `pg` pool counters: clients created, clients idle, callers queued. */
+export interface PoolStats {
+  readonly total: number;
+  readonly idle: number;
+  readonly waiting: number;
+}
+
+/**
+ * Reads the pool counters behind a database built by `createDatabase`. A
+ * `destroy()` that never resolves is a pool still holding a client nobody
+ * released; `total - idle` says how many, `waiting` says whether anyone is
+ * still queued for one. Undefined for a Kysely instance built elsewhere.
+ */
+export function poolStats(database: Database): PoolStats | undefined {
+  return (database as { __poolStats?: () => PoolStats }).__poolStats?.();
+}
+
 const POOL_MAX_CONNECTIONS = 10;
 const CONNECTION_TIMEOUT_MS = 10_000;
 const IDLE_TIMEOUT_MS = 30_000;
@@ -159,6 +176,14 @@ export function createDatabase(
   // narrow factory used by the market-data lease.
   Object.defineProperty(database, '__leaderLeaseClientFactory', {
     value: () => pool.connect(),
+    enumerable: false,
+  });
+  Object.defineProperty(database, '__poolStats', {
+    value: (): PoolStats => ({
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+    }),
     enumerable: false,
   });
   return database;
