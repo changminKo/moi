@@ -145,7 +145,7 @@ if [ "$signature" != "$previous" ]; then
     title="Moi status recovered"
   fi
   description="$line"
-  [ -n "$previous" ] && description="$line"$'\n'"previous: $previous"
+  [ -n "$previous" ] && description="$line"$'\n'"이전: $previous"
   if post "$level" "$title" "$description"; then
     record
   else

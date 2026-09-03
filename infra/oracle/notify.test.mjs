@@ -158,8 +158,46 @@ describe('notify.sh masking', () => {
   it('posts an embed for a well-formed call', async () => {
     const body = await post('info', 'deploy started: main', 'host moi-1');
     const { embeds } = JSON.parse(body);
-    assert.equal(embeds[0].title, 'deploy started: main');
+    assert.equal(embeds[0].title, '배포 시작: main');
     assert.equal(embeds[0].color, 5793266);
+  });
+
+  // The operator reads Korean; the English original — what the runbook quotes
+  // — stays on the first line behind a spoiler, Discord's 펼쳐보기.
+  it('titles a known shape in Korean and folds the original into a spoiler', async () => {
+    const cases = [
+      ['deploy started: main', 'host moi-1', '배포 시작: main'],
+      ['deploy finished: abc1234', '', '배포 완료: abc1234'],
+      ['deploy failed: main', 'step x', '배포 실패: main'],
+      ['Moi status FAIL', 'fail ready=000', 'Moi 상태 FAIL'],
+      ['Moi status recovered', 'ok', 'Moi 상태 복구'],
+      ['Moi status heartbeat (warn)', 'warn', 'Moi 상태 하트비트 (warn)'],
+      ['moi.service failed', 'tail', 'moi.service 실패'],
+    ];
+    for (const [title, description, korean] of cases) {
+      const { embeds } = JSON.parse(await post('info', title, description));
+      assert.equal(embeds[0].title, korean, title);
+      assert.equal(
+        embeds[0].description,
+        description === '' ? `||${title}||` : `||${title}||\n${description}`,
+        title,
+      );
+    }
+  });
+
+  it('posts a title it does not know as it is, with nothing folded under it', async () => {
+    const { embeds } = JSON.parse(await post('info', 'hello title', 'body'));
+    assert.equal(embeds[0].title, 'hello title');
+    assert.equal(embeds[0].description, 'body');
+  });
+
+  it('keeps the original in front of the 1,500-character cap on a long tail', async () => {
+    const tail = 'x'.repeat(2000);
+    const { embeds } = JSON.parse(
+      await post('fail', 'moi.service failed', tail),
+    );
+    assert.ok(embeds[0].description.startsWith('||moi.service failed||\n'));
+    assert.equal(embeds[0].description.length, 1500);
   });
 
   it('masks the session cookie, CSRF token, Set-Cookie and idempotency key', async () => {

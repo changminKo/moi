@@ -6,6 +6,13 @@
 #
 #   notify.sh <ok|warn|fail|info> <title> [description]
 #
+# The operator reads Korean. A title whose shape `korean_title` knows is posted
+# in Korean with the English original on the first line of the description
+# behind a Discord spoiler (`||…||`, the client's 펼쳐보기) — the original is
+# what the runbook quotes and what the tests of the producers assert on. A
+# title the table does not know is posted as it is: an English embed beats a
+# wrong Korean one, and the fix is one more case below.
+#
 # The webhook URL is a secret (sops file on the host, `DISCORD_WEBHOOK_URL`);
 # it is read from the environment only and never printed. Title and
 # description are masked before they leave the host: credentials in URLs,
@@ -60,6 +67,30 @@ mask() {
     s{([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|WEBHOOK|COOKIE)[A-Za-z0-9_]*\s*[=:]\s*)\S+}{$1***}gi;
   '
 }
+# The producers' title shapes (deploy-lib.sh, status-check.sh,
+# alert-unit-failed.sh), English → Korean. The variable part is carried over.
+korean_title() {
+  case "$1" in
+    'deploy started: '*)  printf '배포 시작: %s' "${1#deploy started: }" ;;
+    'deploy finished: '*) printf '배포 완료: %s' "${1#deploy finished: }" ;;
+    'deploy failed: '*)   printf '배포 실패: %s' "${1#deploy failed: }" ;;
+    'Moi status recovered') printf 'Moi 상태 복구' ;;
+    'Moi status heartbeat ('*')')
+      level_in_title="${1#Moi status heartbeat (}"
+      printf 'Moi 상태 하트비트 (%s)' "${level_in_title%)}" ;;
+    'Moi status '*) printf 'Moi 상태 %s' "${1#Moi status }" ;;
+    *' failed') printf '%s 실패' "${1% failed}" ;;
+    *) return 1 ;;
+  esac
+}
+if korean="$(korean_title "$title")"; then
+  # Original first, so the 1,500-character cap below trims the journal tail,
+  # never the line that says what this embed was in English.
+  [ -n "$description" ] && description=$'\n'"$description"
+  description="||${title}||${description}"
+  title="$korean"
+fi
+
 title="$(mask "$title")"
 # Discord caps descriptions at 4096 characters; a journal tail needs far less.
 description="$(mask "$description" | head -c 1500)"
