@@ -89,6 +89,10 @@ jobs:
   manifests:
     name: Publish ${{ matrix.name }}
     needs: images
+    # Runs even when a build failed, so one image's broken half does not hold
+    # the other two back from `main` (they were independent jobs before). The
+    # image that is missing a half fails its own digest count below.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:

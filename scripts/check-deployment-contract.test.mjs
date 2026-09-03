@@ -313,6 +313,11 @@ describe('check-deployment-contract (A8)', () => {
       /publish\.yml jobs must time out within 20 minutes/,
     ],
     [
+      'the manifest job waits for every build to succeed',
+      (text) => text.replace(/^ {4}if: \$\{\{ !cancelled\(\) \}\}\n/m, ''),
+      /publish\.yml manifests must run after a failed build too/,
+    ],
+    [
       'the manifest job forgets an image',
       (text) =>
         text.replace(

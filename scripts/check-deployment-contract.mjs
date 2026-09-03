@@ -654,6 +654,11 @@ check('publish workflow builds arm64 natively and bounds its jobs', () => {
     'images',
     'publish.yml must assemble manifests only after every build',
   );
+  assert.match(
+    String(manifests.if ?? ''),
+    /!\s*cancelled\(\)/,
+    'publish.yml manifests must run after a failed build too, so one broken image does not hold the others back',
+  );
   const covered = manifests.strategy.matrix.name ?? [];
   for (const name of names)
     assert.ok(
