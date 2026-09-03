@@ -25,6 +25,15 @@ export {
   sessionSwapped,
 } from './events.js';
 export {
+  type FooterCounts,
+  fieldLabel,
+  footerNotes,
+  KOREAN_FIELD_LABELS,
+  KOREAN_MESSAGES,
+  localizeMessage,
+  withOriginal,
+} from './korean.js';
+export {
   containsSecret,
   MASKING_RULES,
   MIN_EXACT_SECRET_LENGTH,

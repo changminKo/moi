@@ -24,8 +24,15 @@
  * **On money.** A field value may be a `number` because the runner's interface
  * says so. Money must not travel that way (AGENTS.md hard rule 5) — format it
  * with the `@moi/trading-core` decimal helpers and pass the string.
+ *
+ * **On language.** The operator reads Korean, so the embed title is the Korean
+ * `korean.ts` has for the runner's message and the original English line sits
+ * under it behind a spoiler. The English line itself is untouched as the
+ * aggregation key and the footer's `kind`: it is what the runner logs, and
+ * what a runbook quotes.
  */
 import type { ReportField, ReportLevel } from './events.js';
+import { fieldLabel, localizeMessage, withOriginal } from './korean.js';
 import {
   createReporter,
   type Reporter,
@@ -70,8 +77,9 @@ export function createDiscordReporter(
   return {
     report(level, message, fields = {}) {
       const rendered: readonly ReportField[] = Object.entries(fields).map(
-        ([name, value]) => ({ name, value: String(value) }),
+        ([name, value]) => ({ name: fieldLabel(name), value: String(value) }),
       );
+      const korean = localizeMessage(message);
       reporter.report({
         level: LEVELS[level],
         // The message is the stable half of a report — the varying half lives
@@ -80,7 +88,8 @@ export function createDiscordReporter(
         // making every message unique.
         kind: message,
         dedupeKey: `${level}:${message}`,
-        title: message,
+        title: korean ?? message,
+        ...(korean === undefined ? {} : { description: withOriginal(message) }),
         ...(rendered.length > 0 ? { fields: rendered } : {}),
       });
     },

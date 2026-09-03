@@ -41,8 +41,7 @@ describe('createDiscordReporter', () => {
     discord.bodies().map((body) => JSON.parse(body).embeds[0]);
 
   it('is callable as the runner’s Reporter: report(level, message, fields)', async () => {
-    reporter.report('warn', 'session replaced', {
-      previousSessionId: '01J8Z0Q9',
+    reporter.report('warn', 'the stored session has expired', {
       sessionId: '01J8Z1AA',
       attempt: 2,
       recovered: false,
@@ -50,13 +49,37 @@ describe('createDiscordReporter', () => {
     await reporter.flush();
 
     const [embed] = embeds();
-    expect(embed.title).toBe('session replaced');
+    expect(embed.title).toBe('저장된 세션이 만료되었습니다');
     expect(embed.color).toBe(16_098_596);
     expect(embed.fields).toStrictEqual([
-      { name: 'previousSessionId', value: '01J8Z0Q9', inline: true },
-      { name: 'sessionId', value: '01J8Z1AA', inline: true },
-      { name: 'attempt', value: '2', inline: true },
+      { name: '세션 ID (sessionId)', value: '01J8Z1AA', inline: true },
+      { name: '시도 (attempt)', value: '2', inline: true },
       { name: 'recovered', value: 'false', inline: true },
+    ]);
+  });
+
+  // The operator reads Korean; the original English line is the stable key
+  // the runner logs and the aggregation dedupes on, so it stays — folded
+  // behind a spoiler under the title, Discord's nearest thing to 펼쳐보기.
+  it('titles the embed in Korean and keeps the original behind a spoiler', async () => {
+    reporter.report('info', 'the place was accepted', { orderId: 'o-1' });
+    await reporter.flush();
+
+    const [embed] = embeds();
+    expect(embed.title).toBe('주문이 접수되었습니다');
+    expect(embed.description).toBe('||the place was accepted||');
+    expect(embed.footer.text).toContain('the place was accepted');
+  });
+
+  it('leaves a message it cannot translate as it is, with nothing to unfold', async () => {
+    reporter.report('info', 'decision', { tick: 1 });
+    await reporter.flush();
+
+    const [embed] = embeds();
+    expect(embed.title).toBe('decision');
+    expect(embed.description).toBeUndefined();
+    expect(embed.fields).toStrictEqual([
+      { name: 'tick', value: '1', inline: true },
     ]);
   });
 
@@ -94,7 +117,7 @@ describe('createDiscordReporter', () => {
     reporter.report('info', 'decision', { tick: 50 });
     await reporter.flush();
 
-    expect(embeds()[1].footer.text).toContain('+49 suppressed');
+    expect(embeds()[1].footer.text).toContain('+49건 생략');
   });
 
   it('separates messages that differ, and levels that differ', async () => {
