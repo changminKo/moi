@@ -620,7 +620,68 @@ describe('exactly once', () => {
   });
 
   it('wedges when the replayed onFill answers more than it had', async () => {
-    await expectDivergenceWedge(replayAfterCrash(() => [ENTRY, ENTRY]));
+    const run = replayAfterCrash(() => [ENTRY, ENTRY]);
+
+    await expectDivergenceWedge(run);
+    // Nothing was written before the check: a second decision on disk would
+    // be a pending order the next start resubmits.
+    expect(
+      run.state.pendingDecisions().map((each) => each.decisionId),
+    ).toStrictEqual(['fill:12:samsung:0']);
+  });
+
+  it('numbers one strategy’s decisions across every fill in the event', async () => {
+    const broker = new RecordingBroker();
+    const seen: FillEvent[] = [];
+    const engaged: unknown[][] = [];
+    const { processor, state } = build(scratch(), {
+      broker,
+      seen,
+      answer: () => [ENTRY],
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
+
+    // A market order that walked two book levels: one event, two fills.
+    await processor.process(
+      fillEvent('12', [{ id: 'fill-1' }, { id: 'fill-2', price: '1010' }]),
+    );
+
+    expect(seen.map((fill) => fill.fillId)).toStrictEqual(['fill-1', 'fill-2']);
+    expect(engaged).toStrictEqual([]);
+    expect(state.fills.cursor).toBe('12');
+    expect(broker.submitted.map((each) => each.key)).toStrictEqual([
+      deriveIdempotencyKey('fill:12:samsung:0'),
+      deriveIdempotencyKey('fill:12:samsung:1'),
+    ]);
+  });
+
+  it('replays a two-fill event against the same numbering', async () => {
+    const directory = scratch();
+    const broker = new RecordingBroker();
+    const first = build(directory, { broker });
+
+    for (const index of [0, 1]) {
+      first.gateway.record('samsung', ENTRY, TICKISH, {
+        decisionId: fillDecisionId('12', 'samsung', index),
+      });
+    }
+
+    first.state.close();
+    stores.length = 0;
+
+    const second = build(directory, { broker, answer: () => [ENTRY] });
+
+    await second.processor.process(
+      fillEvent('12', [{ id: 'fill-1' }, { id: 'fill-2', price: '1010' }]),
+    );
+
+    expect(second.state.fills.cursor).toBe('12');
+    expect(second.state.pendingDecisions()).toStrictEqual([]);
+    expect(new Set(broker.submitted.map((each) => each.key)).size).toBe(2);
   });
 
   it('wedges when a noop replaces a recorded place', async () => {

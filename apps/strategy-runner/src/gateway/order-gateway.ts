@@ -202,7 +202,8 @@ export class OrderGateway {
     // under that id, not the one offered now. The key is derived from the id,
     // and the ledger refuses the old key with a new payload
     // (`IDEMPOTENCY_CONFLICT`); the caller decides whether the difference is a
-    // fault (#88). `appendDecision`'s own guard stays as the second line.
+    // fault (#88). This is the only production caller, so `appendDecision`'s
+    // own guard is reached from here no more; it stays for direct callers.
     const recorded = this.#state.decision(record.decisionId);
 
     if (recorded !== undefined) {

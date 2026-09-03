@@ -366,11 +366,6 @@ export class StreamClient {
   }
 
   /**
-   * Restarts the silence deadline. Any frame counts, not only a heartbeat: a
-   * socket carrying quotes is demonstrably alive whether or not the heartbeat
-   * loop happens to have fired.
-   */
-  /**
    * A connection that stays up for `STABLE_AFTER_INTERVALS` past `ready` is a
    * connection that worked: the backoff starts over, so a single bad afternoon
    * does not leave the next reconnect five minutes slow. One that closes
@@ -384,6 +379,11 @@ export class StreamClient {
     }, this.#heartbeatMs * STABLE_AFTER_INTERVALS);
   }
 
+  /**
+   * Restarts the silence deadline. Any frame counts, not only a heartbeat: a
+   * socket carrying quotes is demonstrably alive whether or not the heartbeat
+   * loop happens to have fired.
+   */
   #armLiveness(): void {
     this.#cancelLiveness?.();
 
