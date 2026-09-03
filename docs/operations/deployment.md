@@ -193,6 +193,33 @@ verified in CI by running the previous release's tests against the migrated
 schema before a migration is merged). Rolling back a migration requires
 restore from backup with a full stop.
 
+On the reference host, the rollback ref and image tag are one release identity:
+set `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`, then invoke
+`sudo /opt/moi/infra/oracle/deploy.sh <the same full commit sha>`. Every
+published runtime image (`paper-api`, `web`, `strategy-runner`) carries that
+SHA in `org.opencontainers.image.revision`; the deploy inspects the label of
+every image the active profiles pulled and refuses a missing or different
+revision before migrations run, then reads the same label off the running
+containers after the restart before it reports success. Do not pair a previous
+image tag with `main` or any other code ref, and pin the tag in `moi.env`, not
+on the command line: systemd starts the stack from `moi.env` alone, so a tag
+that lived only in the deploy's environment would verify one release and run
+another — the post-restart container check fails such a deploy. That failure
+comes after the migration and the restart, so the host is then serving an
+unverified release: set `MOI_IMAGE_TAG` in `moi.env` to the SHA you meant and
+run `deploy.sh` again with that same SHA.
+
+Timing of the image check: `deploy.sh main` verifies against the commit it just
+checked out, so it fails closed until `Publish images` has promoted that
+commit's images to `main` (a few minutes after the merge; each image moves on
+its own). Wait for the publish, or deploy the last promoted SHA explicitly. A
+Trivy finding that fails the publish leaves `main` on the previous images, and
+`deploy.sh main` refuses them for the same reason until the finding is fixed.
+Rolling back to a ref older than these checks runs that ref's own `deploy.sh`
+(the first-stage process re-execs the checked-out script): it fetches once
+more, posts `deploy started` twice and verifies no revision — which is also why
+images published before the label never need an exemption.
+
 Roll back when: any `InvariantViolation` or `TransactionalAuditFailure`
 within 30 minutes of a deploy; markets fail to reach NORMAL after two recovery
 cycles; readiness never turns green within `start_period`.
@@ -304,6 +331,23 @@ requires, and the artefacts are the same ones the local smoke uses.
    repository owner) and fails — never reports success — unless readiness,
    both markets `NORMAL` and `placement: true` are observed.
 
+   Before fetch or checkout it takes a non-blocking exclusive `flock` on
+   `/run/moi-deploy.mutex` and holds descriptor 9 until its exit trap finishes.
+   A second invocation exits 75 without touching the checkout, status marker,
+   timer, or notifications. This mutex is distinct from
+   `/run/moi-deploy.lock`: the latter is only a marker that suppresses expected
+   status alerts during the active deploy and is owned and removed by the
+   process that acquired the mutex.
+
+   The first-stage process fetches and checks out the requested ref, then
+   `exec`s that checkout's `infra/oracle/deploy.sh` before toolchain, preflight,
+   migration, or restart work. Descriptor 9 and the status marker survive the
+   `exec`; the replacement process validates both before adopting the mutex.
+   The `MOI_DEPLOY_REEXEC=1` guard prevents a loop, and the replacement neither
+   recreates the marker nor posts a second `deploy started` notification. This
+   makes deploy-script changes effective in the same release instead of one
+   invocation later.
+
    fetch the exact ref (detached checkout; a non-fast-forward is an error,
    never a silent stale deploy) → `preflight --environment production`
    (also requires `PUBLIC_ORIGIN`/`PUBLIC_API_ORIGIN` to equal
@@ -312,18 +356,24 @@ requires, and the artefacts are the same ones the local smoke uses.
    published to GHCR (`.github/workflows/publish.yml`, `linux/amd64` and
    `linux/arm64`, each built on a native runner of its own architecture and
    joined into one manifest — no QEMU; the host never builds — a 1 GB Micro
-   cannot) →
+   cannot) → inspect every pulled runtime image (`paper-api`, `web`, and `bot`
+   when its profile is on) and require their `org.opencontainers.image.revision`
+   labels to equal the full SHA of the checked-out ref →
    start postgres/redis if absent (first deploy; running ones are left
    untouched) → one-off migration job with the new image
    (`node dist/migrate-cli.js`) while the old release still serves → `systemctl restart moi` (compose
    recreates containers stop-then-start, the 45 s grace period lets the leader
-   drain) → readiness, both markets `NORMAL`, placement enabled.
-   Roll back by pinning `MOI_IMAGE_TAG=<commit sha>` in `/etc/moi/moi.env`.
+   drain) → readiness, both markets `NORMAL`, placement enabled, and every
+   running runtime container carries the checked-out revision label.
+   Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
+   and passing that same full SHA to `deploy.sh`; mixing a tag and a different
+   ref fails before migrations.
    The GHCR packages are private: create a classic PAT with only
    `read:packages`, store it as `GHCR_TOKEN` in the sops file, and `deploy.sh`
    logs docker in with it before pulling. Every published image is scanned by
    Trivy (fixable HIGH/CRITICAL fail the publish) and carries an SBOM and
-   provenance attestation; the `main` tag moves only after a clean scan.
+   provenance attestation plus the source revision label; the `main` tag moves
+   only after a clean scan.
 8. **Operate.** `sudo journalctl -u moi -f`, the runbooks in `docs/runbooks/`,
    and `pg_dump` through `docker compose exec postgres` for backups (see
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
@@ -447,7 +497,9 @@ chat, or a shell history line that echoes it.
      This is the only producer that sees a container dying after start-up
      (compose `restart: unless-stopped` restarts it; a restart loop shows up as
      readiness/market flapping in the status line). The check is skipped while
-     `deploy.sh` holds `/run/moi-deploy.lock`.
+     `deploy.sh` holds the `/run/moi-deploy.lock` status marker. Actual mutual
+     exclusion between deploy processes is provided separately by the
+     `/run/moi-deploy.mutex` `flock`.
    - `OnFailure=moi-alert@%n.service` on `moi.service` and
      `moi-status.service`: fires **only** when systemd fails to start or stop
      the oneshot unit (sops key, compose interpolation, Docker down) and posts

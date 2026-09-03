@@ -21,7 +21,7 @@ SOPS_VERSION="${SOPS_VERSION:-3.13.3}"
 arch="$(dpkg --print-architecture)" # arm64 | amd64
 echo "== packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq ca-certificates curl git gnupg jq perl age netfilter-persistent iptables-persistent
+sudo apt-get install -y -qq ca-certificates curl git gnupg jq perl age util-linux netfilter-persistent iptables-persistent
 
 echo "== docker (official repository)"
 if ! command -v docker >/dev/null; then

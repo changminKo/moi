@@ -929,6 +929,125 @@ check('host alerting dependencies are provisioned', () => {
     );
 });
 
+// Shell with its comment lines removed, so a check that looks for a wiring
+// line cannot be satisfied by that line commented out.
+const readShell = (relative) => read(relative).replace(/^[ \t]*#.*$/gmu, '');
+
+// deploy-lib.sh serializes deploys with flock(1) (util-linux) and checks the
+// inherited mutex descriptor with perl; both must come from bootstrap.sh, or
+// every deploy fails closed at deploy_begin (exit 69) on a fresh host.
+check('deploy mutex dependencies are provisioned', () => {
+  const installed = new Set(
+    [
+      ...readShell('infra/oracle/bootstrap.sh').matchAll(
+        /apt-get install -y -qq ([^\n]*)/g,
+      ),
+    ].flatMap(([, list]) => list.trim().split(/\s+/)),
+  );
+  for (const pkg of ['util-linux', 'perl'])
+    assert.ok(
+      installed.has(pkg),
+      `bootstrap.sh must install ${pkg}: deploy-lib.sh needs it to take and verify the deploy mutex`,
+    );
+  const lib = readShell('infra/oracle/deploy-lib.sh');
+  assert.ok(
+    lib.includes('flock -n 9') && lib.includes('fd9_is_mutex'),
+    'deploy-lib.sh must take the mutex with flock on descriptor 9 and verify that descriptor on re-exec',
+  );
+});
+
+check('reference deploy re-executes the checked-out script', () => {
+  const script = readShell('infra/oracle/deploy.sh');
+  const guard = script.indexOf(`if [ "\${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then`);
+  const fetch = script.indexOf('as_owner git fetch -q origin "$REF"');
+  const checkout = script.indexOf(
+    'as_owner git checkout -q --detach FETCH_HEAD',
+  );
+  const reexec = script.search(
+    /^\s*deploy_reexec "\$REPO\/infra\/oracle\/deploy\.sh" "\$REF"$/mu,
+  );
+  const toolchain = script.indexOf('step toolchain');
+
+  assert.ok(
+    guard >= 0 &&
+      guard < fetch &&
+      fetch < checkout &&
+      checkout < reexec &&
+      reexec < toolchain,
+    'deploy.sh must re-exec the checked-out script once after checkout and before toolchain work',
+  );
+});
+
+check('reference deploy verifies pulled image revisions', () => {
+  const script = readShell('infra/oracle/deploy.sh');
+  const pull = script.indexOf(`withsecrets "\${COMPOSE[*]} pull --quiet"`);
+  const checkoutSha = script.indexOf(
+    'checkout_sha="$(as_owner git rev-parse HEAD)"',
+  );
+  // `config --images` prints image references only; the full rendered config
+  // carries every secret value (rule 2) and must never sit in a variable.
+  const images = script.indexOf(
+    `mapfile -t release_images < <(withsecrets "\${COMPOSE[*]} config --images" | grep '^ghcr.io/changminko/moi-' | sort -u)`,
+  );
+  const required = script.indexOf('for required in paper-api web; do');
+  const verify = script.search(
+    /^\s*verify_release_image_revisions "\$checkout_sha" "\$\{release_images\[@\]\}"$/mu,
+  );
+  const migrations = script.indexOf(
+    'step "migrations (new image, old release still serving)"',
+  );
+
+  assert.ok(
+    pull >= 0 &&
+      pull < checkoutSha &&
+      checkoutSha < images &&
+      images < required &&
+      required < verify &&
+      verify < migrations,
+    'deploy.sh must verify pulled image revisions before migrations',
+  );
+  assert.doesNotMatch(
+    script,
+    /config --format json/u,
+    'deploy.sh must not capture the rendered compose config (it carries every secret value)',
+  );
+});
+
+// systemd starts the stack from /etc/moi/moi.env alone, so the pulled-image
+// check cannot see a MOI_IMAGE_TAG pinned only on the deploy command line;
+// the running containers are checked again before the deploy calls itself done.
+check(
+  'reference deploy verifies the running containers before reporting success',
+  () => {
+    const script = readShell('infra/oracle/deploy.sh');
+    const restart = script.indexOf('systemctl restart moi');
+    const services = script.indexOf('running_services=(paper-api web)');
+    const bot = script.indexOf(
+      '[ "$bot_enabled" = 1 ] && running_services+=(bot)',
+    );
+    const ids = script.indexOf(
+      `mapfile -t running_ids < <(withsecrets "\${COMPOSE[*]} ps -q \${running_services[*]}")`,
+    );
+    const count = script.indexOf(
+      `[ "\${#running_ids[@]}" -eq "\${#running_services[@]}" ]`,
+    );
+    const verify = script.search(
+      /^\s*verify_running_container_revisions "\$checkout_sha" "\$\{running_ids\[@\]\}"$/mu,
+    );
+    const done = script.indexOf('deploy_verified "$sha"');
+    assert.ok(
+      restart >= 0 &&
+        restart < services &&
+        services < bot &&
+        bot < ids &&
+        ids < count &&
+        count < verify &&
+        verify < done,
+      'deploy.sh must verify the running containers after the restart and before deploy_verified',
+    );
+  },
+);
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(
@@ -1162,6 +1281,32 @@ check('deployment guide', () => {
   for (const pattern of required) {
     assert.ok(pattern.test(text), `deployment.md must cover ${pattern}`);
   }
+});
+
+// The deploy compares this label with the checked-out SHA before migrations
+// (#83); which images the workflow builds is asserted by the checks above.
+check('published runtime images carry source revision', () => {
+  const workflow = readYaml('.github/workflows/publish.yml');
+  const job = workflow.jobs?.images;
+  const build = (job?.steps ?? []).find((step) =>
+    String(step.uses ?? '').startsWith('docker/build-push-action@'),
+  );
+  assert.ok(build, 'publish workflow must use docker/build-push-action');
+  const label = 'org.opencontainers.image.revision';
+  assert.equal(
+    String(build.with?.labels ?? ''),
+    `${label}=\${{ github.sha }}`,
+    'published runtime images must carry the source revision label',
+  );
+  // The deploy reads the same key back; a typo on either side would fail
+  // every deploy closed (or, worse, let a stale image through if the check
+  // were ever relaxed), so the two spellings are pinned to each other.
+  assert.ok(
+    readShell('infra/oracle/deploy-lib.sh').includes(
+      `REVISION_LABEL="${label}"`,
+    ),
+    'deploy-lib.sh must read the revision label publish.yml writes',
+  );
 });
 
 check('ci workflow', () => {

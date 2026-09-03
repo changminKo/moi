@@ -73,6 +73,57 @@ esac
     chmodSync(join(bin, name), 0o755);
   };
   stub('curl', fakeCurl);
+  // `docker image inspect --format <fmt> <image>` and
+  // `docker inspect --format <fmt> <container>`; the format must read the
+  // revision label publish.yml writes, or the stub refuses like a typo would
+  // fail on the host. Containers are named ctr-<service>.
+  stub(
+    'docker',
+    `#!/usr/bin/env bash
+label='org.opencontainers.image.revision'
+case "\${1:-} \${2:-}" in
+  "image inspect") kind=image; shift 2;;
+  inspect\\ *) kind=container; shift 1;;
+  *) echo "unexpected docker call: $*" >&2; exit 2;;
+esac
+[ "\${1:-}" = --format ] || { echo "expected --format, got: $*" >&2; exit 2; }
+case "\${2:-}" in
+  *"\\"$label\\""*) ;;
+  *) echo "format does not read $label: \${2:-}" >&2; exit 2;;
+esac
+subject="\${!#}"
+if [ "$kind" = image ]; then
+  case "$subject" in
+    ghcr.io/changminko/moi-paper-api:*) printf '%s' "\${FAKE_DOCKER_PAPER_API_REVISION:-}";;
+    ghcr.io/changminko/moi-web:*) printf '%s' "\${FAKE_DOCKER_WEB_REVISION:-}";;
+    ghcr.io/changminko/moi-strategy-runner:*) printf '%s' "\${FAKE_DOCKER_BOT_REVISION:-}";;
+    *) echo "unexpected image: $subject" >&2; exit 2;;
+  esac
+else
+  case "$subject" in
+    ctr-paper-api) printf '%s' "\${FAKE_DOCKER_CTR_PAPER_API_REVISION:-}";;
+    ctr-web) printf '%s' "\${FAKE_DOCKER_CTR_WEB_REVISION:-}";;
+    ctr-bot) printf '%s' "\${FAKE_DOCKER_CTR_BOT_REVISION:-}";;
+    *) echo "Error: No such object: $subject" >&2; exit 1;;
+  esac
+fi
+`,
+  );
+  // A real advisory lock on the inherited descriptor, as flock(1) takes it:
+  // the lock lives on the open file description, so it is shared with the
+  // parent that opened descriptor 9, survives exec, and is refused to a second
+  // process that opened the same file on its own.
+  stub(
+    'flock',
+    `#!/usr/bin/env bash
+exec perl -e '
+  use Fcntl qw(:flock);
+  my ($mode, $fd) = @ARGV;
+  open(my $fh, ">&=", $fd) or exit 1;
+  flock($fh, $mode eq "-u" ? LOCK_UN : LOCK_EX | LOCK_NB) or exit 1;
+' -- "$@"
+`,
+  );
   stub(
     'free',
     `#!/usr/bin/env bash\nprintf '%s\\n' '${api.free.replace(/\n/g, "' '")}'\n`,
@@ -557,8 +608,25 @@ describe('status-check.sh bot probe (phase D)', () => {
 });
 
 describe('deploy-lib.sh', () => {
+  function waitForFile(path) {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const deadline = Date.now() + 5_000;
+      const tick = setInterval(() => {
+        if (existsSync(path)) {
+          clearInterval(tick);
+          resolvePromise();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(tick);
+          rejectPromise(new Error(`timed out waiting for ${path}`));
+        }
+      }, 25);
+    });
+  }
+
   // A stand-in for deploy.sh: sources the library and runs `body`.
-  function runDeploy(sb, body, { signal } = {}) {
+  function runDeploy(sb, body, { signal, extraEnv = {} } = {}) {
     const script = join(sb.dir, 'deploy-under-test.sh');
     writeFileSync(
       script,
@@ -569,11 +637,13 @@ describe('deploy-lib.sh', () => {
       DISCORD_WEBHOOK_URL: WEBHOOK,
       NOTIFY_BIN: notify,
       MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
       MOI_DEPLOY_MANAGE_TIMER: '0',
+      ...extraEnv,
     };
     if (!signal) return spawnSync('bash', [script], { env, encoding: 'utf8' });
     return new Promise((done) => {
-      const child = spawn('bash', [script], { env });
+      const child = spawn('bash', [script], { env, detached: true });
       let stderr = '';
       child.stderr.on('data', (d) => {
         stderr += d;
@@ -582,12 +652,20 @@ describe('deploy-lib.sh', () => {
       const tick = setInterval(() => {
         if (existsSync(`${env.MOI_DEPLOY_LOCK}.ready`)) {
           clearInterval(tick);
-          child.kill(signal);
+          process.kill(-child.pid, signal);
         }
       }, 50);
-      child.on('exit', (code, sig) =>
-        done({ status: code, signal: sig, stderr }),
-      );
+      child.on('exit', (code, sig) => {
+        // A background child inherits SIGINT as ignored. Once the shell has
+        // reported the trap's exit code, remove anything still holding the
+        // detached test process group's pipes open.
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+        done({ status: code, signal: sig, stderr });
+      });
     });
   }
   const titles = (sb) => posted(sb).map((p) => embed(p).title);
@@ -672,6 +750,503 @@ describe('deploy-lib.sh', () => {
         embed(posted(sb)[1]).description,
         /step: preflight \(production\) \(exit 1\)/,
       );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails clearly without touching deploy state when flock is unavailable', () => {
+    const sb = makeSandbox(API);
+    try {
+      rmSync(join(sb.bin, 'flock'));
+      // Only the sandbox and a bare `bash` on PATH: a Linux host has the real
+      // util-linux flock further down PATH, and `command -v` would find it.
+      const minimalBin = join(sb.dir, 'minimal-bin');
+      mkdirSync(minimalBin);
+      symlinkSync('/bin/bash', join(minimalBin, 'bash'));
+      const r = runDeploy(sb, 'deploy_begin main', {
+        extraEnv: { PATH: `${sb.bin}:${minimalBin}` },
+      });
+
+      assert.equal(r.status, 69, r.stderr);
+      assert.match(r.stderr, /flock is required to serialize deploys/u);
+      assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
+      assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a concurrent deploy without touching the active deploy marker or running its body', async () => {
+    const sb = makeSandbox(API);
+    const holderScript = join(sb.dir, 'deploy-holder.sh');
+    const activeMarker = join(sb.dir, 'deploy.lock');
+    const holderReady = `${activeMarker}.holder-ready`;
+    const rejectedBody = `${activeMarker}.rejected-body-ran`;
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: activeMarker,
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      holderScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin first
+: > ${JSON.stringify(holderReady)}
+sleep 30 &
+wait
+`,
+    );
+    const holder = spawn('bash', [holderScript], { env, detached: true });
+    const holderExit = new Promise((resolvePromise) => {
+      holder.on('exit', (code, signal) => resolvePromise({ code, signal }));
+    });
+
+    try {
+      await waitForFile(holderReady);
+      assert.ok(existsSync(activeMarker), 'the active deploy owns the marker');
+
+      const rejected = runDeploy(
+        sb,
+        `deploy_begin second
+: > ${JSON.stringify(rejectedBody)}`,
+      );
+
+      assert.equal(rejected.status, 75, rejected.stderr);
+      assert.match(rejected.stderr, /another deploy is already in progress/u);
+      assert.ok(
+        !existsSync(rejectedBody),
+        'a rejected deploy must not run commands after deploy_begin',
+      );
+      assert.ok(
+        existsSync(activeMarker),
+        'a rejected deploy must not remove the active deploy marker',
+      );
+    } finally {
+      if (holder.exitCode === null) process.kill(-holder.pid, 'SIGTERM');
+      await holderExit;
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-execs the freshly checked-out deploy script once while preserving the active mutex', () => {
+    const sb = makeSandbox(API);
+    const oldScript = join(sb.dir, 'old-deploy.sh');
+    const freshSource = join(sb.dir, 'fresh-source.sh');
+    const checkedOutScript = join(sb.dir, 'checkout', 'deploy.sh');
+    const oldTail = join(sb.dir, 'old-tail-ran');
+    const freshBody = join(sb.dir, 'fresh-body-ran');
+    mkdirSync(dirname(checkedOutScript), { recursive: true });
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: join(sb.dir, 'deploy.lock'),
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      freshSource,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin "$1"
+deploy_reexec "$0" "$1"
+: > ${JSON.stringify(freshBody)}
+deploy_verified fresh123
+`,
+    );
+    chmodSync(freshSource, 0o755);
+    writeFileSync(
+      oldScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin main
+cp ${JSON.stringify(freshSource)} ${JSON.stringify(checkedOutScript)}
+deploy_reexec ${JSON.stringify(checkedOutScript)} main
+: > ${JSON.stringify(oldTail)}
+`,
+    );
+
+    try {
+      const r = spawnSync('bash', [oldScript], {
+        env,
+        encoding: 'utf8',
+        timeout: 5_000,
+      });
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(existsSync(freshBody), 'the checked-out script body must run');
+      assert.ok(
+        !existsSync(oldTail),
+        'the pre-fetch script body must not resume',
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy finished: fresh123',
+      ]);
+      assert.ok(!existsSync(env.MOI_DEPLOY_LOCK));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails through the exit trap when the checked-out release has no executable deploy script', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+deploy_reexec ${JSON.stringify(join(sb.dir, 'checkout', 'missing-deploy.sh'))} main
+: > ${JSON.stringify(join(sb.dir, 'old-tail-ran'))}`,
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /cannot re-exec .*missing-deploy\.sh: not an executable file/u,
+      );
+      assert.ok(!existsSync(join(sb.dir, 'old-tail-ran')));
+      assert.ok(
+        !existsSync(join(sb.dir, 'deploy.lock')),
+        'the trap must still remove the marker',
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a forged re-exec guard that opened the mutex file itself while another deploy holds the lock', async () => {
+    const sb = makeSandbox(API);
+    const holderScript = join(sb.dir, 'deploy-holder.sh');
+    const activeMarker = join(sb.dir, 'deploy.lock');
+    const holderReady = `${activeMarker}.holder-ready`;
+    const forgedBody = `${activeMarker}.forged-body-ran`;
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: activeMarker,
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      holderScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin first
+: > ${JSON.stringify(holderReady)}
+sleep 30 &
+wait
+`,
+    );
+    const holder = spawn('bash', [holderScript], { env, detached: true });
+    const holderExit = new Promise((resolvePromise) => {
+      holder.on('exit', (code, signal) => resolvePromise({ code, signal }));
+    });
+    try {
+      await waitForFile(holderReady);
+      // Descriptor 9 is the mutex file — but a fresh open, not the holder's
+      // inherited description, so the lock it carries is not ours to adopt.
+      const forged = runDeploy(
+        sb,
+        `exec 9>${JSON.stringify(env.MOI_DEPLOY_MUTEX)}
+deploy_begin second
+: > ${JSON.stringify(forgedBody)}`,
+        { extraEnv: { MOI_DEPLOY_REEXEC: '1' } },
+      );
+
+      assert.equal(forged.status, 70, forged.stderr);
+      assert.match(forged.stderr, /re-exec lost its inherited mutex/u);
+      assert.ok(
+        !existsSync(forgedBody),
+        'a forged re-exec must not run its body',
+      );
+      assert.ok(existsSync(activeMarker), 'the active deploy keeps its marker');
+    } finally {
+      if (holder.exitCode === null) process.kill(-holder.pid, 'SIGTERM');
+      await holderExit;
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a forged re-exec guard whose descriptor 9 is open on some other file', () => {
+    const sb = makeSandbox(API);
+    const marker = join(sb.dir, 'deploy.lock');
+    writeFileSync(marker, 'owned elsewhere');
+    try {
+      const r = runDeploy(
+        sb,
+        `exec 9>${JSON.stringify(join(sb.dir, 'not-the-mutex'))}
+deploy_begin main`,
+        { extraEnv: { MOI_DEPLOY_REEXEC: '1' } },
+      );
+
+      assert.equal(r.status, 70, r.stderr);
+      assert.match(r.stderr, /re-exec lost its inherited mutex/u);
+      assert.equal(readFileSync(marker, 'utf8'), 'owned elsewhere');
+      assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a forged re-exec guard without an inherited mutex descriptor', () => {
+    const sb = makeSandbox(API);
+    const marker = join(sb.dir, 'deploy.lock');
+    writeFileSync(marker, 'owned elsewhere');
+    try {
+      const r = runDeploy(sb, 'deploy_begin main', {
+        extraEnv: { MOI_DEPLOY_REEXEC: '1' },
+      });
+
+      assert.equal(r.status, 70, r.stderr);
+      assert.match(r.stderr, /re-exec lost its inherited mutex/u);
+      assert.equal(readFileSync(marker, 'utf8'), 'owned elsewhere');
+      assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a release image whose revision differs from the checked-out commit', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const actual = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: actual,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /moi-web:main revision does not match checkout/u);
+      assert.match(r.stderr, new RegExp(`expected ${expected}, got ${actual}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a release image with no OCI revision label', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: '',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /moi-web:main has no org\.opencontainers\.image\.revision label/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to verify fewer than the two public release images', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main`,
+        {
+          extraEnv: { FAKE_DOCKER_PAPER_API_REVISION: expected },
+        },
+      );
+
+      assert.equal(r.status, 64, r.stderr);
+      assert.match(
+        r.stderr,
+        /revision verification requires at least the two public release images/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('verifies the bot image too when the profile pulled it', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const stale = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main \
+  ghcr.io/changminko/moi-strategy-runner:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: expected,
+            FAKE_DOCKER_BOT_REVISION: stale,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /moi-strategy-runner:main revision does not match checkout/u,
+      );
+      assert.match(r.stderr, new RegExp(`expected ${expected}, got ${stale}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // systemd starts the stack from /etc/moi/moi.env alone. A MOI_IMAGE_TAG
+  // pinned only on the deploy command line verifies (and migrates for) one
+  // release while the restart runs another — the running containers decide.
+  it('rejects a running container whose revision differs from the verified checkout', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const running = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api ctr-web`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_CTR_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_CTR_WEB_REVISION: running,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /ctr-web revision does not match checkout/u);
+      assert.match(
+        r.stderr,
+        new RegExp(`expected ${expected}, got ${running}`),
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when a public release container is missing instead of verifying the rest', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api`,
+        { extraEnv: { FAKE_DOCKER_CTR_PAPER_API_REVISION: expected } },
+      );
+
+      assert.equal(r.status, 64, r.stderr);
+      assert.match(
+        r.stderr,
+        /revision verification requires at least the two public release containers/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts running containers at the verified revision, bot included', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api ctr-web ctr-bot
+deploy_verified ${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_CTR_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_CTR_WEB_REVISION: expected,
+            FAKE_DOCKER_CTR_BOT_REVISION: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        new RegExp(`release containers verified at ${expected}`),
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts two release images at the checked-out revision and records that revision', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main
+deploy_verified ${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_WEB_REVISION: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        new RegExp(`release images verified at ${expected}`),
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        `deploy finished: ${expected}`,
+      ]);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
