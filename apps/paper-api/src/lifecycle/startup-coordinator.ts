@@ -5,12 +5,14 @@ export interface StartupLatch {
   open(): void | Promise<void>;
   isClosed?: boolean;
 }
+/**
+ * Whether an incident is MANUAL is decided by the repository from its cause
+ * code (`MANUAL_CAUSES`, spec §16.35), not by the caller: a `manual` flag here
+ * was accepted and dropped by the production adapter (#64), which read as a
+ * second mechanism for the same decision. There is one.
+ */
 export interface StartupIncident {
-  activate(input: {
-    causeCode: string;
-    market?: Market;
-    manual: boolean;
-  }): Promise<unknown>;
+  activate(input: { causeCode: string; market?: Market }): Promise<unknown>;
 }
 export interface StartupCoordinatorOptions {
   readonly markets?: readonly Market[];
@@ -48,9 +50,10 @@ export class StartupCoordinator {
       // A cancelled lease wait (SIGTERM while ACQUIRING_LEASES) is not an
       // invariant failure and must not latch a manual incident.
       if ((error as { name?: string })?.name === 'AbortError') throw error;
+      // The cause code is one of `MANUAL_CAUSES`, so the repository records a
+      // MANUAL incident that no automatic recovery resolves.
       await this.#o.incidents.activate({
         causeCode: 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
-        manual: true,
       });
       // A manual incident is deliberately not resolved or released here.
       throw error;

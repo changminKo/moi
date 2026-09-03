@@ -54,9 +54,12 @@ describe('StartupCoordinator', () => {
       }).open(),
     ).rejects.toThrow('bad');
     expect(open).not.toHaveBeenCalled();
-    expect(activate).toHaveBeenCalledWith(
-      expect.objectContaining({ manual: true }),
-    );
+    // The cause code alone decides MANUAL (repository `MANUAL_CAUSES`); the
+    // coordinator sends nothing else.
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(activate).toHaveBeenCalledWith({
+      causeCode: 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
+    });
   });
   it('propagates an aborted lease wait without recording an invariant incident', async () => {
     const activate = vi.fn(async () => undefined);
