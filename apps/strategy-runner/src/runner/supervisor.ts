@@ -356,7 +356,15 @@ export class RunnerSupervisor {
         runtime: typeof runtime === 'string' ? runtime : null,
         status: response.status,
       };
-    } catch {
+    } catch (error) {
+      // Only the network is swallowed here — an API that is not listening yet
+      // is exactly what this wait is for. A refusal by the client itself (an
+      // origin or path it will not talk to) is a configuration fault and stays
+      // fail-closed.
+      if (error instanceof DomainError) {
+        throw error;
+      }
+
       return { runtime: null, status: null };
     }
   }

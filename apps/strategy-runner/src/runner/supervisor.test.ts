@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DomainError } from '@moi/trading-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openTickRecorder, readTickLog } from '../backtest/tick-log.js';
 import { loadRunnerConfig, type RunnerConfig } from '../config.js';
@@ -371,6 +372,31 @@ describe('startup waits for the API to serve', () => {
         `[info] the paper API is serving waitedMs=${2 * SERVING_POLL_MS}`,
       ],
     );
+  });
+
+  it('does not swallow a refusal by the API client itself while waiting', async () => {
+    const stub = api({ '005930': ['70800'] });
+    const fetch: FetchLike = async (url, init) => {
+      if (new URL(url).pathname === '/health/market-data') {
+        throw new DomainError('INVARIANT_VIOLATION', 'the client refused');
+      }
+
+      return stub.fetch(url, init);
+    };
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter: createRecordingReporter(),
+      fetch,
+      now: clock('2026-08-31T01:00:00.000Z').now,
+      socketFactory: idleSocket,
+    });
+
+    await expect(supervisor.start()).rejects.toThrow('the client refused');
+    supervisor.close();
+    expect(stub.calls).not.toContain('/api/v1/sessions/anonymous');
   });
 
   it('stops waiting when stop() arrives, and creates no session', async () => {

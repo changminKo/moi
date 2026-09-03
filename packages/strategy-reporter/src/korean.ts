@@ -47,8 +47,8 @@ export const KOREAN_MESSAGES: Readonly<Record<string, string>> = {
   'a market-data gap was observed': '시세 데이터 공백이 관측되었습니다',
   'the market stream is ready': '시세 스트림이 준비되었습니다',
   'the paper API is not serving yet; waiting before the first connect':
-    '페이퍼 API 가 아직 서빙 전이라 첫 연결을 기다립니다',
-  'the paper API is serving': '페이퍼 API 가 서빙 중입니다',
+    '페이퍼 API 가 아직 SERVING 이 아니라 첫 연결을 기다립니다',
+  'the paper API is serving': '페이퍼 API 가 SERVING 입니다',
   'the paper API did not reach SERVING before the wait ran out; connecting anyway':
     '페이퍼 API 가 대기 시간 안에 SERVING 에 도달하지 않아 그대로 연결합니다',
   'a runner cycle failed': '러너 사이클이 실패했습니다',
