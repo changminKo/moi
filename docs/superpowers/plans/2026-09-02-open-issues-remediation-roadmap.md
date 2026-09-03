@@ -37,16 +37,20 @@ acceptance criteria. Behaviour changes still follow TDD, the gates in
 
 ### Wave 2: release signal and public mutation safety
 
-- [ ] **#65 P1 — split and fix test instability.** Track container startup
-  budget, deadlock retry-count assertions, and drill process/transport failures
-  separately; they have different causes and acceptance tests.
+- [x] **#65 P1 — split and fix test instability.** Re-read the failed-attempt
+  evidence: 5/7 drill failures were one race in drill step 4 (P1 drains an empty
+  outbox ~60 ms after SIGTERM; the probe polled every 50 ms), 2/7 were
+  `db.destroy` outliving the shutdown budget, one was the vitest hook budget.
+  Step 4 now pins an admitted request; `hookTimeout` 120 s; pool counters and
+  in-flight drain timeouts are logged (PR #111, spec §16.54). The deadlock
+  retry-count assertion in `unit-of-work` remains a separate item.
 - [ ] **#34 P1 — wire HTTP mutation rate limiting.** Prove a production-shaped
   server returns the public 429 contract under a write flood.
 - [ ] **#10 P1 — finish durable cancel-all.** The audit rows exist; add
   Idempotency-Key replay and require GLOBAL cancel-only posture.
 - [ ] **#91 P1 — decode `isRecoveryFill` fail-closed.** Missing or non-boolean
   values must be rejected rather than coerced to `false`.
-- [ ] **#88 P1 — make `onFill` determinism enforceable.** The ledger already
+- [x] **#88 P1 — make `onFill` determinism enforceable.** Done in PR #104 (spec §16.51). The ledger already
   rejects a reused key with a different request hash, so the remaining risk is
   runner replay failure rather than an accepted mismatched order. Document the
   public contract and detect divergence before submission.
@@ -76,22 +80,22 @@ The order above is strict. PR #97 currently computes realised PnL from
   panels alive and ensure caught errors still reach the E2E-visible reporter.
 - [ ] **#71 P2 — give each web quote socket a generation token.** Late frames
   from a replaced socket must not clear or re-arm the live socket heartbeat.
-- [ ] **#95 P2 quick win — repair the event-id dedupe test.** The first event
+- [x] **#95 P2 quick win — repair the event-id dedupe test.** The fixture now applies LIVE; removing the dedupe check fails the test. The first event
   must apply a complete LIVE snapshot and the duplicate must be the reason the
   second delivery is a no-op.
 
 ### Wave 5: strategy-runner packaging and runtime resilience
 
-- [ ] **#92 P2 — use one outbound masker.** Runner imports
+- [x] **#92 P2 — use one outbound masker.** Done in PR #101 (spec §16.49). Runner imports
   `@moi/strategy-reporter`'s `maskOutbound`; remove the app-local duplicate.
-- [ ] **#86 P1 with packaging — harden tool provisioning detection.** The
+- [x] **#86 P1 with packaging — harden tool provisioning detection.** Done in PR #105. The
   checker must not depend on one literal shell-guard spelling.
-- [ ] **#93 P1 when enabling the bot — ship runner image wiring atomically.**
+- [x] **#93 P1 when enabling the bot — ship runner image wiring atomically.** Done in PR #101; the bot was enabled in production on 2026-09-04.
   Dockerfile, publish workflow, compose override, deployment-contract coverage,
   and executable example-config validation land together.
 - [ ] **#96 P1 before tick logging is enabled — rotate `BOT_TICK_LOG`.** Bound
   disk usage and startup replay while preserving an explicit backtest window.
-- [ ] **#89 P2 — count ready-then-close flaps.** Repeated short-lived ready
+- [x] **#89 P2 — count ready-then-close flaps.** Done in PR #104 (spec §16.52). Follow-up #112 (PR #113, spec §16.55): the runner now waits for `runtime: SERVING` before its first connect, so a deploy no longer opens with five refused upgrades. Repeated short-lived ready
   connections must reach the reconnect exhaustion band.
 - [ ] **#38 P2 re-scope — acknowledge subscriptions.** Composite quote ordering
   is implemented in the runner; the remaining work is server acknowledgement
@@ -101,7 +105,7 @@ The order above is strict. PR #97 currently computes realised PnL from
 
 - [ ] **#79 P2 — allocate E2E ports per run.** API, control, and web ports move
   together and concurrent workers cannot reuse another system.
-- [ ] **#12 P2 — re-investigate drain admission after #65 instrumentation.**
+- [ ] **#12 P2 — re-investigate drain admission after #65 instrumentation.** (#65 landed; drill step 4 now holds an admitted request across the drain, which is the scenario #12 observed — re-read the next drill evidence with that in mind.)
   Distinguish an expected draining-leader rejection from harness misrouting.
 - [ ] **#63 P2 — stop accumulating unread recovery incidents.** Either add a
   consumer and a recovery-safe resolution rule, or use a log/metric instead.
@@ -109,7 +113,7 @@ The order above is strict. PR #97 currently computes realised PnL from
   HTTP status without credentials or response secrets.
 - [ ] **#11 P2 — sequence-align stream snapshots.** REPEATABLE READ is already
   present; durable deltas or post-transaction snapshots remain.
-- [ ] **#64 P2 quick win — remove the dead startup `manual` flag.** Behaviour
+- [x] **#64 P2 quick win — remove the dead startup `manual` flag.** Removed; the cause code alone decides MANUAL (spec §16.35). Behaviour
   stays unchanged and the misleading contract disappears.
 - [ ] **#47 Decision — define the heavy-migration policy.** Current production
   volume is small; set and enforce a row-count threshold before it approaches
@@ -137,4 +141,8 @@ The order above is strict. PR #97 currently computes realised PnL from
 |---|---:|---|---|
 | 2026-09-02 | #44 | Complete locally | TDD RED→GREEN; `pnpm check`, `pnpm check:deployment`, and `pnpm test:deployment` (55/55) |
 | 2026-09-02 | #28 | Complete locally | TDD RED→GREEN; fresh-script exec, inherited-mutex, forged-guard, and contract-mutation coverage; deployment tests 58/58 |
+| 2026-09-04 | #44 #28 #83 | Merged and deployed | PR #108 (squash `3c22fdc`), two review lanes × 4 rounds; deployed `3c22fdc` then `95669f9` with the new deploy path verifying image and container revisions |
+| 2026-09-04 | #65 | Merged and deployed | PR #111 (`95669f9`); 3 consecutive local drills + 500 ms-delay experiment; CI drill 3/3; spec §16.54 |
+| 2026-09-04 | #112 | Merged and deployed | PR #113 (`6eb2eae`); first bot restart logged `not serving yet` → `serving waitedMs=9088`, zero `stream errored`; spec §16.55 |
+| 2026-09-04 | #64 #95 | This PR | dead `manual` flag removed; dedupe test applies LIVE and kills the dedupe-removal mutant |
 | 2026-09-02 | #83 | Complete locally | TDD RED→GREEN; publish-label and deploy-wiring mutation coverage; matching, mismatched, missing, and wrong-cardinality revision tests; deployment tests 64/64 |
