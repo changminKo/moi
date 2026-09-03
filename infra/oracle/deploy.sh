@@ -77,8 +77,9 @@ withsecrets "${COMPOSE[*]} pull --quiet"
 
 step "verify image revisions"
 # A mutable tag such as `main` is only a selector. The immutable OCI revision
-# label is the release identity, and every runtime image the stack pulls must
-# agree with the exact checkout before any migration can change the database.
+# label is the release identity, and every GHCR runtime image the stack pulls
+# (caddy/postgres/redis are upstream) must agree with the exact checkout before
+# any migration can change the database.
 # `compose config --images` resolves the active profiles — the bot image is
 # listed (and verified) exactly when COMPOSE_PROFILES=bot pulled it — and
 # prints image references only, so no rendered secret ever lands in a shell

@@ -206,6 +206,14 @@ on the command line: systemd starts the stack from `moi.env` alone, so a tag
 that lived only in the deploy's environment would verify one release and run
 another — the post-restart container check fails such a deploy.
 
+Images published before this label existed can never gain it. To roll back to
+one of them, pin the tag in `moi.env` as above and run
+`sudo MOI_DEPLOY_ALLOW_UNLABELED=1 /opt/moi/infra/oracle/deploy.sh <same sha>`:
+the deploy accepts a *missing* label only when that variable is set and
+`MOI_IMAGE_TAG` equals the checkout, logs a `WARN` per image, and the
+`deploy finished` notification says `UNLABELED legacy image accepted`. A label
+that disagrees is never accepted, and `main` is never exempt.
+
 Timing of the image check: `deploy.sh main` verifies against the commit it just
 checked out, so it fails closed until `Publish images` has promoted that
 commit's images to `main` (a few minutes after the merge; each image moves on

@@ -894,6 +894,91 @@ deploy_reexec ${JSON.stringify(checkedOutScript)} main
     }
   });
 
+  it('fails through the exit trap when the checked-out release has no executable deploy script', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+deploy_reexec ${JSON.stringify(join(sb.dir, 'checkout', 'missing-deploy.sh'))} main
+: > ${JSON.stringify(join(sb.dir, 'old-tail-ran'))}`,
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /cannot re-exec .*missing-deploy\.sh: not an executable file/u,
+      );
+      assert.ok(!existsSync(join(sb.dir, 'old-tail-ran')));
+      assert.ok(
+        !existsSync(join(sb.dir, 'deploy.lock')),
+        'the trap must still remove the marker',
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a forged re-exec guard that opened the mutex file itself while another deploy holds the lock', async () => {
+    const sb = makeSandbox(API);
+    const holderScript = join(sb.dir, 'deploy-holder.sh');
+    const activeMarker = join(sb.dir, 'deploy.lock');
+    const holderReady = `${activeMarker}.holder-ready`;
+    const forgedBody = `${activeMarker}.forged-body-ran`;
+    const env = {
+      PATH: `${sb.bin}:${process.env.PATH}`,
+      DISCORD_WEBHOOK_URL: WEBHOOK,
+      NOTIFY_BIN: notify,
+      MOI_DEPLOY_LOCK: activeMarker,
+      MOI_DEPLOY_MUTEX: join(sb.dir, 'deploy.mutex'),
+      MOI_DEPLOY_MANAGE_TIMER: '0',
+    };
+    writeFileSync(
+      holderScript,
+      `#!/usr/bin/env bash
+set -euo pipefail
+REPO=${JSON.stringify(here)}
+. ${JSON.stringify(deployLib)}
+deploy_begin first
+: > ${JSON.stringify(holderReady)}
+sleep 30 &
+wait
+`,
+    );
+    const holder = spawn('bash', [holderScript], { env, detached: true });
+    const holderExit = new Promise((resolvePromise) => {
+      holder.on('exit', (code, signal) => resolvePromise({ code, signal }));
+    });
+    try {
+      await waitForFile(holderReady);
+      // Descriptor 9 is the mutex file — but a fresh open, not the holder's
+      // inherited description, so the lock it carries is not ours to adopt.
+      const forged = runDeploy(
+        sb,
+        `exec 9>${JSON.stringify(env.MOI_DEPLOY_MUTEX)}
+deploy_begin second
+: > ${JSON.stringify(forgedBody)}`,
+        { extraEnv: { MOI_DEPLOY_REEXEC: '1' } },
+      );
+
+      assert.equal(forged.status, 70, forged.stderr);
+      assert.match(forged.stderr, /re-exec lost its inherited mutex/u);
+      assert.ok(
+        !existsSync(forgedBody),
+        'a forged re-exec must not run its body',
+      );
+      assert.ok(existsSync(activeMarker), 'the active deploy keeps its marker');
+    } finally {
+      if (holder.exitCode === null) process.kill(-holder.pid, 'SIGTERM');
+      await holderExit;
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a forged re-exec guard whose descriptor 9 is open on some other file', () => {
     const sb = makeSandbox(API);
     const marker = join(sb.dir, 'deploy.lock');
@@ -1039,6 +1124,103 @@ verify_release_image_revisions ${expected} \
         /moi-strategy-runner:main revision does not match checkout/u,
       );
       assert.match(r.stderr, new RegExp(`expected ${expected}, got ${stale}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Images published before the label existed can never gain it; a rollback
+  // to one needs the operator's explicit say-so and a tag pinned to that exact
+  // checkout in moi.env — and it is announced.
+  it('accepts an unlabeled legacy image only when explicitly allowed for a pinned rollback, and says so', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin ${expected}
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:${expected} \
+  ghcr.io/changminko/moi-web:${expected}
+deploy_verified ${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: '',
+            FAKE_DOCKER_WEB_REVISION: '',
+            MOI_DEPLOY_ALLOW_UNLABELED: '1',
+            MOI_IMAGE_TAG: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stderr,
+        /WARN: .*moi-paper-api.* has no org\.opencontainers\.image\.revision label; accepted because MOI_DEPLOY_ALLOW_UNLABELED=1/u,
+      );
+      const finished = posted(sb)
+        .map((p) => embed(p))
+        .find((e) => e.title === `deploy finished: ${expected}`);
+      assert.ok(finished, 'the deploy must still report success');
+      assert.match(finished.description, /UNLABELED legacy image accepted/u);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unlabeled image even when allowed, unless MOI_IMAGE_TAG pins this checkout', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:main \
+  ghcr.io/changminko/moi-web:main`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: '',
+            FAKE_DOCKER_WEB_REVISION: '',
+            MOI_DEPLOY_ALLOW_UNLABELED: '1',
+            MOI_IMAGE_TAG: 'main',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(
+        r.stderr,
+        /moi-paper-api:main has no org\.opencontainers\.image\.revision label/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never lets the unlabeled allowance excuse a label that disagrees', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const other = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin ${expected}
+verify_release_image_revisions ${expected} \
+  ghcr.io/changminko/moi-paper-api:${expected} \
+  ghcr.io/changminko/moi-web:${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_PAPER_API_REVISION: '',
+            FAKE_DOCKER_WEB_REVISION: other,
+            MOI_DEPLOY_ALLOW_UNLABELED: '1',
+            MOI_IMAGE_TAG: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /moi-web:.* revision does not match checkout/u);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }

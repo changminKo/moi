@@ -97,14 +97,26 @@ fd9_is_mutex() {
 # and adopts it in the replacement process without posting a second start.
 deploy_reexec() {
   [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ] && return 0
+  # A failed `exec` ends a non-interactive shell with 127 and skips the EXIT
+  # trap: the marker would stay, no failure alert, monitoring silent for
+  # MOI_STATUS_LOCK_MAX_AGE. A ref without the script (or its execute bit)
+  # has to fail through the trap like every other step.
+  if [ ! -x "$1" ]; then
+    echo "FAIL: cannot re-exec $1: not an executable file in the checked-out release" >&2
+    return 1
+  fi
   export MOI_DEPLOY_REEXEC=1
+  shopt -s execfail
   exec "$@"
+  echo "FAIL: exec $1 failed" >&2
+  return 1
 }
 
 # The label publish.yml writes on every runtime image; the contract checker
 # keeps the two spellings equal.
 REVISION_LABEL="org.opencontainers.image.revision"
 REVISION_FORMAT="{{ index .Config.Labels \"$REVISION_LABEL\" }}"
+UNLABELED_ACCEPTED=0
 
 # verify_revisions <image|container> <expected sha> <subject>... — every
 # subject must carry REVISION_LABEL equal to the checkout. A container's
@@ -128,6 +140,15 @@ verify_revisions() {
       return 1
     fi
     if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
+      # Images published before the label existed can never gain it, and a
+      # rollback to one of them must stay possible. The operator says so
+      # explicitly, and only for a release pinned to this exact checkout in
+      # moi.env — never for `main`, never for a label that disagrees.
+      if [ "${MOI_DEPLOY_ALLOW_UNLABELED:-0}" = 1 ] && [ "${MOI_IMAGE_TAG:-}" = "$expected" ]; then
+        echo "WARN: $subject has no $REVISION_LABEL label; accepted because MOI_DEPLOY_ALLOW_UNLABELED=1 and MOI_IMAGE_TAG pins this checkout ($expected) — an image published before revision labels" >&2
+        UNLABELED_ACCEPTED=1
+        continue
+      fi
       echo "FAIL: $subject has no $REVISION_LABEL label" >&2
       return 1
     fi
@@ -152,7 +173,11 @@ verify_running_container_revisions() { verify_revisions container "$@"; }
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {
   VERIFIED=1
-  notify ok "deploy finished: $1" "ref ${DEPLOY_REF}, KR/US NORMAL, placement enabled"
+  local detail="ref ${DEPLOY_REF}, KR/US NORMAL, placement enabled"
+  if [ "$UNLABELED_ACCEPTED" = 1 ]; then
+    detail="$detail — UNLABELED legacy image accepted (MOI_DEPLOY_ALLOW_UNLABELED=1, MOI_IMAGE_TAG pinned)"
+  fi
+  notify ok "deploy finished: $1" "$detail"
 }
 
 on_exit() {

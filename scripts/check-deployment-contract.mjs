@@ -933,6 +933,29 @@ check('host alerting dependencies are provisioned', () => {
 // line cannot be satisfied by that line commented out.
 const readShell = (relative) => read(relative).replace(/^[ \t]*#.*$/gmu, '');
 
+// deploy-lib.sh serializes deploys with flock(1) (util-linux) and checks the
+// inherited mutex descriptor with perl; both must come from bootstrap.sh, or
+// every deploy fails closed at deploy_begin (exit 69) on a fresh host.
+check('deploy mutex dependencies are provisioned', () => {
+  const installed = new Set(
+    [
+      ...read('infra/oracle/bootstrap.sh').matchAll(
+        /apt-get install -y -qq ([^\n]*)/g,
+      ),
+    ].flatMap(([, list]) => list.trim().split(/\s+/)),
+  );
+  for (const pkg of ['util-linux', 'perl'])
+    assert.ok(
+      installed.has(pkg),
+      `bootstrap.sh must install ${pkg}: deploy-lib.sh needs it to take and verify the deploy mutex`,
+    );
+  const lib = readShell('infra/oracle/deploy-lib.sh');
+  assert.ok(
+    lib.includes('flock -n 9') && lib.includes('fd9_is_mutex'),
+    'deploy-lib.sh must take the mutex with flock on descriptor 9 and verify that descriptor on re-exec',
+  );
+});
+
 check('reference deploy re-executes the checked-out script', () => {
   const script = readShell('infra/oracle/deploy.sh');
   const guard = script.indexOf(`if [ "\${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then`);
