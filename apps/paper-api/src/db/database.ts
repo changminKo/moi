@@ -110,8 +110,11 @@ export interface PoolStats {
  * still queued for one. Undefined for a Kysely instance built elsewhere.
  */
 export function poolStats(database: Database): PoolStats | undefined {
-  return (database as { __poolStats?: () => PoolStats }).__poolStats?.();
+  return POOL_STATS.get(database)?.();
 }
+
+/** Pool counter readers, keyed by the Kysely instance `createDatabase` built. */
+const POOL_STATS = new WeakMap<Database, () => PoolStats>();
 
 const POOL_MAX_CONNECTIONS = 10;
 const CONNECTION_TIMEOUT_MS = 10_000;
@@ -178,13 +181,10 @@ export function createDatabase(
     value: () => pool.connect(),
     enumerable: false,
   });
-  Object.defineProperty(database, '__poolStats', {
-    value: (): PoolStats => ({
-      total: pool.totalCount,
-      idle: pool.idleCount,
-      waiting: pool.waitingCount,
-    }),
-    enumerable: false,
-  });
+  POOL_STATS.set(database, () => ({
+    total: pool.totalCount,
+    idle: pool.idleCount,
+    waiting: pool.waitingCount,
+  }));
   return database;
 }

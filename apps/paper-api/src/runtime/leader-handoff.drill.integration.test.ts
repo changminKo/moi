@@ -171,7 +171,15 @@ describe('graceful leader handoff drill (§10.2)', () => {
       // blocked by the same lock.
       const holdClient = await harness.bootstrap(p1);
       await harness.holdSession(holdClient);
-      const heldCancel = harness.cancelOrder(p1, holdClient, randomUUID());
+      // Settled by hand below; the catch keeps a failure between here and
+      // there from adding an unhandled rejection on top of the real one.
+      const heldCancel = harness
+        .cancelOrder(p1, holdClient, randomUUID())
+        .catch((error: unknown) => ({
+          status: -1,
+          headers: new Headers(),
+          body: { code: String(error) },
+        }));
       await waitUntil(
         async () =>
           (await harness.backendsBlockedOn('anonymous_sessions')) >= 1,
@@ -219,6 +227,17 @@ describe('graceful leader handoff drill (§10.2)', () => {
       expect(blocked.body.code).toBe('CANCEL_ONLY');
       // Every step-4 observation was made while P1 was pinned in DRAINING.
       expect(reasons(await harness.trading(p1))).toContain('DRAINING');
+      // The hold is only deterministic inside SHUTDOWN_DRAIN_DEADLINE_MS
+      // (10 s): past it §6.6-3 gives up, the blocked transaction still holds a
+      // pool client, and P1 exits 1 with `db.destroy` timed out — the same
+      // fingerprint as the unrelated step-11 failure. Fail here, by name,
+      // long before that can happen.
+      const heldMs = Date.now() - signalledAt;
+      expect(
+        heldMs,
+        'step 4 held P1 in DRAINING for too long; a forced exit would forge the db.destroy fingerprint',
+      ).toBeLessThan(5_000);
+      evidence.step4HeldMs = heldMs;
       // Let the admitted request finish: it was admitted before the gate
       // closed, so it completes (§6.6-3 "이미 허용된 요청만 drain") — with an
       // unknown order it ends as INVALID_ORDER and touches no ledger row.

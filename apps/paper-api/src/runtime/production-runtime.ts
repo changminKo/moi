@@ -687,9 +687,14 @@ export class ProductionRuntime {
       },
       drainInflight: async (until) => {
         spy('gate.drain')();
-        await this.#gate.drain(until);
+        const http = await this.#gate.drain(until);
         spy('uow.drain')();
-        await this.#uow.drain(until);
+        const uow = await this.#uow.drain(until);
+        // A drain that gives up at the deadline used to leave nothing in the
+        // log — a gauge, then an exit 1 several steps later (#65). Name it
+        // here, with what was still in flight.
+        if (http > 0 || uow > 0)
+          this.#log('shutdown.inflight_drain_timed_out', { http, uow });
       },
       drainOutbox: async (until) => {
         spy('pendingPoll')();

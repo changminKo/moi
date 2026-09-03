@@ -568,15 +568,20 @@ export class TwoProcessHarness {
    */
   async holdSession(client: DrillClient): Promise<void> {
     if (this.#holder !== null) throw new Error('a session is already held');
-    this.#holder = new Client({
+    const holder = new Client({
       connectionString: this.postgres.getConnectionUri(),
     });
-    await this.#holder.connect();
-    await this.#holder.query('begin');
-    await this.#holder.query(
+    await holder.connect();
+    this.#holder = holder;
+    await holder.query('begin');
+    const locked = await holder.query(
       'select id from anonymous_sessions where id = $1::uuid for update',
       [client.id],
     );
+    if (locked.rowCount !== 1)
+      throw new Error(
+        `holdSession locked ${locked.rowCount ?? 0} rows for session ${client.id}; nothing would block`,
+      );
   }
 
   async releaseSession(): Promise<void> {
@@ -587,12 +592,20 @@ export class TwoProcessHarness {
     await holder.end().catch(() => undefined);
   }
 
-  /** Backends (other than ours) blocked on a lock while touching `table`. */
+  /**
+   * Backends (other than ours) blocked on a row lock while locking `table` —
+   * the statement text must name the table and ask `for … update`, so a read
+   * of the same table waiting on something else does not count. Asked on the
+   * autocommit `observer`, never on the lock holder: pg_stat_activity is
+   * snapshotted at first read within a transaction, and the holder's would
+   * freeze on the moment before anything blocked.
+   */
   async backendsBlockedOn(table: string): Promise<number> {
     const result = await this.observer.query<{ n: number }>(
       `select count(*)::int as n from pg_stat_activity
          where wait_event_type = 'Lock'
            and query ilike $1
+           and query ilike '%for%update%'
            and pid <> pg_backend_pid()`,
       [`%${table}%`],
     );

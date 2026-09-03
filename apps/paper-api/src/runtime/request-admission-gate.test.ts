@@ -139,7 +139,8 @@ describe('RequestAdmissionGate', () => {
     socket.destroy();
     await vi.waitFor(() => expect(gate.inFlight).toBe(0));
     const drained = gate.drain(Date.now() + 1_000);
-    await expect(drained).resolves.toBeUndefined();
+    // Resolved with nothing left in flight: the abort settled the request.
+    await expect(drained).resolves.toBe(0);
     deferred.resolve();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(gate.inFlight).toBe(0);
@@ -215,7 +216,7 @@ describe('RequestAdmissionGate', () => {
     const pending = app.inject({ method: 'GET', url: '/api/v1/portfolio' });
     await vi.waitFor(() => expect(gate.inFlight).toBe(1));
     gate.close();
-    await gate.drain(Date.now() + 120);
+    expect(await gate.drain(Date.now() + 120)).toBe(1);
     expect(metrics.metrics()).toContain('http_admission_drain_remaining 1');
     deferred.resolve();
     await pending;

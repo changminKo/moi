@@ -415,6 +415,73 @@ describe('ProductionRuntime', () => {
     TEST_TIMEOUT_MS,
   );
 
+  // #65 (review): the drill's step 4 now pins an admitted request across
+  // SIGTERM. Past SHUTDOWN_DRAIN_DEADLINE_MS the drains give up and the process
+  // exits 1 — and until now nothing in its log said an in-flight request was
+  // the reason.
+  it(
+    'A5c: an admitted request that outlives the drain deadline is named in the log, not only in the exit code',
+    async () => {
+      const { runtime, logs, origin } = await start();
+      const client = await anonymousSession(origin);
+      const holder = new Client({ connectionString: databaseUrl });
+      await holder.connect();
+      await holder.query('begin');
+      await holder.query(
+        'select id from anonymous_sessions where id = $1::uuid for update',
+        [client.id],
+      );
+      // pg_stat_activity is snapshotted at first read within a transaction,
+      // so the holder (mid-transaction) would keep reporting the moment
+      // before the request blocked; probe from an autocommit connection.
+      const probe = new Client({ connectionString: databaseUrl });
+      await probe.connect();
+      // Admitted, then blocked at LEDGER_LOCK_ORDER's first step.
+      const held = fetch(`${origin}/api/v1/orders/${randomUUID()}`, {
+        method: 'DELETE',
+        headers: {
+          origin: 'http://127.0.0.1:0',
+          cookie: client.cookie,
+          'x-csrf-token': client.csrf,
+          'idempotency-key': randomUUID(),
+        },
+      }).catch(() => undefined);
+      try {
+        const deadline = Date.now() + 5_000;
+        let blocked = 0;
+        while (blocked < 1 && Date.now() < deadline) {
+          blocked =
+            (
+              await probe.query<{ n: number }>(
+                `select count(*)::int as n from pg_stat_activity
+                   where wait_event_type = 'Lock'
+                     and query ilike '%anonymous_sessions%'
+                     and query ilike '%for%update%'
+                     and pid <> pg_backend_pid()`,
+              )
+            ).rows[0]?.n ?? 0;
+          if (blocked < 1) await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(blocked, 'the request must be blocked on the session row').toBe(
+          1,
+        );
+
+        const stopped = await runtime.stop();
+        expect(stopped.forced).toBe(true);
+        const named = logs.find(
+          (l) => l.event === 'shutdown.inflight_drain_timed_out',
+        );
+        expect(named?.fields).toMatchObject({ http: 1, uow: 1 });
+      } finally {
+        await holder.query('rollback').catch(() => undefined);
+        await holder.end().catch(() => undefined);
+        await probe.end().catch(() => undefined);
+        await held;
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it(
     'A5: stop() follows the §6.6 order, drains the outbox, releases leases, and exits cleanly',
     async () => {

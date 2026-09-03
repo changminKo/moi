@@ -84,17 +84,20 @@ handoff therefore remains unchecked below.
   `2026-08-29T13-14-11.420Z` — each `peakConcurrentConnections=2`, `evictions=0`. One
   earlier run that day failed without a captured reason and passed on the
   immediate rerun (6 of 7 runs green); treat as a flake to watch, not evidence.
-  Resolved 2026-09-04 (#65, spec §16.54): six of the seven CI drill failures
+  Resolved 2026-09-04 (#65, spec §16.54): five of the seven CI drill failures
   over 2026-08-30 … 09-02 were one race in step 4 — the probe that had to see
   P1 in `DRAINING` ran against a process that drains an empty outbox in ~30 ms
   and exits ~60 ms after `SIGTERM`; on a loaded runner the poll landed after
   the exit (`timed out waiting for P1 DRAINING`, `fetch failed`). Step 4 now
   pins one admitted request inside P1 (a second session's row held locked by
   the harness) so `DRAINING` is observed, not raced; the same drill passes with
-  a deliberate 500 ms delay after the signal. The seventh (`p3Exit.code=1`) was
-  `db.destroy` outliving the shutdown budget; the forced stop now logs the pool
-  counters so a recurrence carries its own evidence. Evidence: 3 consecutive
-  local runs plus the 500 ms-delay run, `step4DrainingObservedMs` 1 ms / 502 ms.
+  a deliberate 500 ms delay after the signal. The other two (`p3Exit.code=1`)
+  were `db.destroy` outliving the shutdown budget; the forced stop now logs the
+  pool counters so a recurrence carries its own evidence. Evidence (HEAD of
+  PR #111): 3 consecutive local runs — `2026-09-03T15-40-19.165Z-drill.json`,
+  `2026-09-03T15-41-40.193Z-drill.json`, `2026-09-03T15-41-48.451Z-drill.json`
+  — plus the 500 ms-delay run `2026-09-03T15-41-12.001Z-drill.json`
+  (`step4DrainingObservedMs` 1 ms / 502 ms), and the PR's CI drill 3/3.
   Known: under whole-monorepo
   parallel `pnpm test` load the 100 ms split-lease sampler once caught the
   surviving-lease release window of a re-electing process (harmless — that

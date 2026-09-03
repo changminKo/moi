@@ -13,6 +13,7 @@ describe('runtime static audit (§11.1)', () => {
   const state = read('./runtime-state.ts');
   const hub = read('../modules/stream/stream-hub.ts');
   const gate = read('./request-admission-gate.ts');
+  const main = read('../main.ts');
 
   it('publisher.start() has exactly one call site: RuntimeStateMachine.enterServing', () => {
     expect(runtime.match(/publisher\.start\(/g) ?? []).toHaveLength(0);
@@ -129,5 +130,15 @@ describe('runtime static audit (§11.1)', () => {
     expect(main).not.toMatch(
       /cancelOnly|placeImmediateOrder|registerHealthRoutes/,
     );
+  });
+
+  it('main.ts builds the runtime without the test-only database seam', () => {
+    // `ProductionRuntimeOptions.database` exists so a test can hold one of the
+    // pool's clients; production always builds its own from DATABASE_URL.
+    const construction = main.slice(
+      main.indexOf('new ProductionRuntime({'),
+      main.indexOf('});', main.indexOf('new ProductionRuntime({')),
+    );
+    expect(construction).not.toMatch(/\bdatabase\s*[:,]/);
   });
 });

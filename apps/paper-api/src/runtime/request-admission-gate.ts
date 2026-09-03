@@ -144,13 +144,15 @@ export class RequestAdmissionGate {
     this.#closed = false;
   }
 
-  async drain(deadline: number): Promise<void> {
+  /** Waits for admitted requests to settle; returns how many still had not at the deadline. */
+  async drain(deadline: number): Promise<number> {
     while (this.#inFlight > 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
     }
     if (this.#inFlight > 0) {
       this.#metrics?.gauge('http_admission_drain_remaining', this.#inFlight);
     }
+    return this.#inFlight;
   }
 
   #settle(request: FastifyRequest): void {
