@@ -202,7 +202,27 @@ describe('check-deployment-contract (A8)', () => {
     [
       'a message that names a different tool than the probe',
       'command -v jq >/dev/null 2>&1 || soft_fail "rsync missing, nothing posted"',
-      /the guard probes jq but the message names rsync/,
+      /unrecognised dependency guard in infra\/oracle\/notify\.sh:\d+: .* names rsync as missing but no probe/,
+    ],
+    [
+      'an if/then block',
+      'if ! command -v rsync >/dev/null 2>&1; then\n  soft_fail "rsync missing, nothing posted"\nfi',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a brace group after the probe',
+      'command -v rsync >/dev/null 2>&1 || { soft_fail "rsync missing, nothing posted"; }',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a probe of a variable',
+      'for tool in rsync; do command -v "$tool" >/dev/null 2>&1 || soft_fail "$tool missing"; done',
+      /unrecognised dependency guard in infra\/oracle\/notify\.sh:\d+: cannot name the tool/,
+    ],
+    [
+      'a probe with no soft_fail at all',
+      'hash rsync 2>/dev/null || exit 1',
+      /notify\.sh requires rsync/,
     ],
   ];
   for (const [name, guard, message] of guardCases)

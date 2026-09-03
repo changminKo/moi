@@ -718,42 +718,52 @@ check('no committed secrets', () => {
 });
 
 /**
- * The tools `notify.sh` guards with `… || soft_fail`, read from the script.
+ * The external tools `notify.sh` depends on, read from the script.
  *
- * A guard is any of the shell's ways of asking whether a command exists —
- * `command -v`, `type -p`, `type`, `which`, `hash` — with or without a
- * redirect. A line that reaches `soft_fail` for a missing tool in a shape this
- * parser does not read is an error, not a miss: the check only holds while
- * every guard is counted, and a parser that quietly skipped one would be the
- * silent failure it exists to catch (#86). The message convention
- * (`"<tool> missing, …"`) is the second witness: a guard whose command and
- * message name different tools is misread by somebody.
+ * A dependency is counted wherever the script **probes** for a command —
+ * `command -v`, `type -p`, `type`, `which`, `hash` — whatever the probe is
+ * wired to: `|| soft_fail`, `|| { soft_fail …; }`, `if ! …; then`. Counting
+ * the probe rather than the `soft_fail` is what keeps the list honest when the
+ * next person writes the guard in another idiom (#86). Two things fail the
+ * build instead of being skipped: a probe whose target this checker cannot
+ * name (a variable, a quoted word), and a `soft_fail "<tool> missing…"`
+ * message with no probe for that tool on the same line or the lines just
+ * above it — a guard in a shape the parser does not read, which must not
+ * drop the tool out of the list silently.
  */
 function notifyDependencyGuards(script) {
-  const guardLine =
-    /^\s*(?:command -v|type -p|type|which|hash)\s+(\S+)(?:\s*(?:>\/dev\/null 2>&1|&>\/dev\/null|>\/dev\/null|2>\/dev\/null))?\s*\|\|\s*soft_fail\b(?:\s+"([^"]*)")?/;
-  const missingTool = /^(\S+) missing\b/;
-  const guards = [];
-  script.split('\n').forEach((line, index) => {
-    if (!/\|\|\s*soft_fail\b/.test(line)) return;
-    const parsed = guardLine.exec(line);
-    const message = /soft_fail\s+"([^"]*)"/.exec(line)?.[1] ?? '';
-    const named = missingTool.exec(message)?.[1];
-    if (parsed) {
-      const [, tool] = parsed;
+  const probe = /(?:^|[\s!;{(])(?:command -v|type -p|type|which|hash)\s+(\S+)/g;
+  const missing = /soft_fail\s+"(\S+) missing\b/;
+  const lines = script.split('\n');
+  const tools = new Set();
+  const probedAt = [];
+  lines.forEach((line, index) => {
+    const at = `infra/oracle/notify.sh:${index + 1}`;
+    if (/^\s*#/.test(line)) return;
+    const here = [];
+    for (const [, raw] of line.matchAll(probe)) {
+      const tool = raw.replace(/^["']|["']$/g, '');
       assert.ok(
-        named === undefined || named === tool,
-        `unrecognised dependency guard in infra/oracle/notify.sh:${index + 1}: the guard probes ${tool} but the message names ${named}`,
+        /^[A-Za-z0-9_.+-]+$/.test(tool.split('/').pop()) && !tool.includes('$'),
+        `unrecognised dependency guard in ${at}: cannot name the tool "${raw}" probes; guard each tool by its literal name`,
       );
-      guards.push(tool);
-      return;
+      here.push(tool.split('/').pop());
     }
+    for (const tool of here) {
+      tools.add(tool);
+      probedAt.push({ tool, index });
+    }
+    const named = missing.exec(line)?.[1];
+    if (named === undefined) return;
+    const nearby = probedAt.some(
+      (each) => each.tool === named && index - each.index <= 2,
+    );
     assert.ok(
-      named === undefined,
-      `unrecognised dependency guard in infra/oracle/notify.sh:${index + 1}: "${line.trim()}" names ${named} as missing but is not a command probe this checker reads (command -v | type -p | type | which | hash)`,
+      nearby,
+      `unrecognised dependency guard in ${at}: "${line.trim()}" names ${named} as missing but no probe for it (command -v | type -p | type | which | hash) is on this line or the two above`,
     );
   });
-  return guards;
+  return [...tools];
 }
 
 /**
