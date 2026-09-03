@@ -2,6 +2,8 @@ import type { InstrumentRef } from '@moi/strategy-sdk/strategy';
 import { describe, expect, it } from 'vitest';
 import { createRecordingReporter } from '../reporter.js';
 import {
+  LIVENESS_INTERVALS,
+  MIN_HEARTBEAT_MS,
   StreamClient,
   type StreamHandlers,
   type StreamSocket,
@@ -648,6 +650,33 @@ describe('reconnection', () => {
     (h.sockets[7] as FakeSocket).drop();
     await settle();
     expect(h.delays[h.delays.length - 1]).toBeGreaterThanOrEqual(15_000);
+  });
+
+  /**
+   * The server's advertised interval sizes both the liveness deadline and the
+   * stability window. An absurd value — `1` — would make the stability window
+   * a formality and #89's defence vanish, so it is floored.
+   */
+  it('floors an absurd advertised heartbeat interval', async () => {
+    const h = harness();
+
+    h.client.start();
+    await h.fire();
+
+    const socket = h.sockets[0] as FakeSocket;
+
+    socket.open();
+    socket.send({
+      type: 'ready',
+      accountSequence: '1',
+      heartbeatIntervalMs: 1,
+    });
+    await settle();
+
+    expect(h.delays.slice(-2)).toStrictEqual([
+      MIN_HEARTBEAT_MS,
+      MIN_HEARTBEAT_MS * LIVENESS_INTERVALS,
+    ]);
   });
 
   it('replaces a socket that stopped sending heartbeats', async () => {

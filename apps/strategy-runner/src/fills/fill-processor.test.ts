@@ -73,6 +73,7 @@ interface WireFill {
   readonly price?: string;
   readonly fee?: string;
   readonly side?: 'BUY' | 'SELL';
+  readonly symbol?: string;
   readonly accountSequence?: string | null;
 }
 
@@ -84,7 +85,7 @@ function wireFill(fill: WireFill, sequence: string): Record<string, unknown> {
       fill.accountSequence === undefined ? sequence : fill.accountSequence,
     orderId: 'order-a',
     market: 'KR',
-    symbol: '005930',
+    symbol: fill.symbol ?? '005930',
     side: fill.side ?? 'BUY',
     quantity: fill.quantity ?? '10',
     price: fill.price ?? '1000',
@@ -206,6 +207,8 @@ function build(
     readonly killSwitch?: {
       engage: (...args: unknown[]) => Promise<void>;
     };
+    /** Further strategies, each owning one more KR symbol, answering alike. */
+    readonly extraOwners?: readonly { name: string; symbol: string }[];
   } = {},
 ) {
   const reporter = createRecordingReporter();
@@ -222,25 +225,32 @@ function build(
     reestablishSession: async () => {},
     now: () => NOW_MS,
   });
-  const host = new StrategyHost({
-    configured: {
-      name: 'samsung',
-      strategy: strategyAnswering((fill) => {
-        options.seen?.push(fill);
+  const hostFor = (name: string, symbol: string): StrategyHost =>
+    new StrategyHost({
+      configured: {
+        name,
+        strategy: strategyAnswering((fill) => {
+          options.seen?.push(fill);
 
-        return options.answer?.(fill) ?? [];
-      }),
-      params: {},
-      subscriptions: [{ market: 'KR', symbol: '005930' }],
-    },
-    reporter,
-  });
+          return options.answer?.(fill) ?? [];
+        }),
+        params: {},
+        subscriptions: [{ market: 'KR', symbol }],
+      },
+      reporter,
+    });
+  const host = hostFor('samsung', '005930');
+  const owner = new Map([['KR:005930', host]]);
+
+  for (const extra of options.extraOwners ?? []) {
+    owner.set(`KR:${extra.symbol}`, hostFor(extra.name, extra.symbol));
+  }
   const processor = new FillProcessor({
     state,
     gateway,
     reporter,
     context: new RunnerContext(() => NOW_MS),
-    owner: new Map([['KR:005930', host]]),
+    owner,
     portfolio: async () => {
       if (options.portfolioReads !== undefined) {
         options.portfolioReads.count += 1;
@@ -657,6 +667,38 @@ describe('exactly once', () => {
       deriveIdempotencyKey('fill:12:samsung:0'),
       deriveIdempotencyKey('fill:12:samsung:1'),
     ]);
+  });
+
+  it('numbers each strategy on its own when one event fills two of them', async () => {
+    const broker = new RecordingBroker();
+    const engaged: unknown[][] = [];
+    const { processor, state } = build(scratch(), {
+      broker,
+      answer: () => [ENTRY],
+      extraOwners: [{ name: 'hynix', symbol: '000660' }],
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
+
+    await processor.process(
+      fillEvent('12', [
+        { id: 'fill-1' },
+        { id: 'fill-2', symbol: '000660' },
+        { id: 'fill-3', price: '1010' },
+      ]),
+    );
+
+    expect(engaged).toStrictEqual([]);
+    expect(state.fills.cursor).toBe('12');
+    // samsung's two fills count 0 and 1; hynix starts at 0 of its own.
+    expect(broker.submitted.map((each) => each.key).sort()).toStrictEqual(
+      ['fill:12:samsung:0', 'fill:12:samsung:1', 'fill:12:hynix:0']
+        .map(deriveIdempotencyKey)
+        .sort(),
+    );
   });
 
   it('replays a two-fill event against the same numbering', async () => {

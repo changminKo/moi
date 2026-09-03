@@ -64,6 +64,12 @@ export const LIVENESS_INTERVALS = 3;
 export const STABLE_AFTER_INTERVALS = 1;
 /** Used until a `ready` frame states the server's own interval. */
 export const DEFAULT_HEARTBEAT_MS = 30_000;
+/**
+ * The least an advertised interval is taken to be. It sizes both the liveness
+ * deadline and the stability window; a server (or a proxy rewriting frames)
+ * advertising `1` would make the window a formality and #89's defence vanish.
+ */
+export const MIN_HEARTBEAT_MS = 1_000;
 
 export interface StreamSocket {
   onopen?: (() => void) | undefined;
@@ -452,7 +458,7 @@ export class StreamClient {
     const stated = typeof advertised === 'number' && advertised > 0;
 
     if (stated) {
-      this.#heartbeatMs = advertised;
+      this.#heartbeatMs = Math.max(advertised, MIN_HEARTBEAT_MS);
     }
 
     this.#armStability();
