@@ -738,7 +738,7 @@ describe('check-deployment-contract (A8)', () => {
       const file = join(d, 'infra/oracle/deploy.sh');
       const before = readFileSync(file, 'utf8');
       const after = before.replace(
-        `verify_release_image_revisions "$checkout_sha" "$paper_api_image" "$web_image" \${bot_image:+"$bot_image"}\n`,
+        `verify_release_image_revisions "$checkout_sha" "\${release_images[@]}"\n`,
         '',
       );
       assert.notEqual(
@@ -754,6 +754,84 @@ describe('check-deployment-contract (A8)', () => {
       assert.match(
         result.stderr,
         /deploy\.sh must verify pulled image revisions before migrations/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when the deploy wiring is merely commented out', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before
+        .replace(
+          '  deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"\n',
+          '  # deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"\n',
+        )
+        .replace(
+          `verify_release_image_revisions "$checkout_sha" "\${release_images[@]}"\n`,
+          `# verify_release_image_revisions "$checkout_sha" "\${release_images[@]}"\n`,
+        );
+      assert.notEqual(after, before, 'comment-out mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must re-exec the checked-out script once/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy stops verifying the running containers', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_running_container_revisions "$checkout_sha" "\${running_ids[@]}"\n`,
+        '',
+      );
+      assert.notEqual(
+        after,
+        before,
+        'container-verification mutation matched nothing',
+      );
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must verify the running containers after the restart/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy-lib reads a label other than the one publish writes', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'REVISION_LABEL="org.opencontainers.image.revision"',
+        'REVISION_LABEL="org.opencontainers.image.revison"',
+      );
+      assert.notEqual(after, before, 'label-key mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy-lib\.sh must read the revision label publish\.yml writes/u,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

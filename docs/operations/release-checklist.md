@@ -61,10 +61,12 @@ handoff therefore remains unchecked below.
   start/finish notifications remain single; the deployment-contract mutation
   test fails when the `deploy.sh` wiring is removed.
 - [x] A reference-host deploy rejects stale or mixed runtime images before
-  migrations. Evidence: the publish workflow labels every runtime image with
-  the source revision; deploy-lib tests cover matching, mismatched, missing,
-  stale bot image, and too few images; deployment-contract mutation tests
-  fail if either publishing or deploy verification is removed.
+  migrations, and rejects running containers at another revision before it
+  reports success. Evidence: the publish workflow labels every runtime image
+  with the source revision; deploy-lib tests cover matching, mismatched,
+  missing, stale bot image, too few images, and a running container off the
+  verified revision; deployment-contract mutation tests fail if publishing,
+  either verification, or the shared label key is removed or commented out.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`

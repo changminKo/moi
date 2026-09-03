@@ -60,8 +60,8 @@ deploy_begin() {
     return 69
   fi
   if [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ]; then
-    if [ ! -e /dev/fd/9 ] || [ ! -e "$DEPLOY_LOCK" ] || ! flock -n 9; then
-      echo "FAIL: deploy re-exec lost its inherited mutex or active marker" >&2
+    if ! fd9_is_mutex || [ ! -e "$DEPLOY_LOCK" ] || ! flock -n 9; then
+      echo "FAIL: deploy re-exec lost its inherited mutex or active marker (unset MOI_DEPLOY_REEXEC if it leaked from your shell)" >&2
       return 70
     fi
     DEPLOY_OWNS_MUTEX=1
@@ -79,6 +79,19 @@ deploy_begin() {
   notify info "deploy started: ${DEPLOY_REF}" "host $(hostname)"
 }
 
+# True when descriptor 9 is open on the mutex file itself — not merely open.
+# A re-exec guard leaked from an operator shell (`sudo -E`) arrives with no
+# descriptor, or with one on some unrelated file; flock would happily lock
+# either. perl is a bootstrap dependency (notify.sh masks with it).
+fd9_is_mutex() {
+  perl -e '
+    my @file = stat($ARGV[0]) or exit 1;
+    open(my $fd, "<&=", 9) or exit 1;
+    my @held = stat($fd) or exit 1;
+    exit(($file[0] == $held[0] && $file[1] == $held[1]) ? 0 : 1);
+  ' "$DEPLOY_MUTEX"
+}
+
 # Replace the pre-fetch process with the script from the checked-out release.
 # Descriptor 9 is intentionally inherited across exec; deploy_begin validates
 # and adopts it in the replacement process without posting a second start.
@@ -88,30 +101,52 @@ deploy_reexec() {
   exec "$@"
 }
 
-verify_release_image_revisions() {
-  local expected="$1"
-  local image revision
-  shift
+# The label publish.yml writes on every runtime image; the contract checker
+# keeps the two spellings equal.
+REVISION_LABEL="org.opencontainers.image.revision"
+REVISION_FORMAT="{{ index .Config.Labels \"$REVISION_LABEL\" }}"
+
+# verify_revisions <image|container> <expected sha> <subject>... — every
+# subject must carry REVISION_LABEL equal to the checkout. A container's
+# Config.Labels are its image's labels, so the same read works for both.
+verify_revisions() {
+  local kind="$1" expected="$2"
+  local subject revision
+  shift 2
   if [ "$#" -lt 2 ]; then
-    echo "FAIL: revision verification requires at least the two public release images" >&2
+    echo "FAIL: revision verification requires at least the two public release ${kind}s" >&2
     return 64
   fi
-  for image in "$@"; do
-    if ! revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"; then
-      echo "FAIL: cannot inspect release image $image" >&2
+  for subject in "$@"; do
+    if [ "$kind" = image ]; then
+      revision="$(docker image inspect --format "$REVISION_FORMAT" "$subject")" || revision=__inspect_failed__
+    else
+      revision="$(docker inspect --format "$REVISION_FORMAT" "$subject")" || revision=__inspect_failed__
+    fi
+    if [ "$revision" = __inspect_failed__ ]; then
+      echo "FAIL: cannot inspect release $kind $subject" >&2
       return 1
     fi
     if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
-      echo "FAIL: $image has no org.opencontainers.image.revision label" >&2
+      echo "FAIL: $subject has no $REVISION_LABEL label" >&2
       return 1
     fi
     if [ "$revision" != "$expected" ]; then
-      echo "FAIL: $image revision does not match checkout (expected $expected, got $revision)" >&2
+      echo "FAIL: $subject revision does not match checkout (expected $expected, got $revision)" >&2
       return 1
     fi
   done
-  echo "release images verified at $expected"
+  echo "release ${kind}s verified at $expected"
 }
+
+# Pulled images, before migrations: a mutable tag is only a selector.
+verify_release_image_revisions() { verify_revisions image "$@"; }
+
+# Running containers, after the restart: systemd starts the stack from
+# /etc/moi/moi.env alone, so an image tag pinned only on the deploy command
+# line would verify one release and run another. The containers themselves
+# are the last word.
+verify_running_container_revisions() { verify_revisions container "$@"; }
 
 # Called by deploy.sh only after readiness, both markets NORMAL and placement
 # were observed; the exit trap treats any other exit 0 as a failure.

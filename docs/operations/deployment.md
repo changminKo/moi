@@ -199,8 +199,21 @@ set `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`, then invoke
 published runtime image (`paper-api`, `web`, `strategy-runner`) carries that
 SHA in `org.opencontainers.image.revision`; the deploy inspects the label of
 every image the active profiles pulled and refuses a missing or different
-revision before migrations run. Do not pair a previous image tag with `main`
-or any other code ref.
+revision before migrations run, then reads the same label off the running
+containers after the restart before it reports success. Do not pair a previous
+image tag with `main` or any other code ref, and pin the tag in `moi.env`, not
+on the command line: systemd starts the stack from `moi.env` alone, so a tag
+that lived only in the deploy's environment would verify one release and run
+another — the post-restart container check fails such a deploy.
+
+Timing of the image check: `deploy.sh main` verifies against the commit it just
+checked out, so it fails closed until `Publish images` has promoted that
+commit's images to `main` (a few minutes after the merge; each image moves on
+its own). Wait for the publish, or deploy the last promoted SHA explicitly. A
+Trivy finding that fails the publish leaves `main` on the previous images, and
+`deploy.sh main` refuses them for the same reason until the finding is fixed.
+Rolling back to a ref older than these checks runs that ref's `deploy.sh`: it
+fetches once more, posts `deploy started` twice and verifies no revision.
 
 Roll back when: any `InvariantViolation` or `TransactionalAuditFailure`
 within 30 minutes of a deploy; markets fail to reach NORMAL after two recovery
@@ -345,7 +358,8 @@ requires, and the artefacts are the same ones the local smoke uses.
    untouched) → one-off migration job with the new image
    (`node dist/migrate-cli.js`) while the old release still serves → `systemctl restart moi` (compose
    recreates containers stop-then-start, the 45 s grace period lets the leader
-   drain) → readiness, both markets `NORMAL`, placement enabled.
+   drain) → readiness, both markets `NORMAL`, placement enabled, and every
+   running runtime container carries the checked-out revision label.
    Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
    and passing that same full SHA to `deploy.sh`; mixing a tag and a different
    ref fails before migrations.

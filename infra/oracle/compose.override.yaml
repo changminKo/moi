@@ -29,8 +29,10 @@ services:
       moi.role: tls-edge
 
   # Images come from GHCR (built by .github/workflows/publish.yml); the host
-  # never builds. MOI_IMAGE_TAG defaults to `main`; pin a commit sha to roll
-  # back (`MOI_IMAGE_TAG=<sha> infra/oracle/deploy.sh`).
+  # never builds. MOI_IMAGE_TAG defaults to `main`; to roll back, pin the full
+  # commit sha in /etc/moi/moi.env (systemd reads only that file) and pass the
+  # same sha to `infra/oracle/deploy.sh <sha>`; the deploy verifies the pulled
+  # images and the running containers against the checkout.
   web:
     image: ghcr.io/changminko/moi-web:${MOI_IMAGE_TAG:-main}
     build: !reset null

@@ -929,8 +929,12 @@ check('host alerting dependencies are provisioned', () => {
     );
 });
 
+// Shell with its comment lines removed, so a check that looks for a wiring
+// line cannot be satisfied by that line commented out.
+const readShell = (relative) => read(relative).replace(/^[ \t]*#.*$/gmu, '');
+
 check('reference deploy re-executes the checked-out script', () => {
-  const script = read('infra/oracle/deploy.sh');
+  const script = readShell('infra/oracle/deploy.sh');
   const guard = script.indexOf(`if [ "\${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then`);
   const fetch = script.indexOf('as_owner git fetch -q origin "$REF"');
   const checkout = script.indexOf(
@@ -952,19 +956,19 @@ check('reference deploy re-executes the checked-out script', () => {
 });
 
 check('reference deploy verifies pulled image revisions', () => {
-  const script = read('infra/oracle/deploy.sh');
+  const script = readShell('infra/oracle/deploy.sh');
   const pull = script.indexOf(`withsecrets "\${COMPOSE[*]} pull --quiet"`);
   const checkoutSha = script.indexOf(
     'checkout_sha="$(as_owner git rev-parse HEAD)"',
   );
-  const composeConfig = script.indexOf(
-    `compose_json="$(withsecrets "\${COMPOSE[*]} config --format json")"`,
+  // `config --images` prints image references only; the full rendered config
+  // carries every secret value (rule 2) and must never sit in a variable.
+  const images = script.indexOf(
+    `mapfile -t release_images < <(withsecrets "\${COMPOSE[*]} config --images" | grep '^ghcr.io/changminko/moi-' | sort -u)`,
   );
-  const paperApiImage = script.indexOf(`.services["paper-api"].image`);
-  const webImage = script.indexOf('.services.web.image');
-  const botImage = script.indexOf('.services.bot.image // empty');
+  const required = script.indexOf('for required in paper-api web; do');
   const verify = script.indexOf(
-    `verify_release_image_revisions "$checkout_sha" "$paper_api_image" "$web_image" \${bot_image:+"$bot_image"}`,
+    `verify_release_image_revisions "$checkout_sha" "\${release_images[@]}"`,
   );
   const migrations = script.indexOf(
     'step "migrations (new image, old release still serving)"',
@@ -973,15 +977,49 @@ check('reference deploy verifies pulled image revisions', () => {
   assert.ok(
     pull >= 0 &&
       pull < checkoutSha &&
-      checkoutSha < composeConfig &&
-      composeConfig < paperApiImage &&
-      paperApiImage < webImage &&
-      webImage < botImage &&
-      botImage < verify &&
+      checkoutSha < images &&
+      images < required &&
+      required < verify &&
       verify < migrations,
     'deploy.sh must verify pulled image revisions before migrations',
   );
+  assert.doesNotMatch(
+    script,
+    /config --format json/u,
+    'deploy.sh must not capture the rendered compose config (it carries every secret value)',
+  );
 });
+
+// systemd starts the stack from /etc/moi/moi.env alone, so the pulled-image
+// check cannot see a MOI_IMAGE_TAG pinned only on the deploy command line;
+// the running containers are checked again before the deploy calls itself done.
+check(
+  'reference deploy verifies the running containers before reporting success',
+  () => {
+    const script = readShell('infra/oracle/deploy.sh');
+    const restart = script.indexOf('systemctl restart moi');
+    const services = script.indexOf('running_services=(paper-api web)');
+    const bot = script.indexOf(
+      '[ "$bot_enabled" = 1 ] && running_services+=(bot)',
+    );
+    const ids = script.indexOf(
+      `mapfile -t running_ids < <(withsecrets "\${COMPOSE[*]} ps -q \${running_services[*]}")`,
+    );
+    const verify = script.indexOf(
+      `verify_running_container_revisions "$checkout_sha" "\${running_ids[@]}"`,
+    );
+    const done = script.indexOf('deploy_verified "$sha"');
+    assert.ok(
+      restart >= 0 &&
+        restart < services &&
+        services < bot &&
+        bot < ids &&
+        ids < verify &&
+        verify < done,
+      'deploy.sh must verify the running containers after the restart and before deploy_verified',
+    );
+  },
+);
 
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
@@ -1227,10 +1265,20 @@ check('published runtime images carry source revision', () => {
     String(step.uses ?? '').startsWith('docker/build-push-action@'),
   );
   assert.ok(build, 'publish workflow must use docker/build-push-action');
+  const label = 'org.opencontainers.image.revision';
   assert.equal(
     String(build.with?.labels ?? ''),
-    `org.opencontainers.image.revision=\${{ github.sha }}`,
+    `${label}=\${{ github.sha }}`,
     'published runtime images must carry the source revision label',
+  );
+  // The deploy reads the same key back; a typo on either side would fail
+  // every deploy closed (or, worse, let a stale image through if the check
+  // were ever relaxed), so the two spellings are pinned to each other.
+  assert.ok(
+    readShell('infra/oracle/deploy-lib.sh').includes(
+      `REVISION_LABEL="${label}"`,
+    ),
+    'deploy-lib.sh must read the revision label publish.yml writes',
   );
 });
 

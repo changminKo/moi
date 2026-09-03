@@ -73,41 +73,55 @@ esac
     chmodSync(join(bin, name), 0o755);
   };
   stub('curl', fakeCurl);
+  // `docker image inspect --format <fmt> <image>` and
+  // `docker inspect --format <fmt> <container>`; the format must read the
+  // revision label publish.yml writes, or the stub refuses like a typo would
+  // fail on the host. Containers are named ctr-<service>.
   stub(
     'docker',
     `#!/usr/bin/env bash
-if [ "\${1:-}" != image ] || [ "\${2:-}" != inspect ]; then
-  echo "unexpected docker call: $*" >&2
-  exit 2
-fi
-image="\${!#}"
-case "$image" in
-  ghcr.io/changminko/moi-paper-api:*) printf '%s' "\${FAKE_DOCKER_PAPER_API_REVISION:-}";;
-  ghcr.io/changminko/moi-web:*) printf '%s' "\${FAKE_DOCKER_WEB_REVISION:-}";;
-  ghcr.io/changminko/moi-strategy-runner:*) printf '%s' "\${FAKE_DOCKER_BOT_REVISION:-}";;
-  *) echo "unexpected image: $image" >&2; exit 2;;
+label='org.opencontainers.image.revision'
+case "\${1:-} \${2:-}" in
+  "image inspect") kind=image; shift 2;;
+  inspect\\ *) kind=container; shift 1;;
+  *) echo "unexpected docker call: $*" >&2; exit 2;;
 esac
+[ "\${1:-}" = --format ] || { echo "expected --format, got: $*" >&2; exit 2; }
+case "\${2:-}" in
+  *"\\"$label\\""*) ;;
+  *) echo "format does not read $label: \${2:-}" >&2; exit 2;;
+esac
+subject="\${!#}"
+if [ "$kind" = image ]; then
+  case "$subject" in
+    ghcr.io/changminko/moi-paper-api:*) printf '%s' "\${FAKE_DOCKER_PAPER_API_REVISION:-}";;
+    ghcr.io/changminko/moi-web:*) printf '%s' "\${FAKE_DOCKER_WEB_REVISION:-}";;
+    ghcr.io/changminko/moi-strategy-runner:*) printf '%s' "\${FAKE_DOCKER_BOT_REVISION:-}";;
+    *) echo "unexpected image: $subject" >&2; exit 2;;
+  esac
+else
+  case "$subject" in
+    ctr-paper-api) printf '%s' "\${FAKE_DOCKER_CTR_PAPER_API_REVISION:-}";;
+    ctr-web) printf '%s' "\${FAKE_DOCKER_CTR_WEB_REVISION:-}";;
+    ctr-bot) printf '%s' "\${FAKE_DOCKER_CTR_BOT_REVISION:-}";;
+    *) echo "Error: No such object: $subject" >&2; exit 1;;
+  esac
+fi
 `,
   );
+  // A real advisory lock on the inherited descriptor, as flock(1) takes it:
+  // the lock lives on the open file description, so it is shared with the
+  // parent that opened descriptor 9, survives exec, and is refused to a second
+  // process that opened the same file on its own.
   stub(
     'flock',
     `#!/usr/bin/env bash
-lock="\${MOI_DEPLOY_MUTEX}.held"
-case "\${1:-}" in
-  -n)
-    if mkdir "$lock" 2>/dev/null; then
-      printf '%s' "$PPID" > "$lock/owner"
-      exit 0
-    fi
-    [ "$(cat "$lock/owner" 2>/dev/null)" = "$PPID" ]
-    ;;
-  -u)
-    if [ "$(cat "$lock/owner" 2>/dev/null)" = "$PPID" ]; then
-      rm -rf "$lock"
-    fi
-    ;;
-  *) exit 2;;
-esac
+exec perl -e '
+  use Fcntl qw(:flock);
+  my ($mode, $fd) = @ARGV;
+  open(my $fh, ">&=", $fd) or exit 1;
+  flock($fh, $mode eq "-u" ? LOCK_UN : LOCK_EX | LOCK_NB) or exit 1;
+' -- "$@"
 `,
   );
   stub(
@@ -880,6 +894,27 @@ deploy_reexec ${JSON.stringify(checkedOutScript)} main
     }
   });
 
+  it('rejects a forged re-exec guard whose descriptor 9 is open on some other file', () => {
+    const sb = makeSandbox(API);
+    const marker = join(sb.dir, 'deploy.lock');
+    writeFileSync(marker, 'owned elsewhere');
+    try {
+      const r = runDeploy(
+        sb,
+        `exec 9>${JSON.stringify(join(sb.dir, 'not-the-mutex'))}
+deploy_begin main`,
+        { extraEnv: { MOI_DEPLOY_REEXEC: '1' } },
+      );
+
+      assert.equal(r.status, 70, r.stderr);
+      assert.match(r.stderr, /re-exec lost its inherited mutex/u);
+      assert.equal(readFileSync(marker, 'utf8'), 'owned elsewhere');
+      assert.deepEqual(posted(sb), []);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a forged re-exec guard without an inherited mutex descriptor', () => {
     const sb = makeSandbox(API);
     const marker = join(sb.dir, 'deploy.lock');
@@ -1004,6 +1039,90 @@ verify_release_image_revisions ${expected} \
         /moi-strategy-runner:main revision does not match checkout/u,
       );
       assert.match(r.stderr, new RegExp(`expected ${expected}, got ${stale}`));
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // systemd starts the stack from /etc/moi/moi.env alone. A MOI_IMAGE_TAG
+  // pinned only on the deploy command line verifies (and migrates for) one
+  // release while the restart runs another — the running containers decide.
+  it('rejects a running container whose revision differs from the verified checkout', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    const running = 'b'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api ctr-web`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_CTR_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_CTR_WEB_REVISION: running,
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /ctr-web revision does not match checkout/u);
+      assert.match(
+        r.stderr,
+        new RegExp(`expected ${expected}, got ${running}`),
+      );
+      assert.deepEqual(titles(sb), [
+        'deploy started: main',
+        'deploy failed: main',
+      ]);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when a public release container is missing instead of verifying the rest', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api`,
+        { extraEnv: { FAKE_DOCKER_CTR_PAPER_API_REVISION: expected } },
+      );
+
+      assert.equal(r.status, 64, r.stderr);
+      assert.match(
+        r.stderr,
+        /revision verification requires at least the two public release containers/u,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts running containers at the verified revision, bot included', () => {
+    const sb = makeSandbox(API);
+    const expected = 'a'.repeat(40);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_running_container_revisions ${expected} ctr-paper-api ctr-web ctr-bot
+deploy_verified ${expected}`,
+        {
+          extraEnv: {
+            FAKE_DOCKER_CTR_PAPER_API_REVISION: expected,
+            FAKE_DOCKER_CTR_WEB_REVISION: expected,
+            FAKE_DOCKER_CTR_BOT_REVISION: expected,
+          },
+        },
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        new RegExp(`release containers verified at ${expected}`),
+      );
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
