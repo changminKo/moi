@@ -34,23 +34,28 @@ jobs:
         run: |
           set -euo pipefail
           case "$CONCLUSION" in
-            success) color=3066993 ;;
-            failure|timed_out|startup_failure) color=15026253 ;;
-            *) color=9807270 ;;
+            success) color=3066993; korean=성공 ;;
+            failure|timed_out|startup_failure) color=15026253; korean=실패 ;;
+            cancelled) color=9807270; korean=취소 ;;
+            *) color=9807270; korean="$CONCLUSION" ;;
           esac
+          [ "$CONCLUSION" = timed_out ] && korean="시간 초과"
+          # Korean title, the original under it behind a spoiler (펼쳐보기) —
+          # the same shape infra/oracle/notify.sh gives host-side alerts.
           payload="$(jq -cn \
-            --arg title "$WORKFLOW: $CONCLUSION" \
+            --arg title "$WORKFLOW $korean" \
+            --arg original "||$WORKFLOW: $CONCLUSION||" \
             --arg repo "$REPO" \
             --arg branch "$BRANCH" \
             --arg sha "${SHA:0:7}" \
             --arg actor "$ACTOR" \
             --arg url "$RUN_URL" \
             --argjson color "$color" \
-            '{embeds: [{title: $title, url: $url, color: $color, fields: [
-               {name: "repo", value: $repo, inline: true},
-               {name: "branch", value: $branch, inline: true},
-               {name: "commit", value: $sha, inline: true},
-               {name: "by", value: $actor, inline: true}
+            '{embeds: [{title: $title, description: $original, url: $url, color: $color, fields: [
+               {name: "저장소 (repo)", value: $repo, inline: true},
+               {name: "브랜치 (branch)", value: $branch, inline: true},
+               {name: "커밋 (commit)", value: $sha, inline: true},
+               {name: "실행자 (by)", value: $actor, inline: true}
              ]}]}')"
           curl -fsS --max-time 15 -o /dev/null \
             -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
@@ -60,6 +65,6 @@ jobs:
         if: ${{ failure() && env.WEBHOOK != '' }}
         run: |
           set -euo pipefail
-          payload="$(jq -cn --arg content "Notify workflow failed for $WORKFLOW ($BRANCH): $RUN_URL" '{content: $content}')"
+          payload="$(jq -cn --arg content "알림 워크플로 실패 — $WORKFLOW ($BRANCH): $RUN_URL ||Notify workflow failed||" '{content: $content}')"
           curl -fsS --max-time 15 -o /dev/null \
             -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"

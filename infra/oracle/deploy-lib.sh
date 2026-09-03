@@ -76,7 +76,7 @@ deploy_begin() {
   DEPLOY_OWNS_MUTEX=1
   DEPLOY_REF="$1"
   : > "$DEPLOY_LOCK"
-  notify info "deploy started: ${DEPLOY_REF}" "host $(hostname)"
+  notify info "deploy started: ${DEPLOY_REF}" "호스트 $(hostname)"
 }
 
 # True when descriptor 9 is open on the mutex file itself — not merely open.
@@ -167,7 +167,7 @@ verify_running_container_revisions() { verify_revisions container "$@"; }
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {
   VERIFIED=1
-  notify ok "deploy finished: $1" "ref ${DEPLOY_REF}, KR/US NORMAL, placement enabled"
+  notify ok "deploy finished: $1" "ref ${DEPLOY_REF}, KR/US NORMAL, placement 활성"
 }
 
 on_exit() {
@@ -184,7 +184,7 @@ on_exit() {
   fi
   # Reaching the end without verification is a failure, never a silent success.
   [ "$code" = 0 ] && code=1
-  notify fail "deploy failed: ${DEPLOY_REF:-unknown}" "step: ${STEP} (exit ${code}) on $(hostname)"
+  notify fail "deploy failed: ${DEPLOY_REF:-unknown}" "단계: ${STEP} (exit ${code}), 호스트 $(hostname)"
   flock -u 9 || true
   exit "$code"
 }

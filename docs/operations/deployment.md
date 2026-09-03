@@ -505,9 +505,10 @@ chat, or a shell history line that echoes it.
      the oneshot unit (sops key, compose interpolation, Docker down) and posts
      the unit's journal tail. `moi.service` is `RemainAfterExit=yes`, so a
      container crash later does not fail the unit and does not fire this.
-   - `deploy.sh`: `deploy started`, `deploy finished: <sha>` (only after the
-     verification step observed readiness, both markets `NORMAL` and
-     placement enabled), or `deploy failed` with the step that broke —
+   - `deploy.sh`: `deploy started` (`배포 시작`), `deploy finished: <sha>`
+     (`배포 완료`; only after the verification step observed readiness, both
+     markets `NORMAL` and placement enabled), or `deploy failed` (`배포 실패`)
+     with the step that broke —
      including an interrupted deploy (SIGINT/SIGTERM/SIGHUP) and a run that
      ended without reaching verification.
    Without the variable every producer is a silent no-op. `notify.sh` is
