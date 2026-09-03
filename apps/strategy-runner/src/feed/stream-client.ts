@@ -55,6 +55,13 @@ import {
 
 /** Silence worth this many advertised heartbeat intervals is a dead socket. */
 export const LIVENESS_INTERVALS = 3;
+/**
+ * A connection counts as a success — and resets the backoff — only once it has
+ * outlived this many heartbeat intervals past `ready`. `ready` alone would let
+ * a server that accepts, answers and closes at once reset the policy on every
+ * attempt, so the flap storm never reaches the hold band (#89).
+ */
+export const STABLE_AFTER_INTERVALS = 1;
 /** Used until a `ready` frame states the server's own interval. */
 export const DEFAULT_HEARTBEAT_MS = 30_000;
 
@@ -159,6 +166,7 @@ export class StreamClient {
   #running = false;
   #cancelReconnect: (() => void) | null = null;
   #cancelLiveness: (() => void) | null = null;
+  #cancelStability: (() => void) | null = null;
   #heartbeatMs = DEFAULT_HEARTBEAT_MS;
   #queue: StreamAccountEvent[] = [];
   #draining = false;
@@ -329,6 +337,8 @@ export class StreamClient {
   #detach(reason: string): void {
     this.#cancelLiveness?.();
     this.#cancelLiveness = null;
+    this.#cancelStability?.();
+    this.#cancelStability = null;
 
     const socket = this.#socket;
 
@@ -353,6 +363,20 @@ export class StreamClient {
     } catch {
       /* a socket that is already gone needs no closing */
     }
+  }
+
+  /**
+   * A connection that stays up for `STABLE_AFTER_INTERVALS` past `ready` is a
+   * connection that worked: the backoff starts over, so a single bad afternoon
+   * does not leave the next reconnect five minutes slow. One that closes
+   * before then was only ever a failure, and the policy counts it as one.
+   */
+  #armStability(): void {
+    this.#cancelStability?.();
+    this.#cancelStability = this.#timer(() => {
+      this.#cancelStability = null;
+      this.#policy.recordSuccess();
+    }, this.#heartbeatMs * STABLE_AFTER_INTERVALS);
   }
 
   /**
@@ -425,16 +449,18 @@ export class StreamClient {
     }
 
     const advertised = frame.heartbeatIntervalMs;
+    const stated = typeof advertised === 'number' && advertised > 0;
 
-    if (typeof advertised === 'number' && advertised > 0) {
+    if (stated) {
       this.#heartbeatMs = advertised;
+    }
+
+    this.#armStability();
+
+    if (stated) {
       this.#armLiveness();
     }
 
-    // A connection that reached `ready` is a connection that worked: the
-    // backoff starts over, so a single bad afternoon does not leave the next
-    // reconnect five minutes slow.
-    this.#policy.recordSuccess();
     this.#options.handlers.onReady(sequence, this.#heartbeatMs);
 
     const connected = this.#options.handlers.onConnected;

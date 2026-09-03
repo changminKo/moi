@@ -335,6 +335,36 @@ describe('StateStore decisions', () => {
   });
 });
 
+describe('StateStore decision lookup', () => {
+  it('finds a recorded decision by id, and nothing for an id it never saw', () => {
+    const state = store(scratch());
+
+    state.appendDecision(decision('d-1'));
+
+    expect(state.decision('d-1')).toStrictEqual(decision('d-1'));
+    expect(state.decision('d-2')).toBeUndefined();
+  });
+
+  it('keeps answering the first record for an id that was appended twice', () => {
+    const state = store(scratch());
+
+    state.appendDecision(decision('d-1', { notional: '70000' }));
+    expect(state.appendDecision(decision('d-1', { notional: '1' }))).toBe(
+      false,
+    );
+
+    expect(state.decision('d-1')?.notional).toBe('70000');
+  });
+
+  it('finds a decision recorded by a previous process', () => {
+    const directory = scratch();
+
+    store(directory).appendDecision(decision('d-1'));
+
+    expect(store(directory).decision('d-1')).toEqual(decision('d-1'));
+  });
+});
+
 describe('StateStore daily entry notional', () => {
   it('is zero on a day with nothing recorded', () => {
     expect(store(scratch()).dailyEntryNotional('2026-09-02')).toBe('0');
