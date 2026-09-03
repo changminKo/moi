@@ -659,6 +659,15 @@ check('publish workflow builds arm64 natively and bounds its jobs', () => {
     /!\s*cancelled\(\)/,
     'publish.yml manifests must run after a failed build too, so one broken image does not hold the others back',
   );
+  const stepNames = (manifests.steps ?? []).map((step) => step.name ?? '');
+  const verify = stepNames.findIndex((name) =>
+    /Verify the manifest/.test(name),
+  );
+  const scan = stepNames.findIndex((name) => /Trivy/.test(name));
+  assert.ok(
+    verify !== -1 && scan !== -1 && verify < scan,
+    'publish.yml must verify the merged manifest (one image per architecture) before scanning and promoting it',
+  );
   const covered = manifests.strategy.matrix.name ?? [];
   for (const name of names)
     assert.ok(

@@ -318,6 +318,15 @@ describe('check-deployment-contract (A8)', () => {
       /publish\.yml manifests must run after a failed build too/,
     ],
     [
+      'the manifest job promotes without verifying the merge',
+      (text) =>
+        text.replace(
+          / {6}- name: Verify the manifest carries one image per architecture\n[\s\S]*?(?= {6}- name: Trivy scan)/,
+          '',
+        ),
+      /publish\.yml must verify the merged manifest/,
+    ],
+    [
       'the manifest job forgets an image',
       (text) =>
         text.replace(

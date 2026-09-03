@@ -121,7 +121,29 @@ jobs:
           [ "$count" -eq 2 ] || { echo "expected one digest per architecture, found ${count}: $(ls)" >&2; exit 1; }
           # shellcheck disable=SC2046
           docker buildx imagetools create -t "${IMAGE}:${GITHUB_SHA}" $(printf "${IMAGE}@sha256:%s " *)
+      - name: Verify the manifest carries one image per architecture
+        # Each half was pushed with provenance and SBOM attached, so its digest
+        # is an OCI index (image + attestations); `imagetools create` flattens
+        # those into one index. This proves it did before anything is scanned
+        # or promoted: exactly one linux/amd64 and one linux/arm64 *image*
+        # manifest, no nested index. Attestation manifests report
+        # unknown/unknown and are skipped.
+        env:
+          IMAGE: ghcr.io/changminko/moi-${{ matrix.name }}
+        run: |
+          set -euo pipefail
           docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}"
+          entries="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" \
+            --format '{{range .Manifest.Manifests}}{{if .Platform}}{{.Platform.OS}}/{{.Platform.Architecture}} {{.MediaType}}{{println}}{{end}}{{end}}')"
+          echo "${entries}"
+          for arch in amd64 arm64; do
+            n="$(echo "${entries}" | grep -Ec "^linux/${arch} application/vnd\.(oci\.image\.manifest\.v1|docker\.distribution\.manifest\.v2)\+json$" || true)"
+            [ "${n}" -eq 1 ] || { echo "expected exactly one linux/${arch} image manifest, found ${n}" >&2; exit 1; }
+          done
+          if echo "${entries}" | grep -q 'image.index'; then
+            echo "the merged manifest nests an index; refusing to promote it" >&2
+            exit 1
+          fi
       - name: Trivy scan (fail on fixable HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
