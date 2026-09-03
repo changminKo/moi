@@ -236,6 +236,18 @@ export interface Strategy<P = unknown> {
     context: StrategyContext,
     params: P,
   ): readonly StrategyDecision[];
+  /**
+   * The same contract as `onTick`: synchronous and pure — same state, same
+   * fill, same context answers, same decisions. It matters more here than it
+   * reads. The runner derives each fill decision's id (and so its idempotency
+   * key) from the fill's account sequence and the decision's position, and
+   * replays the fill after a crash between deciding and committing. A replay
+   * that answers differently — another intent, another number of decisions —
+   * is detected, wedges the event and trips the kill switch rather than
+   * placing an order the strategy no longer wants or one the ledger refuses
+   * as a reused key. The lint override only covers the built-in strategies;
+   * a strategy from elsewhere carries the contract itself.
+   */
   onFill?(
     fill: FillEvent,
     context: StrategyContext,

@@ -378,16 +378,8 @@ export class StreamClient {
    */
   #armStability(): void {
     this.#cancelStability?.();
-
-    const socket = this.#socket;
-
     this.#cancelStability = this.#timer(() => {
       this.#cancelStability = null;
-
-      if (socket === null || this.#socket !== socket) {
-        return;
-      }
-
       this.#policy.recordSuccess();
     }, this.#heartbeatMs * STABLE_AFTER_INTERVALS);
   }
