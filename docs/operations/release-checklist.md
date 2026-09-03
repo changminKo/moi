@@ -67,9 +67,8 @@ handoff therefore remains unchecked below.
   missing, stale bot image, too few images, and a running container off the
   verified revision; deployment-contract mutation tests fail if publishing,
   either verification, or the shared label key is removed or commented out.
-  Rollback targets published before the label need
-  `MOI_DEPLOY_ALLOW_UNLABELED=1` with the tag pinned in `moi.env`; the release
-  that introduces the label (this one) is the last such target.
+  Rolling back to a ref older than this check runs that ref's own `deploy.sh`
+  (re-exec), which verifies no revision.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`

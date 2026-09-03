@@ -209,22 +209,16 @@ comes after the migration and the restart, so the host is then serving an
 unverified release: set `MOI_IMAGE_TAG` in `moi.env` to the SHA you meant and
 run `deploy.sh` again with that same SHA.
 
-Images published before this label existed can never gain it. To roll back to
-one of them, pin the tag in `moi.env` as above and run
-`sudo MOI_DEPLOY_ALLOW_UNLABELED=1 /opt/moi/infra/oracle/deploy.sh <same sha>`:
-the deploy accepts a *missing* label only when that variable is set and
-`MOI_IMAGE_TAG` equals the checkout, logs a `WARN` per image, and the
-`deploy finished` notification says `UNLABELED legacy image accepted`. A label
-that disagrees is never accepted, and `main` is never exempt.
-
 Timing of the image check: `deploy.sh main` verifies against the commit it just
 checked out, so it fails closed until `Publish images` has promoted that
 commit's images to `main` (a few minutes after the merge; each image moves on
 its own). Wait for the publish, or deploy the last promoted SHA explicitly. A
 Trivy finding that fails the publish leaves `main` on the previous images, and
 `deploy.sh main` refuses them for the same reason until the finding is fixed.
-Rolling back to a ref older than these checks runs that ref's `deploy.sh`: it
-fetches once more, posts `deploy started` twice and verifies no revision.
+Rolling back to a ref older than these checks runs that ref's own `deploy.sh`
+(the first-stage process re-execs the checked-out script): it fetches once
+more, posts `deploy started` twice and verifies no revision — which is also why
+images published before the label never need an exemption.
 
 Roll back when: any `InvariantViolation` or `TransactionalAuditFailure`
 within 30 minutes of a deploy; markets fail to reach NORMAL after two recovery

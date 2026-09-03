@@ -939,7 +939,7 @@ const readShell = (relative) => read(relative).replace(/^[ \t]*#.*$/gmu, '');
 check('deploy mutex dependencies are provisioned', () => {
   const installed = new Set(
     [
-      ...read('infra/oracle/bootstrap.sh').matchAll(
+      ...readShell('infra/oracle/bootstrap.sh').matchAll(
         /apt-get install -y -qq ([^\n]*)/g,
       ),
     ].flatMap(([, list]) => list.trim().split(/\s+/)),

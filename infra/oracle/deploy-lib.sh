@@ -99,8 +99,10 @@ deploy_reexec() {
   [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ] && return 0
   # A failed `exec` ends a non-interactive shell with 127 and skips the EXIT
   # trap: the marker would stay, no failure alert, monitoring silent for
-  # MOI_STATUS_LOCK_MAX_AGE. A ref without the script (or its execute bit)
-  # has to fail through the trap like every other step.
+  # MOI_STATUS_LOCK_MAX_AGE. A missing file or execute bit is caught here and
+  # fails through the trap like every other step; `execfail` covers the rest
+  # (an executable whose interpreter is missing) — with it set, bash 5 treats
+  # the failed exec as an ordinary failing command and errexit runs the trap.
   if [ ! -x "$1" ]; then
     echo "FAIL: cannot re-exec $1: not an executable file in the checked-out release" >&2
     return 1
@@ -108,15 +110,12 @@ deploy_reexec() {
   export MOI_DEPLOY_REEXEC=1
   shopt -s execfail
   exec "$@"
-  echo "FAIL: exec $1 failed" >&2
-  return 1
 }
 
 # The label publish.yml writes on every runtime image; the contract checker
 # keeps the two spellings equal.
 REVISION_LABEL="org.opencontainers.image.revision"
 REVISION_FORMAT="{{ index .Config.Labels \"$REVISION_LABEL\" }}"
-UNLABELED_ACCEPTED=0
 
 # verify_revisions <image|container> <expected sha> <subject>... — every
 # subject must carry REVISION_LABEL equal to the checkout. A container's
@@ -139,16 +138,11 @@ verify_revisions() {
       echo "FAIL: cannot inspect release $kind $subject" >&2
       return 1
     fi
+    # Images published before the label existed never reach this line: a
+    # rollback to such a ref re-execs that ref's own deploy.sh, which has no
+    # revision check. Every image a checkout with this check can name was
+    # labelled at build, so a missing label is a hand-pushed image.
     if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
-      # Images published before the label existed can never gain it, and a
-      # rollback to one of them must stay possible. The operator says so
-      # explicitly, and only for a release pinned to this exact checkout in
-      # moi.env — never for `main`, never for a label that disagrees.
-      if [ "${MOI_DEPLOY_ALLOW_UNLABELED:-0}" = 1 ] && [ "${MOI_IMAGE_TAG:-}" = "$expected" ]; then
-        echo "WARN: $subject has no $REVISION_LABEL label; accepted because MOI_DEPLOY_ALLOW_UNLABELED=1 and MOI_IMAGE_TAG pins this checkout ($expected) — an image published before revision labels" >&2
-        UNLABELED_ACCEPTED=1
-        continue
-      fi
       echo "FAIL: $subject has no $REVISION_LABEL label" >&2
       return 1
     fi
@@ -173,11 +167,7 @@ verify_running_container_revisions() { verify_revisions container "$@"; }
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {
   VERIFIED=1
-  local detail="ref ${DEPLOY_REF}, KR/US NORMAL, placement enabled"
-  if [ "$UNLABELED_ACCEPTED" = 1 ]; then
-    detail="$detail — UNLABELED legacy image accepted (MOI_DEPLOY_ALLOW_UNLABELED=1, MOI_IMAGE_TAG pinned)"
-  fi
-  notify ok "deploy finished: $1" "$detail"
+  notify ok "deploy finished: $1" "ref ${DEPLOY_REF}, KR/US NORMAL, placement enabled"
 }
 
 on_exit() {
