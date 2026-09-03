@@ -732,7 +732,13 @@ check('no committed secrets', () => {
  * drop the tool out of the list silently.
  */
 function notifyDependencyGuards(script) {
-  const probe = /(?:^|[\s!;{(])(?:command -v|type -p|type|which|hash)\s+(\S+)/g;
+  // A probe is recognised only in command position — the start of the line
+  // or right after `;`, `{`, `(`, `&&`, `||`, `do`, `then`, with an optional
+  // `if`/`!` — so
+  // the words `type`, `which`, `hash` inside a message or a trailing comment
+  // are not read as one.
+  const probe =
+    /(?:^|[;{(]|&&|\|\||\bdo|\bthen)\s*(?:if\s+)?!?\s*(?:command -v|type -p|type|which|hash)\s+(\S+)/g;
   const missing = /soft_fail\s+"(\S+) missing\b/;
   const lines = script.split('\n');
   const tools = new Set();

@@ -224,6 +224,11 @@ describe('check-deployment-contract (A8)', () => {
       'hash rsync 2>/dev/null || exit 1',
       /notify\.sh requires rsync/,
     ],
+    [
+      'a probe chained after another command',
+      '[ -n "$payload" ] && which rsync >/dev/null 2>&1 || soft_fail "rsync missing, nothing posted"',
+      /notify\.sh requires rsync/,
+    ],
   ];
   for (const [name, guard, message] of guardCases)
     it(`fails on an unprovisioned notify.sh dependency guarded with ${name}`, () => {
@@ -241,6 +246,34 @@ describe('check-deployment-contract (A8)', () => {
         const result = run(dir);
         assert.equal(result.status, 1, result.stderr);
         assert.match(result.stderr, message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  /**
+   * The probe words are ordinary English too. Text that merely mentions them
+   * — a message, a trailing comment — must not be read as a dependency.
+   */
+  const benignLines = [
+    ['a message that says "type"', 'echo "please type your rsync path" >&2'],
+    ['a trailing comment', 'level="fatal" # type check: keep this in sync'],
+    ['a message that says "which"', 'echo "decide which rsync to use" >&2'],
+  ];
+  for (const [name, line] of benignLines)
+    it(`still passes when notify.sh gains ${name}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, 'infra/oracle/notify.sh');
+        writeFileSync(
+          file,
+          readFileSync(file, 'utf8').replace(
+            /^command -v perl [^\n]*$/m,
+            (guard) => `${guard}\n${line}`,
+          ),
+        );
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 0, result.stderr);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
