@@ -4,7 +4,7 @@ import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
 } from '@testcontainers/postgresql';
-import { Client } from 'pg';
+import { Client, type PoolClient } from 'pg';
 import {
   GenericContainer,
   type StartedTestContainer,
@@ -22,6 +22,11 @@ import {
 import WebSocket from 'ws';
 import type { AppConfig } from '../config.js';
 import { DEFAULT_FEE_SCHEDULES, ZERO_FEE_SCHEDULES } from '../config.js';
+import {
+  createDatabase,
+  type Database,
+  type PoolStats,
+} from '../db/database.js';
 import { OutboxPublisherLoop } from '../modules/stream/outbox-publisher-loop.js';
 import { publishFeeModelVersions } from './fee-schedule.js';
 import {
@@ -85,6 +90,7 @@ interface Started {
 async function start(
   options: {
     config?: Partial<AppConfig>;
+    database?: Database;
     deferSnapshots?: boolean;
     bundle?: FakeProviderBundle;
     awaitServing?: boolean;
@@ -106,6 +112,7 @@ async function start(
     ...(options.verifyInvariants
       ? { verifyInvariants: options.verifyInvariants }
       : {}),
+    ...(options.database ? { database: options.database } : {}),
   });
   running.push(runtime);
   const started = runtime.start();
@@ -364,6 +371,114 @@ describe('ProductionRuntime', () => {
       const metrics = await (await fetch(`${origin}/metrics`)).text();
       expect(metrics).toContain('leader_reelection_total{market="KR"} 1');
       expect(runtime.publisher.isRunning()).toBe(true);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // #65: a drill exit 1 came from `db.destroy` exceeding the shutdown budget
+  // with nothing else in the log to say why. `pool.end()` waits for every
+  // checked-out client, so a client nobody released pins the tail step for the
+  // whole budget; the forced stop now carries the pool counters (how many were
+  // out, how many callers queued — one such client, no queue, here).
+  it(
+    'A5b: a pool client nobody released pins db.destroy, and the forced stop reports the pool counters',
+    async () => {
+      const db = createDatabase(databaseUrl);
+      const factory = (
+        db as unknown as {
+          __leaderLeaseClientFactory: () => Promise<PoolClient>;
+        }
+      ).__leaderLeaseClientFactory;
+      const held = await factory();
+      try {
+        const { runtime, logs } = await start({ database: db });
+        const stopped = await runtime.stop();
+        expect(stopped.forced).toBe(true);
+        const timedOut = logs.find(
+          (l) =>
+            l.event === 'shutdown.step_timed_out' &&
+            l.fields.step === 'db.destroy',
+        );
+        expect(
+          timedOut,
+          'db.destroy must be the step that timed out',
+        ).toBeDefined();
+        const pool = timedOut?.fields.pool as PoolStats | undefined;
+        expect(pool).toBeDefined();
+        expect(pool?.total).toBeGreaterThanOrEqual(1);
+        expect(pool?.idle).toBe(0);
+        expect(pool?.waiting).toBe(0);
+      } finally {
+        held.release();
+        await db.destroy().catch(() => undefined);
+      }
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  // #65 (review): the drill's step 4 now pins an admitted request across
+  // SIGTERM. Past SHUTDOWN_DRAIN_DEADLINE_MS the drains give up and the process
+  // exits 1 — and until now nothing in its log said an in-flight request was
+  // the reason.
+  it(
+    'A5c: an admitted request that outlives the drain deadline is named in the log, not only in the exit code',
+    async () => {
+      const { runtime, logs, origin } = await start();
+      const client = await anonymousSession(origin);
+      const holder = new Client({ connectionString: databaseUrl });
+      await holder.connect();
+      await holder.query('begin');
+      await holder.query(
+        'select id from anonymous_sessions where id = $1::uuid for update',
+        [client.id],
+      );
+      // pg_stat_activity is snapshotted at first read within a transaction,
+      // so the holder (mid-transaction) would keep reporting the moment
+      // before the request blocked; probe from an autocommit connection.
+      const probe = new Client({ connectionString: databaseUrl });
+      await probe.connect();
+      // Admitted, then blocked at LEDGER_LOCK_ORDER's first step.
+      const held = fetch(`${origin}/api/v1/orders/${randomUUID()}`, {
+        method: 'DELETE',
+        headers: {
+          origin: 'http://127.0.0.1:0',
+          cookie: client.cookie,
+          'x-csrf-token': client.csrf,
+          'idempotency-key': randomUUID(),
+        },
+      }).catch(() => undefined);
+      try {
+        const deadline = Date.now() + 5_000;
+        let blocked = 0;
+        while (blocked < 1 && Date.now() < deadline) {
+          blocked =
+            (
+              await probe.query<{ n: number }>(
+                `select count(*)::int as n from pg_stat_activity
+                   where wait_event_type = 'Lock'
+                     and query ilike '%anonymous_sessions%'
+                     and query ilike '%for%update%'
+                     and pid <> pg_backend_pid()`,
+              )
+            ).rows[0]?.n ?? 0;
+          if (blocked < 1) await new Promise((r) => setTimeout(r, 25));
+        }
+        expect(blocked, 'the request must be blocked on the session row').toBe(
+          1,
+        );
+
+        const stopped = await runtime.stop();
+        expect(stopped.forced).toBe(true);
+        const named = logs.find(
+          (l) => l.event === 'shutdown.inflight_drain_timed_out',
+        );
+        expect(named?.fields).toMatchObject({ http: 1, uow: 1 });
+      } finally {
+        await holder.query('rollback').catch(() => undefined);
+        await holder.end().catch(() => undefined);
+        await probe.end().catch(() => undefined);
+        await held;
+      }
     },
     TEST_TIMEOUT_MS,
   );

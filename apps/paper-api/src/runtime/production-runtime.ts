@@ -10,7 +10,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { buildApp } from '../app.js';
 import type { AppConfig } from '../config.js';
-import { createDatabase, type Database } from '../db/database.js';
+import { createDatabase, type Database, poolStats } from '../db/database.js';
 import { migrateToLatest } from '../db/migrate.js';
 import type { LockedWallet } from '../db/repositories/account-repository.js';
 import { type TradingTransaction, UnitOfWork } from '../db/unit-of-work.js';
@@ -150,6 +150,12 @@ export interface ProductionRuntimeOptions {
   readonly phaseSpy?: RuntimePhaseSpy;
   readonly verifyInvariants?: (db: Database) => Promise<void>;
   readonly symbols?: Readonly<Record<Market, readonly string[]>>;
+  /**
+   * Test seam: a database built by the caller (default
+   * `createDatabase(config.databaseUrl)`), so a test can hold one of its pool
+   * clients and watch what shutdown reports. `main.ts` never passes it.
+   */
+  readonly database?: Database;
 }
 
 /** UnitOfWork that counts in-flight transactions so shutdown can drain them (§6.6-3). */
@@ -261,7 +267,7 @@ export class ProductionRuntime {
     this.listening = new Promise<void>((resolve) => {
       this.#resolveListening = resolve;
     });
-    this.#db = createDatabase(options.config.databaseUrl);
+    this.#db = options.database ?? createDatabase(options.config.databaseUrl);
     this.#uow = new CountingUnitOfWork(this.#db, {
       backoff: async (attempt) => {
         await new Promise((resolve) =>
@@ -681,9 +687,14 @@ export class ProductionRuntime {
       },
       drainInflight: async (until) => {
         spy('gate.drain')();
-        await this.#gate.drain(until);
+        const http = await this.#gate.drain(until);
         spy('uow.drain')();
-        await this.#uow.drain(until);
+        const uow = await this.#uow.drain(until);
+        // A drain that gives up at the deadline used to leave nothing in the
+        // log — a gauge, then an exit 1 several steps later (#65). Name it
+        // here, with what was still in flight.
+        if (http > 0 || uow > 0)
+          this.#log('shutdown.inflight_drain_timed_out', { http, uow });
       },
       drainOutbox: async (until) => {
         spy('pendingPoll')();
@@ -736,12 +747,19 @@ export class ProductionRuntime {
         const timeout = error instanceof ShutdownBudgetExceeded;
         if (timeout) timedOut = true;
         // Neither outcome is swallowed silently: a real cleanup failure is
-        // logged as such, a timeout is reported as a forced stop.
+        // logged as such, a timeout is reported as a forced stop. A
+        // `db.destroy` that outlives the budget is `pool.end()` waiting for a
+        // client nobody released or one still connecting. The counters say
+        // how many clients were out (`total - idle`) and whether callers were
+        // queued (`waiting`); they do not tell those two apart — a connecting
+        // client also counts as out — but the next such exit 1 on a drill
+        // carries that much instead of "shutdown step exceeded" alone (#65).
         this.#log(
           timeout ? 'shutdown.step_timed_out' : 'shutdown.step_failed',
           {
             step,
             error: error instanceof Error ? error.message : String(error),
+            ...(step === 'db.destroy' ? { pool: poolStats(this.#db) } : {}),
           },
         );
       }
