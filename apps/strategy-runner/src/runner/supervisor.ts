@@ -133,6 +133,8 @@ export class RunnerSupervisor {
   readonly #owner: ReadonlyMap<string, StrategyHost>;
   readonly #recorder: TickRecorder | null;
   #running = false;
+  /** Set by `stop()`; `start()`'s wait and `run()` both honour it. */
+  #stopped = false;
 
   constructor(options: SupervisorOptions) {
     this.#config = options.config;
@@ -307,6 +309,13 @@ export class RunnerSupervisor {
    */
   async start(): Promise<void> {
     await this.#awaitServing();
+
+    // A SIGTERM that arrived while we were waiting for the API: there is no
+    // session to establish and no stream to arm — `run()` will return at once.
+    if (this.#stopped) {
+      return;
+    }
+
     await this.#session.establish();
     await this.#gateway.recoverPending();
     // A latch found on disk is announced and swept again before any strategy
@@ -329,7 +338,11 @@ export class RunnerSupervisor {
    * be asked (connection refused, non-JSON). Unauthenticated: the route is
    * public and this runs before there is a session.
    */
-  async #runtimeState(): Promise<string | null> {
+  async #runtimeState(): Promise<{
+    readonly runtime: string | null;
+    /** The HTTP status, or `null` when no response came back at all. */
+    readonly status: number | null;
+  }> {
     try {
       const response = await this.#api.send({
         method: 'GET',
@@ -339,20 +352,31 @@ export class RunnerSupervisor {
       const runtime = (response.body as { runtime?: unknown } | undefined)
         ?.runtime;
 
-      return typeof runtime === 'string' ? runtime : null;
+      return {
+        runtime: typeof runtime === 'string' ? runtime : null,
+        status: response.status,
+      };
     } catch {
-      return null;
+      return { runtime: null, status: null };
     }
   }
 
-  /** Waits until the API is SERVING, or until SERVING_WAIT_MS has passed. */
+  /**
+   * Waits until the API is SERVING, until SERVING_WAIT_MS has passed (plus at
+   * most one request timeout — the deadline is checked between probes), or
+   * until `stop()` is called.
+   */
   async #awaitServing(): Promise<void> {
     const startedAt = this.#now();
     const deadline = startedAt + SERVING_WAIT_MS;
     let announced = false;
 
     for (;;) {
-      const runtime = await this.#runtimeState();
+      const { runtime, status } = await this.#runtimeState();
+      // `unreachable` is reserved for no response at all; an answer without a
+      // usable `runtime` is named by its status.
+      const seen =
+        runtime ?? (status === null ? 'unreachable' : `http ${status}`);
 
       if (runtime === 'SERVING') {
         if (announced) {
@@ -367,11 +391,8 @@ export class RunnerSupervisor {
       if (this.#now() >= deadline) {
         this.#reporter.report(
           'warn',
-          'the paper API did not reach SERVING in time; connecting anyway',
-          {
-            runtime: runtime ?? 'unreachable',
-            waitedMs: this.#now() - startedAt,
-          },
+          'the paper API did not reach SERVING before the wait ran out; connecting anyway',
+          { runtime: seen, waitedMs: this.#now() - startedAt },
         );
 
         return;
@@ -382,11 +403,15 @@ export class RunnerSupervisor {
         this.#reporter.report(
           'info',
           'the paper API is not serving yet; waiting before the first connect',
-          { runtime: runtime ?? 'unreachable' },
+          { runtime: seen },
         );
       }
 
       await this.#sleep(SERVING_POLL_MS);
+
+      if (this.#stopped) {
+        return;
+      }
     }
   }
 
@@ -417,6 +442,10 @@ export class RunnerSupervisor {
   }
 
   async run(): Promise<void> {
+    if (this.#stopped) {
+      return;
+    }
+
     this.#running = true;
 
     while (this.#running) {
@@ -436,6 +465,7 @@ export class RunnerSupervisor {
   }
 
   stop(): void {
+    this.#stopped = true;
     this.#running = false;
     this.#stream.stop();
   }

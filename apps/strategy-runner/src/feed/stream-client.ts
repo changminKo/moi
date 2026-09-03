@@ -83,9 +83,11 @@ export interface StreamSocket {
   onopen?: (() => void) | undefined;
   onclose?: ((event: { code?: number; reason?: string }) => void) | undefined;
   /**
-   * Node's `WebSocket` raises an `ErrorEvent` whose `message` is `''` and
-   * whose `error` carries the cause ("Received network error or non-101
-   * status code."); `ws` sets `message`. Both shapes are read.
+   * Node 24's built-in `WebSocket` (undici 7) raises an `ErrorEvent` whose
+   * `message` is `''` and whose `error` is a `TypeError` with an empty message
+   * too — a refused upgrade and a refused connection look identical, and the
+   * close code (1006) is the only signal. `ws` puts a message on the event.
+   * Both shapes are read; when neither says anything, the log says so.
    */
   onerror?:
     | ((event: { message?: string; error?: unknown }) => void)
@@ -94,10 +96,16 @@ export interface StreamSocket {
   close(code?: number, reason?: string): void;
 }
 
+/** What the log says when the runtime's socket exposes no reason at all. */
+export const SOCKET_ERROR_UNEXPLAINED =
+  'not exposed by the runtime WebSocket; see the close code';
+
 /**
- * The one line a socket error gets in the log. `??` on `event.message` was not
- * enough: the built-in `WebSocket` reports `''`, not `undefined`, and every
- * upgrade the API refused arrived as `error=` (#112).
+ * The one line a socket error gets in the log. `?? 'unknown'` on
+ * `event.message` was not enough: the built-in `WebSocket` reports `''`, not
+ * `undefined`, so every upgrade the API refused arrived as `error=` (#112).
+ * Node 24.19 exposes no reason anywhere on the event (`error` is a `TypeError`
+ * with an empty message), so the honest line names that instead of a blank.
  */
 export function describeSocketError(event: {
   message?: string;
@@ -111,7 +119,7 @@ export function describeSocketError(event: {
     return event.message;
   }
 
-  return 'unknown';
+  return SOCKET_ERROR_UNEXPLAINED;
 }
 
 export type StreamSocketFactory = (

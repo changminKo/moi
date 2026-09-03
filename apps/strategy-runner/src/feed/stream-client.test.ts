@@ -5,6 +5,7 @@ import {
   LIVENESS_INTERVALS,
   MAX_HEARTBEAT_MS,
   MIN_HEARTBEAT_MS,
+  SOCKET_ERROR_UNEXPLAINED,
   StreamClient,
   type StreamHandlers,
   type StreamSocket,
@@ -198,7 +199,7 @@ describe('the stream upgrade', () => {
     ]);
   });
 
-  it('names the socket error from its cause when the event message is empty (#112)', async () => {
+  it('names the socket error, or says the runtime exposed none, never a blank (#112)', async () => {
     const h = harness();
 
     h.client.start();
@@ -206,21 +207,21 @@ describe('the stream upgrade', () => {
 
     const socket = h.sockets[0] as FakeSocket;
 
-    // Node's built-in WebSocket: `message` is '', the cause is in `error`.
-    socket.onerror?.({
-      message: '',
-      error: new Error('Received network error or non-101 status code.'),
-    });
+    // A runtime that puts the cause on `error`.
+    socket.onerror?.({ message: '', error: new Error('connect ECONNREFUSED') });
     // `ws`: the message is on the event itself.
-    socket.onerror?.({ message: 'ECONNREFUSED' });
-    // Neither: still a word, never a blank.
+    socket.onerror?.({ message: 'Unexpected server response: 503' });
+    // Node 24.19 (undici 7): `message` is '' and `error` is a TypeError with an
+    // empty message — a refused upgrade shows nothing at all.
+    socket.onerror?.({ message: '', error: new TypeError('') });
     socket.onerror?.({});
 
     expect(h.reporter.lines.filter((l) => l.includes('errored'))).toStrictEqual(
       [
-        '[warn] the market stream errored error=Received network error or non-101 status code.',
-        '[warn] the market stream errored error=ECONNREFUSED',
-        '[warn] the market stream errored error=unknown',
+        '[warn] the market stream errored error=connect ECONNREFUSED',
+        '[warn] the market stream errored error=Unexpected server response: 503',
+        `[warn] the market stream errored error=${SOCKET_ERROR_UNEXPLAINED}`,
+        `[warn] the market stream errored error=${SOCKET_ERROR_UNEXPLAINED}`,
       ],
     );
   });

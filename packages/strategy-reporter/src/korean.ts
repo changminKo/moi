@@ -49,8 +49,8 @@ export const KOREAN_MESSAGES: Readonly<Record<string, string>> = {
   'the paper API is not serving yet; waiting before the first connect':
     '페이퍼 API 가 아직 서빙 전이라 첫 연결을 기다립니다',
   'the paper API is serving': '페이퍼 API 가 서빙 중입니다',
-  'the paper API did not reach SERVING in time; connecting anyway':
-    '페이퍼 API 가 시간 안에 SERVING 에 도달하지 않아 그대로 연결합니다',
+  'the paper API did not reach SERVING before the wait ran out; connecting anyway':
+    '페이퍼 API 가 대기 시간 안에 SERVING 에 도달하지 않아 그대로 연결합니다',
   'a runner cycle failed': '러너 사이클이 실패했습니다',
   'the risk gate refused an order': '리스크 게이트가 주문을 거부했습니다',
   // tick log

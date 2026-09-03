@@ -324,6 +324,88 @@ describe('startup waits for the API to serve', () => {
     );
   });
 
+  it('names a missing response as unreachable and an answer without a runtime by its status', async () => {
+    const answers: (string | null)[] = [null, 'SERVING'];
+    const stub = api(
+      { '005930': ['70800'] },
+      {
+        runtime: () => {
+          const next = answers.shift();
+
+          return next === undefined ? 'SERVING' : next;
+        },
+      },
+    );
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    let threw = false;
+    // First probe: no response at all. Second: the stub's 503 with no body.
+    const fetch: FetchLike = async (url, init) => {
+      if (!threw && new URL(url).pathname === '/health/market-data') {
+        threw = true;
+        throw new Error('connect ECONNREFUSED');
+      }
+
+      return stub.fetch(url, init);
+    };
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch,
+      now: time.now,
+      sleep: async (ms) => {
+        time.advance(ms);
+      },
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    supervisor.close();
+
+    expect(reporter.lines.filter((l) => l.includes('paper API'))).toStrictEqual(
+      [
+        '[info] the paper API is not serving yet; waiting before the first connect runtime=unreachable',
+        `[info] the paper API is serving waitedMs=${2 * SERVING_POLL_MS}`,
+      ],
+    );
+  });
+
+  it('stops waiting when stop() arrives, and creates no session', async () => {
+    const stub = api({ '005930': ['70800'] }, { runtime: () => 'RECOVERING' });
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      sleep: async (ms) => {
+        time.advance(ms);
+        // SIGTERM lands while the runner is still waiting for the API.
+        supervisor.stop();
+      },
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    await supervisor.run();
+    supervisor.close();
+
+    expect(stub.calls).not.toContain('/api/v1/sessions/anonymous');
+    expect(stub.calls.filter((p) => p === '/health/market-data')).toHaveLength(
+      1,
+    );
+    expect(
+      reporter.lines.filter((l) => l.includes('did not reach')),
+    ).toStrictEqual([]);
+  });
+
   it('says nothing when the API is already serving', async () => {
     const stub = api({ '005930': ['70800'] });
     const reporter = createRecordingReporter();
@@ -375,7 +457,7 @@ describe('startup waits for the API to serve', () => {
     expect(
       reporter.lines.filter((l) => l.includes('did not reach SERVING')),
     ).toStrictEqual([
-      `[warn] the paper API did not reach SERVING in time; connecting anyway runtime=RECOVERING waitedMs=${SERVING_WAIT_MS}`,
+      `[warn] the paper API did not reach SERVING before the wait ran out; connecting anyway runtime=RECOVERING waitedMs=${SERVING_WAIT_MS}`,
     ]);
   });
 });
