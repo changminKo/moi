@@ -6,11 +6,14 @@
 #
 # Requires REPO. Uses withsecrets() when the caller defines it (deploy.sh runs
 # notify.sh under sops exec-env so DISCORD_WEBHOOK_URL is present). Overrides
-# for tests: NOTIFY_BIN, MOI_DEPLOY_LOCK, MOI_DEPLOY_MANAGE_TIMER=0.
+# for tests: NOTIFY_BIN, MOI_DEPLOY_LOCK, MOI_DEPLOY_MUTEX,
+# MOI_DEPLOY_MANAGE_TIMER=0.
 STEP=start
 VERIFIED=0
 DEPLOY_REF=""
 DEPLOY_LOCK="${MOI_DEPLOY_LOCK:-/run/moi-deploy.lock}"
+DEPLOY_MUTEX="${MOI_DEPLOY_MUTEX:-/run/moi-deploy.mutex}"
+DEPLOY_OWNS_MUTEX=0
 MANAGE_TIMER="${MOI_DEPLOY_MANAGE_TIMER:-1}"
 
 step() { STEP="$1"; echo "== $1"; }
@@ -52,10 +55,113 @@ status_timer() {
 }
 
 deploy_begin() {
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "FAIL: flock is required to serialize deploys (install util-linux)" >&2
+    return 69
+  fi
+  if [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ]; then
+    if ! fd9_is_mutex || [ ! -e "$DEPLOY_LOCK" ] || ! flock -n 9; then
+      echo "FAIL: deploy re-exec lost its inherited mutex or active marker (unset MOI_DEPLOY_REEXEC if it leaked from your shell)" >&2
+      return 70
+    fi
+    DEPLOY_OWNS_MUTEX=1
+    DEPLOY_REF="$1"
+    return 0
+  fi
+  exec 9>"$DEPLOY_MUTEX"
+  if ! flock -n 9; then
+    echo "FAIL: another deploy is already in progress" >&2
+    return 75
+  fi
+  DEPLOY_OWNS_MUTEX=1
   DEPLOY_REF="$1"
   : > "$DEPLOY_LOCK"
   notify info "deploy started: ${DEPLOY_REF}" "host $(hostname)"
 }
+
+# True when descriptor 9 is open on the mutex file itself — not merely open.
+# A re-exec guard leaked from an operator shell (`sudo -E`) arrives with no
+# descriptor, or with one on some unrelated file; flock would happily lock
+# either. perl is a bootstrap dependency (notify.sh masks with it).
+fd9_is_mutex() {
+  perl -e '
+    my @file = stat($ARGV[0]) or exit 1;
+    open(my $fd, "<&=", 9) or exit 1;
+    my @held = stat($fd) or exit 1;
+    exit(($file[0] == $held[0] && $file[1] == $held[1]) ? 0 : 1);
+  ' "$DEPLOY_MUTEX"
+}
+
+# Replace the pre-fetch process with the script from the checked-out release.
+# Descriptor 9 is intentionally inherited across exec; deploy_begin validates
+# and adopts it in the replacement process without posting a second start.
+deploy_reexec() {
+  [ "${MOI_DEPLOY_REEXEC:-0}" = 1 ] && return 0
+  # A failed `exec` ends a non-interactive shell with 127 and skips the EXIT
+  # trap: the marker would stay, no failure alert, monitoring silent for
+  # MOI_STATUS_LOCK_MAX_AGE. A missing file or execute bit is caught here and
+  # fails through the trap like every other step; `execfail` covers the rest
+  # (an executable whose interpreter is missing) — with it set, bash 5 treats
+  # the failed exec as an ordinary failing command and errexit runs the trap.
+  if [ ! -x "$1" ]; then
+    echo "FAIL: cannot re-exec $1: not an executable file in the checked-out release" >&2
+    return 1
+  fi
+  export MOI_DEPLOY_REEXEC=1
+  shopt -s execfail
+  exec "$@"
+}
+
+# The label publish.yml writes on every runtime image; the contract checker
+# keeps the two spellings equal.
+REVISION_LABEL="org.opencontainers.image.revision"
+REVISION_FORMAT="{{ index .Config.Labels \"$REVISION_LABEL\" }}"
+
+# verify_revisions <image|container> <expected sha> <subject>... — every
+# subject must carry REVISION_LABEL equal to the checkout. A container's
+# Config.Labels are its image's labels, so the same read works for both.
+verify_revisions() {
+  local kind="$1" expected="$2"
+  local subject revision
+  shift 2
+  if [ "$#" -lt 2 ]; then
+    echo "FAIL: revision verification requires at least the two public release ${kind}s" >&2
+    return 64
+  fi
+  for subject in "$@"; do
+    if [ "$kind" = image ]; then
+      revision="$(docker image inspect --format "$REVISION_FORMAT" "$subject")" || revision=__inspect_failed__
+    else
+      revision="$(docker inspect --format "$REVISION_FORMAT" "$subject")" || revision=__inspect_failed__
+    fi
+    if [ "$revision" = __inspect_failed__ ]; then
+      echo "FAIL: cannot inspect release $kind $subject" >&2
+      return 1
+    fi
+    # Images published before the label existed never reach this line: a
+    # rollback to such a ref re-execs that ref's own deploy.sh, which has no
+    # revision check. Every image a checkout with this check can name was
+    # labelled at build, so a missing label is a hand-pushed image.
+    if [ -z "$revision" ] || [ "$revision" = "<no value>" ]; then
+      echo "FAIL: $subject has no $REVISION_LABEL label" >&2
+      return 1
+    fi
+    if [ "$revision" != "$expected" ]; then
+      echo "FAIL: $subject revision does not match checkout (expected $expected, got $revision)" >&2
+      return 1
+    fi
+  done
+  echo "release ${kind}s verified at $expected"
+}
+
+# Pulled images, before migrations: a mutable tag is only a selector.
+verify_release_image_revisions() { verify_revisions image "$@"; }
+
+# Running containers, after the restart: systemd starts the stack from
+# /etc/moi/moi.env alone, so an image tag pinned only on the deploy command
+# line would verify one release and run another. The containers themselves
+# are the last word.
+verify_running_container_revisions() { verify_revisions container "$@"; }
 
 # Called by deploy.sh only after readiness, both markets NORMAL and placement
 # were observed; the exit trap treats any other exit 0 as a failure.
@@ -67,12 +173,19 @@ deploy_verified() {
 on_exit() {
   local code=$?
   trap - EXIT INT TERM HUP
+  # A process rejected by the mutex owns none of the active deploy's state.
+  # In particular it must not remove the marker that silences status alerts.
+  if [ "$DEPLOY_OWNS_MUTEX" != 1 ]; then exit "$code"; fi
   rm -f "$DEPLOY_LOCK"
   status_timer start
-  if [ "$code" = 0 ] && [ "$VERIFIED" = 1 ]; then exit 0; fi
+  if [ "$code" = 0 ] && [ "$VERIFIED" = 1 ]; then
+    flock -u 9 || true
+    exit 0
+  fi
   # Reaching the end without verification is a failure, never a silent success.
   [ "$code" = 0 ] && code=1
   notify fail "deploy failed: ${DEPLOY_REF:-unknown}" "step: ${STEP} (exit ${code}) on $(hostname)"
+  flock -u 9 || true
   exit "$code"
 }
 trap on_exit EXIT

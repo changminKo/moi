@@ -9,11 +9,13 @@
 # the host's real egress address — overrides are refused for production, and
 # PUBLIC_ORIGIN / PUBLIC_API_ORIGIN must match WEB_DOMAIN / API_DOMAIN),
 # 3. refresh the systemd units shipped in the repository, 4. docker login +
-# pull the images CI published to GHCR, 5. run the new image's migrations as a
-# one-off job while the old release still serves, 6. restart the stack through
-# systemd (compose recreates containers stop-then-start; the 45 s grace period
-# lets the leader drain), 7. require readiness, both markets NORMAL and
-# placement enabled — otherwise fail.
+# pull the images CI published to GHCR and require every pulled runtime
+# image's `org.opencontainers.image.revision` label to equal the checkout,
+# 5. run the new image's migrations as a one-off job while the old release
+# still serves, 6. restart the stack through systemd (compose recreates
+# containers stop-then-start; the 45 s grace period lets the leader drain),
+# 7. require readiness, both markets NORMAL, placement enabled and the running
+# containers at the verified revision — otherwise fail.
 # Start, success and failure are announced on Discord when the sops file
 # carries DISCORD_WEBHOOK_URL (infra/oracle/notify.sh, docs "Alerting"); a
 # deploy lock silences the status timer for the duration (deploy-lib.sh).
@@ -32,10 +34,13 @@ cd "$REPO"
 . "$REPO/infra/oracle/deploy-lib.sh"
 deploy_begin "$REF"
 
-step "fetch ${REF}"
-as_owner git fetch -q origin "$REF"
-as_owner git checkout -q --detach FETCH_HEAD
-as_owner git log --oneline -1
+if [ "${MOI_DEPLOY_REEXEC:-0}" != 1 ]; then
+  step "fetch ${REF}"
+  as_owner git fetch -q origin "$REF"
+  as_owner git checkout -q --detach FETCH_HEAD
+  as_owner git log --oneline -1
+  deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"
+fi
 
 step toolchain
 # Cap the V8 heap: the E2.1.Micro fallback host has 1 GB of RAM plus swap, and
@@ -69,6 +74,23 @@ step "registry login + pull (${MOI_IMAGE_TAG:-main})"
 # docker keeps it in root's config.json (0600).
 withsecrets 'printf %s "$GHCR_TOKEN" | docker login ghcr.io -u changminko --password-stdin >/dev/null'
 withsecrets "${COMPOSE[*]} pull --quiet"
+
+step "verify image revisions"
+# A mutable tag such as `main` is only a selector. The immutable OCI revision
+# label is the release identity, and every GHCR runtime image the stack pulls
+# (caddy/postgres/redis are upstream) must agree with the exact checkout before
+# any migration can change the database.
+# `compose config --images` resolves the active profiles — the bot image is
+# listed (and verified) exactly when COMPOSE_PROFILES=bot pulled it — and
+# prints image references only, so no rendered secret ever lands in a shell
+# variable (the full `config` output carries every environment value).
+checkout_sha="$(as_owner git rev-parse HEAD)"
+mapfile -t release_images < <(withsecrets "${COMPOSE[*]} config --images" | grep '^ghcr.io/changminko/moi-' | sort -u)
+for required in paper-api web; do
+  printf '%s\n' "${release_images[@]}" | grep -q "^ghcr.io/changminko/moi-${required}:" \
+    || { echo "FAIL: compose config lists no ghcr.io/changminko/moi-${required} image"; exit 1; }
+done
+verify_release_image_revisions "$checkout_sha" "${release_images[@]}"
 
 step "migrations (new image, old release still serving)"
 # First deploy: no release is running yet, so the datastore the job connects to
@@ -121,6 +143,18 @@ for _ in $(seq 1 40); do
       stray="$(docker ps -aq --filter label=com.docker.compose.project=moi --filter label=com.docker.compose.service=bot)"
       [ -z "$stray" ] || { echo "FAIL: COMPOSE_PROFILES does not enable the bot but a bot container exists; remove it first: COMPOSE_PROFILES=bot ${COMPOSE[*]} rm -sf bot"; exit 1; }
     fi
+    # The images were verified before migrations, but systemd started the
+    # stack from /etc/moi/moi.env alone: a MOI_IMAGE_TAG pinned only on this
+    # command line would have verified one release and run another. The
+    # running containers are the last word.
+    running_services=(paper-api web)
+    [ "$bot_enabled" = 1 ] && running_services+=(bot)
+    mapfile -t running_ids < <(withsecrets "${COMPOSE[*]} ps -q ${running_services[*]}")
+    # `ps -q` hides exited containers: a service that died right after the
+    # restart would simply be absent, and the rest would verify in its place.
+    [ "${#running_ids[@]}" -eq "${#running_services[@]}" ] \
+      || { echo "FAIL: expected ${#running_services[@]} running containers (${running_services[*]}), compose ps returned ${#running_ids[@]}"; exit 1; }
+    verify_running_container_revisions "$checkout_sha" "${running_ids[@]}"
     sha="$(as_owner git rev-parse --short HEAD)"
     echo "$md"; echo "$tr"; echo "== done (${sha})"
     deploy_verified "$sha"
