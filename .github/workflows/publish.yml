@@ -1,12 +1,19 @@
 name: Publish images
 
-# Builds the three runtime images once, for amd64 and arm64, and publishes them
-# to GHCR on every push to main. Hosts never build: the Oracle reference host
+# Builds the three runtime images for amd64 and arm64 and publishes them to
+# GHCR on every push to main. Hosts never build: the Oracle reference host
 # (1 GB Micro or A1) pulls `ghcr.io/changminko/moi-{paper-api,web,strategy-runner}:main`.
 # No secrets or provider settings are baked in — everything arrives through
 # the compose environment at run time.
 #
-# The images are pushed under the commit sha first, scanned with Trivy, and
+# Each architecture is built on its own native runner (`ubuntu-24.04` for
+# amd64, `ubuntu-24.04-arm` for arm64) and pushed by digest; a second job
+# assembles the two digests into one manifest under the commit sha. There is
+# no QEMU: under emulation `pnpm fetch` hung for 43 minutes and the publish
+# timed out, and an arm64 production host cannot deploy without the arm64 half
+# (#99). The 20-minute bound is generous for a build that takes two to five.
+#
+# The manifest is pushed under the commit sha first, scanned with Trivy, and
 # only a clean scan (no HIGH/CRITICAL with a fix available) moves the `main`
 # tag. The packages stay private: hosts authenticate with a read-only token.
 
@@ -25,11 +32,14 @@ concurrency:
 
 jobs:
   images:
-    name: Build and push
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    name: Build ${{ matrix.name }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
+        name: [paper-api, web, strategy-runner]
+        arch: [amd64, arm64]
         include:
           - name: paper-api
             dockerfile: apps/paper-api/Dockerfile
@@ -37,26 +47,103 @@ jobs:
             dockerfile: apps/web/Dockerfile
           - name: strategy-runner
             dockerfile: apps/strategy-runner/Dockerfile
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: linux/${{ matrix.arch }}
+          # Pushed by digest only: the tag is written by the manifest job once
+          # both halves exist, so a half-built image never carries the sha.
+          outputs: type=image,name=ghcr.io/changminko/moi-${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
-          tags: ghcr.io/changminko/moi-${{ matrix.name }}:${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }},mode=max
+      - name: Record the digest
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.name }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifests:
+    name: Publish ${{ matrix.name }}
+    needs: images
+    # Runs even when a build failed, so one image's broken half does not hold
+    # the other two back from `main` (they were independent jobs before). The
+    # image that is missing a half fails its own digest count below.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [paper-api, web, strategy-runner]
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-${{ matrix.name }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble the multi-arch manifest under the commit sha
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ghcr.io/changminko/moi-${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          count="$(ls | wc -l | tr -d ' ')"
+          [ "$count" -eq 2 ] || { echo "expected one digest per architecture, found ${count}: $(ls)" >&2; exit 1; }
+          # shellcheck disable=SC2046
+          docker buildx imagetools create -t "${IMAGE}:${GITHUB_SHA}" $(printf "${IMAGE}@sha256:%s " *)
+      - name: Verify the manifest carries one image per architecture
+        # Each half was pushed with provenance and SBOM attached, so its digest
+        # is an OCI index (image + attestations); `imagetools create` flattens
+        # those into one index. This proves it did before anything is scanned
+        # or promoted: exactly one linux/amd64 and one linux/arm64 *image*
+        # manifest, no nested index. Attestation manifests report
+        # unknown/unknown and are skipped.
+        env:
+          IMAGE: ghcr.io/changminko/moi-${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}"
+          entries="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" \
+            --format '{{range .Manifest.Manifests}}{{if .Platform}}{{.Platform.OS}}/{{.Platform.Architecture}} {{.MediaType}}{{println}}{{end}}{{end}}')"
+          echo "${entries}"
+          for arch in amd64 arm64; do
+            n="$(echo "${entries}" | grep -Ec "^linux/${arch} application/vnd\.(oci\.image\.manifest\.v1|docker\.distribution\.manifest\.v2)\+json$" || true)"
+            [ "${n}" -eq 1 ] || { echo "expected exactly one linux/${arch} image manifest, found ${n}" >&2; exit 1; }
+          done
+          if echo "${entries}" | grep -q 'image.index'; then
+            echo "the merged manifest nests an index; refusing to promote it" >&2
+            exit 1
+          fi
       - name: Trivy scan (fail on fixable HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
