@@ -378,7 +378,8 @@ describe('ProductionRuntime', () => {
   // #65: a drill exit 1 came from `db.destroy` exceeding the shutdown budget
   // with nothing else in the log to say why. `pool.end()` waits for every
   // checked-out client, so a client nobody released pins the tail step for the
-  // whole budget; the forced stop now carries the pool counters.
+  // whole budget; the forced stop now carries the pool counters (how many were
+  // out, how many callers queued — one such client, no queue, here).
   it(
     'A5b: a pool client nobody released pins db.destroy, and the forced stop reports the pool counters',
     async () => {

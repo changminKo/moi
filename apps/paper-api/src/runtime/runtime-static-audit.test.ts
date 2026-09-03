@@ -134,7 +134,9 @@ describe('runtime static audit (§11.1)', () => {
 
   it('main.ts builds the runtime without the test-only database seam', () => {
     // `ProductionRuntimeOptions.database` exists so a test can hold one of the
-    // pool's clients; production always builds its own from DATABASE_URL.
+    // pool's clients; production always builds its own from DATABASE_URL. A
+    // source-shape heuristic (an explicit `database:` key), not a proof.
+    expect(main).toContain('new ProductionRuntime({');
     const construction = main.slice(
       main.indexOf('new ProductionRuntime({'),
       main.indexOf('});', main.indexOf('new ProductionRuntime({')),

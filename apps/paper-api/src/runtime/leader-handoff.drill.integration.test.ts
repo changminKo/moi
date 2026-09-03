@@ -228,14 +228,14 @@ describe('graceful leader handoff drill (§10.2)', () => {
       // Every step-4 observation was made while P1 was pinned in DRAINING.
       expect(reasons(await harness.trading(p1))).toContain('DRAINING');
       // The hold is only deterministic inside SHUTDOWN_DRAIN_DEADLINE_MS
-      // (10 s): past it §6.6-3 gives up, the blocked transaction still holds a
-      // pool client, and P1 exits 1 with `db.destroy` timed out — the same
+      // (10 s): past it §6.6-3 gives up and P1 exits 1 — and if the release
+      // comes late enough, with `db.destroy` timed out as well, the same
       // fingerprint as the unrelated step-11 failure. Fail here, by name,
       // long before that can happen.
       const heldMs = Date.now() - signalledAt;
       expect(
         heldMs,
-        'step 4 held P1 in DRAINING for too long; a forced exit would forge the db.destroy fingerprint',
+        'step 4 held P1 in DRAINING for too long; a forced exit can forge the db.destroy fingerprint',
       ).toBeLessThan(5_000);
       evidence.step4HeldMs = heldMs;
       // Let the admitted request finish: it was admitted before the gate

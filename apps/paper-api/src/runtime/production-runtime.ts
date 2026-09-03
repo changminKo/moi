@@ -749,9 +749,11 @@ export class ProductionRuntime {
         // Neither outcome is swallowed silently: a real cleanup failure is
         // logged as such, a timeout is reported as a forced stop. A
         // `db.destroy` that outlives the budget is `pool.end()` waiting for a
-        // client nobody released (or one still connecting); the counters name
-        // which, so the next such exit 1 on a drill carries its own evidence
-        // instead of "shutdown step exceeded" alone (#65).
+        // client nobody released or one still connecting. The counters say
+        // how many clients were out (`total - idle`) and whether callers were
+        // queued (`waiting`); they do not tell those two apart — a connecting
+        // client also counts as out — but the next such exit 1 on a drill
+        // carries that much instead of "shutdown step exceeded" alone (#65).
         this.#log(
           timeout ? 'shutdown.step_timed_out' : 'shutdown.step_failed',
           {

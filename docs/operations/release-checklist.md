@@ -93,11 +93,13 @@ handoff therefore remains unchecked below.
   the harness) so `DRAINING` is observed, not raced; the same drill passes with
   a deliberate 500 ms delay after the signal. The other two (`p3Exit.code=1`)
   were `db.destroy` outliving the shutdown budget; the forced stop now logs the
-  pool counters so a recurrence carries its own evidence. Evidence (HEAD of
-  PR #111): 3 consecutive local runs — `2026-09-03T15-40-19.165Z-drill.json`,
+  pool counters so a recurrence carries its own evidence. Evidence (PR #111):
+  at `9d60f25`, 3 consecutive local runs — `2026-09-03T15-40-19.165Z-drill.json`,
   `2026-09-03T15-41-40.193Z-drill.json`, `2026-09-03T15-41-48.451Z-drill.json`
   — plus the 500 ms-delay run `2026-09-03T15-41-12.001Z-drill.json`
-  (`step4DrainingObservedMs` 1 ms / 502 ms), and the PR's CI drill 3/3.
+  (`step4DrainingObservedMs` 1 ms / 502 ms) and CI drill 3/3; at `442bfbe`
+  (step 4 re-asserted), `2026-09-03T17-36-43.236Z-drill.json` (`step4HeldMs`
+  30 ms) — CI drill 3/3 for the merged head is the release evidence.
   Known: under whole-monorepo
   parallel `pnpm test` load the 100 ms split-lease sampler once caught the
   surviving-lease release window of a re-electing process (harmless — that
