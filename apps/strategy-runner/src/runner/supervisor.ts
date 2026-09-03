@@ -420,11 +420,12 @@ export class RunnerSupervisor {
         );
       }
 
-      await this.#sleep(SERVING_POLL_MS);
-
+      // A stop that landed while the probe was in flight: do not sleep on it.
       if (this.#stopped) {
         return;
       }
+
+      await this.#sleep(SERVING_POLL_MS);
     }
   }
 
