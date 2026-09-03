@@ -176,6 +176,20 @@ function readString(value: unknown, description: string): string {
  * arithmetic, far from the response that caused it, so every decimal the paper
  * API sends is held to trading-core's money domain right here.
  */
+/**
+ * A flag the API always sends as a boolean. `=== true` would read an absent
+ * or misspelled key as `false` — a recovery fill silently becoming an ordinary
+ * one is the drift class §16.32 documents (#91), so absence is malformed here
+ * like every other field of the fill.
+ */
+function readBoolean(value: unknown, description: string): boolean {
+  if (typeof value !== 'boolean') {
+    malformed(description);
+  }
+
+  return value;
+}
+
 function readMoneyAmount(value: unknown, description: string): DecimalString {
   if (!isMoneyAmount(value)) {
     malformed(description);
@@ -276,7 +290,7 @@ function decodeFill(payload: unknown): BrokerFill {
     quantity: readQuantity(body.quantity, 'fill quantity'),
     price: readMoneyAmount(body.price, 'fill price'),
     fee: readMoneyAmount(body.fee, 'fill fee'),
-    isRecoveryFill: body.isRecoveryFill === true,
+    isRecoveryFill: readBoolean(body.isRecoveryFill, 'fill isRecoveryFill'),
   };
 }
 
