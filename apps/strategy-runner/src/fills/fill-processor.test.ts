@@ -173,6 +173,18 @@ const ENTRY: StrategyDecision = Object.freeze({
   }),
 });
 
+const TICKISH = Object.freeze({
+  market: 'KR',
+  symbol: '005930',
+  price: '1000',
+  priceSource: 'rest-snapshot',
+  bestBid: null,
+  bestAsk: null,
+  asOf: new Date(NOW_MS).toISOString(),
+  marketDataVersion: '0',
+  gapBefore: false,
+} as const);
+
 const stores: StateStore[] = [];
 
 afterEach(() => {
@@ -530,6 +542,154 @@ describe('exactly once', () => {
     expect(new Set(broker.submitted.map((each) => each.key)).size).toBe(1);
     expect(broker.submitted[0]?.key).toBe(
       deriveIdempotencyKey('fill:12:samsung:0'),
+    );
+  });
+
+  /**
+   * #88: the replay recomputes the same ids, so a strategy whose `onFill` is
+   * not deterministic answers the replayed fill with a decision the log does
+   * not hold under that id. Submitting the recorded one would place an order
+   * the strategy no longer wants; submitting the new one would meet the
+   * ledger's `IDEMPOTENCY_CONFLICT`. Neither is a state to trade through: the
+   * runner wedges on the event, as it does for a fill it cannot explain, and
+   * the wedge trips the kill switch.
+   */
+  const replayAfterCrash = (
+    answer: () => readonly StrategyDecision[],
+    recorded: readonly StrategyDecision[] = [ENTRY],
+  ) => {
+    const directory = scratch();
+    const broker = new RecordingBroker();
+    const first = build(directory, { broker });
+
+    for (const [index, decision] of recorded.entries()) {
+      first.gateway.record('samsung', decision, TICKISH, {
+        decisionId: fillDecisionId('12', 'samsung', index),
+      });
+    }
+
+    first.state.close();
+    stores.length = 0;
+
+    const engaged: unknown[][] = [];
+    const second = build(directory, {
+      broker,
+      answer,
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
+
+    return { ...second, broker, engaged };
+  };
+
+  const expectDivergenceWedge = async (
+    run: ReturnType<typeof replayAfterCrash>,
+  ): Promise<void> => {
+    await expect(run.processor.process(fillEvent('12'))).rejects.toMatchObject({
+      code: 'INVARIANT_VIOLATION',
+      message: expect.stringMatching(/onFill diverged on replay/u),
+    });
+
+    expect(run.state.fills.cursor).toBeNull();
+    expect(run.broker.submitted).toStrictEqual([]);
+    expect(run.engaged).toHaveLength(1);
+    expect(run.engaged[0]?.[0]).toBe('fill-wedge');
+    expect(run.engaged[0]?.[1]).toMatch(/onFill diverged on replay/u);
+    expect(run.reporter.lines.join('\n')).toMatch(
+      /answered a replayed fill differently/u,
+    );
+  };
+
+  it('wedges when the replayed onFill wants a different order', async () => {
+    const run = replayAfterCrash(() => [
+      { ...ENTRY, intent: { ...ENTRY.intent, quantity: '2' } },
+    ]);
+
+    await expectDivergenceWedge(run);
+    // The recorded decision is untouched: one line, the original intent.
+    expect(
+      run.state.pendingDecisions().map((each) => each.intent?.quantity),
+    ).toStrictEqual(['1']);
+  });
+
+  it('wedges when the replayed onFill answers nothing where it had placed', async () => {
+    await expectDivergenceWedge(replayAfterCrash(() => []));
+  });
+
+  it('wedges when the replayed onFill answers more than it had', async () => {
+    const run = replayAfterCrash(() => [ENTRY, ENTRY]);
+
+    await expectDivergenceWedge(run);
+    // Nothing was written before the check: a second decision on disk would
+    // be a pending order the next start resubmits.
+    expect(
+      run.state.pendingDecisions().map((each) => each.decisionId),
+    ).toStrictEqual(['fill:12:samsung:0']);
+  });
+
+  it('numbers one strategy’s decisions across every fill in the event', async () => {
+    const broker = new RecordingBroker();
+    const seen: FillEvent[] = [];
+    const engaged: unknown[][] = [];
+    const { processor, state } = build(scratch(), {
+      broker,
+      seen,
+      answer: () => [ENTRY],
+      killSwitch: {
+        engage: async (...args) => {
+          engaged.push(args);
+        },
+      },
+    });
+
+    // A market order that walked two book levels: one event, two fills.
+    await processor.process(
+      fillEvent('12', [{ id: 'fill-1' }, { id: 'fill-2', price: '1010' }]),
+    );
+
+    expect(seen.map((fill) => fill.fillId)).toStrictEqual(['fill-1', 'fill-2']);
+    expect(engaged).toStrictEqual([]);
+    expect(state.fills.cursor).toBe('12');
+    expect(broker.submitted.map((each) => each.key)).toStrictEqual([
+      deriveIdempotencyKey('fill:12:samsung:0'),
+      deriveIdempotencyKey('fill:12:samsung:1'),
+    ]);
+  });
+
+  it('replays a two-fill event against the same numbering', async () => {
+    const directory = scratch();
+    const broker = new RecordingBroker();
+    const first = build(directory, { broker });
+
+    for (const index of [0, 1]) {
+      first.gateway.record('samsung', ENTRY, TICKISH, {
+        decisionId: fillDecisionId('12', 'samsung', index),
+      });
+    }
+
+    first.state.close();
+    stores.length = 0;
+
+    const second = build(directory, { broker, answer: () => [ENTRY] });
+
+    await second.processor.process(
+      fillEvent('12', [{ id: 'fill-1' }, { id: 'fill-2', price: '1010' }]),
+    );
+
+    expect(second.state.fills.cursor).toBe('12');
+    expect(second.state.pendingDecisions()).toStrictEqual([]);
+    expect(new Set(broker.submitted.map((each) => each.key)).size).toBe(2);
+  });
+
+  it('wedges when a noop replaces a recorded place', async () => {
+    await expectDivergenceWedge(
+      replayAfterCrash(
+        () => [{ kind: 'noop', reason: 'changed my mind' }, ENTRY],
+        [ENTRY, ENTRY],
+      ),
     );
   });
 

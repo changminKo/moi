@@ -248,7 +248,7 @@ export class StateStore {
    * halt after an attempt stays counted — the ledger may hold that order.
    */
   readonly #halted: Set<string>;
-  readonly #recorded = new Set<string>();
+  readonly #recorded = new Map<string, DecisionRecord>();
   /**
    * The account-event cursor and everything that commits with it (§6.4). Its
    * own file because its unit of atomicity is one *event*, not one decision:
@@ -283,7 +283,7 @@ export class StateStore {
       submissions.filter(neverSent).map((record) => record.decisionId),
     );
     for (const record of this.#decided) {
-      this.#recorded.add(record.decisionId);
+      this.#recorded.set(record.decisionId, record);
     }
 
     this.#decisions = AppendLog.open(join(directory, DECISIONS));
@@ -322,11 +322,23 @@ export class StateStore {
       return false;
     }
 
+    const frozen = Object.freeze(record);
+
     this.#decisions.append(toRecord(record), { durable: true });
-    this.#decided.push(Object.freeze(record));
-    this.#recorded.add(record.decisionId);
+    this.#decided.push(frozen);
+    this.#recorded.set(record.decisionId, frozen);
 
     return true;
+  }
+
+  /**
+   * The decision recorded under `decisionId`, or `undefined` if none was. The
+   * fill path recomputes its ids on replay and asks this before recording, so
+   * a replayed decision is compared against — and submitted as — the one the
+   * log already holds (#88).
+   */
+  decision(decisionId: string): DecisionRecord | undefined {
+    return this.#recorded.get(decisionId);
   }
 
   appendSubmission(record: SubmissionRecord): void {
