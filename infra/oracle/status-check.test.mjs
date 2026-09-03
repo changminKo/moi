@@ -759,8 +759,14 @@ describe('deploy-lib.sh', () => {
     const sb = makeSandbox(API);
     try {
       rmSync(join(sb.bin, 'flock'));
-
-      const r = runDeploy(sb, 'deploy_begin main');
+      // Only the sandbox and a bare `bash` on PATH: a Linux host has the real
+      // util-linux flock further down PATH, and `command -v` would find it.
+      const minimalBin = join(sb.dir, 'minimal-bin');
+      mkdirSync(minimalBin);
+      symlinkSync('/bin/bash', join(minimalBin, 'bash'));
+      const r = runDeploy(sb, 'deploy_begin main', {
+        extraEnv: { PATH: `${sb.bin}:${minimalBin}` },
+      });
 
       assert.equal(r.status, 69, r.stderr);
       assert.match(r.stderr, /flock is required to serialize deploys/u);
