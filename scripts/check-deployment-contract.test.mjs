@@ -173,6 +173,143 @@ describe('check-deployment-contract (A8)', () => {
   });
 
   /**
+   * #86: the alerting-dependency check reads `notify.sh`'s own guards, so it is
+   * only as good as its parser. A guard written in another valid idiom must
+   * still be read — and a guard the parser cannot read must fail the build
+   * rather than silently drop the tool out of the list.
+   */
+  const guardCases = [
+    [
+      'type -p',
+      'type -p rsync >/dev/null 2>&1 || soft_fail "rsync missing, nothing posted"',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'which with a combined redirect',
+      'which rsync &>/dev/null || soft_fail "rsync missing, nothing posted"',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'command -v without a redirect',
+      'command -v rsync || soft_fail "rsync missing, nothing posted"',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a shape the parser does not know',
+      '[ -x /usr/bin/rsync ] || soft_fail "rsync missing, nothing posted"',
+      /unrecognised dependency guard in infra\/oracle\/notify\.sh/,
+    ],
+    [
+      'a message that names a different tool than the probe',
+      'command -v jq >/dev/null 2>&1 || soft_fail "rsync missing, nothing posted"',
+      /unrecognised dependency guard in infra\/oracle\/notify\.sh:\d+: .* names rsync as missing but no probe/,
+    ],
+    [
+      'an if/then block',
+      'if ! command -v rsync >/dev/null 2>&1; then\n  soft_fail "rsync missing, nothing posted"\nfi',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a brace group after the probe',
+      'command -v rsync >/dev/null 2>&1 || { soft_fail "rsync missing, nothing posted"; }',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a probe of a variable',
+      'for tool in rsync; do command -v "$tool" >/dev/null 2>&1 || soft_fail "$tool missing"; done',
+      /unrecognised dependency guard in infra\/oracle\/notify\.sh:\d+: cannot name the tool/,
+    ],
+    [
+      'a probe with no soft_fail at all',
+      'hash rsync 2>/dev/null || exit 1',
+      /notify\.sh requires rsync/,
+    ],
+    [
+      'a probe chained after another command',
+      '[ -n "$payload" ] && which rsync >/dev/null 2>&1 || soft_fail "rsync missing, nothing posted"',
+      /notify\.sh requires rsync/,
+    ],
+  ];
+  for (const [name, guard, message] of guardCases)
+    it(`fails on an unprovisioned notify.sh dependency guarded with ${name}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, 'infra/oracle/notify.sh');
+        writeFileSync(
+          file,
+          readFileSync(file, 'utf8').replace(
+            /^command -v perl [^\n]*$/m,
+            (line) => `${line}\n${guard}`,
+          ),
+        );
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  /**
+   * The probe words are ordinary English too. Text that merely mentions them
+   * — a message, a trailing comment — must not be read as a dependency.
+   */
+  const benignLines = [
+    ['a message that says "type"', 'echo "please type your rsync path" >&2'],
+    ['a trailing comment', 'level="fatal" # type check: keep this in sync'],
+    ['a message that says "which"', 'echo "decide which rsync to use" >&2'],
+    [
+      'a message with "then type"',
+      'echo "retry, and then type your password again" >&2',
+    ],
+    [
+      'a message with "do hash"',
+      "echo 'we do hash every payload before sending' >&2",
+    ],
+    [
+      'a comment after a command',
+      'level="$1" && printf %s "$level" # then type it: legacy',
+    ],
+  ];
+  for (const [name, line] of benignLines)
+    it(`still passes when notify.sh gains ${name}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, 'infra/oracle/notify.sh');
+        writeFileSync(
+          file,
+          readFileSync(file, 'utf8').replace(
+            /^command -v perl [^\n]*$/m,
+            (guard) => `${guard}\n${line}`,
+          ),
+        );
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 0, result.stderr);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  it('still passes when a provisioned tool is guarded in another idiom', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/notify.sh');
+      writeFileSync(
+        file,
+        readFileSync(file, 'utf8').replace(
+          /^command -v perl ([^\n]*)$/m,
+          'type -p perl $1',
+        ),
+      );
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 0, result.stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * The strategy runner's half of the contract (strategy-runner design §4.1,
    * §7.4, §8.1). Each case is a way the deployment surface could quietly let
    * the bot start on its own, reach a host that is not this deployment's paper
