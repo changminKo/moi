@@ -1,5 +1,9 @@
 import type { BrokerPortfolio } from '@moi/strategy-sdk';
-import type { StrategyContext } from '@moi/strategy-sdk/strategy';
+import type {
+  OrderIntent,
+  StrategyContext,
+  StrategyDecision,
+} from '@moi/strategy-sdk/strategy';
 import { DomainError } from '@moi/trading-core';
 import { instrumentKey } from '../feed/quote-ticker.js';
 import type { StreamAccountEvent } from '../feed/stream-client.js';
@@ -62,6 +66,29 @@ import { FillResolver } from './fill-resolver.js';
  * the entire reason an uncommitted step can be replayed without placing a
  * second order, because `deriveIdempotencyKey` is a pure function of it.
  */
+/** Field-by-field: intents are plain data and the SDK does not freeze them. */
+function sameIntent(
+  answered: OrderIntent,
+  recorded: OrderIntent | undefined,
+): boolean {
+  if (recorded === undefined) {
+    return false;
+  }
+
+  const keys = new Set([...Object.keys(answered), ...Object.keys(recorded)]);
+
+  for (const key of keys) {
+    if (
+      (answered as Record<string, unknown>)[key] !==
+      (recorded as Record<string, unknown>)[key]
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export const fillDecisionId = (
   accountSequence: string,
   strategy: string,
@@ -138,78 +165,19 @@ export class FillProcessor {
     try {
       resolution = await this.#resolver.resolve(event, portfolio);
     } catch (error) {
-      if (
-        error instanceof DomainError &&
-        error.code === 'INVARIANT_VIOLATION'
-      ) {
-        // Not awaited: the sweep is network work, and this is the event drain
-        // chain. `engage` is idempotent, so the replay on every reconnect is
-        // silent after the first. Guarded too: whatever the trigger does, the
-        // error that leaves here is the wedge's own — that is the diagnosis.
-        try {
-          void this.#options.killSwitch?.engage('fill-wedge', error.message, {
-            accountSequence: event.accountSequence,
-            eventType: event.eventType,
-          });
-        } catch {
-          // Reported by the kill switch itself; nothing to add here.
-        }
-      }
+      this.#tripOnWedge(error, event);
 
       throw error;
     }
 
-    const decisions: DecisionRecord[] = [];
+    let decisions: DecisionRecord[];
 
-    for (const { event: fill } of resolution.fills) {
-      const host = this.#options.owner.get(instrumentKey(fill));
+    try {
+      decisions = this.#decide(event, resolution.fills);
+    } catch (error) {
+      this.#tripOnWedge(error, event);
 
-      if (host === undefined) {
-        // A fill on an instrument no configured strategy owns. It still counts
-        // towards realised PnL — it is the account's money either way — and
-        // there is nobody to ask what to do about it.
-        continue;
-      }
-
-      for (const [index, decision] of host
-        .onFill(fill, this.#options.context)
-        .entries()) {
-        const record = this.#options.gateway.record(
-          host.name,
-          decision,
-          // There is no tick here — the decision came from an execution, not
-          // from an observation — and `record()` reads this only to price the
-          // order through `notionalOf`. The fill's own price is the right
-          // number for that: a `MARKET` order sized against the last *quote*
-          // would be measured against something older than the execution that
-          // prompted it, and a priced order ignores this field entirely.
-          //
-          // `priceSource` is the one field here that cannot tell the truth. The
-          // SDK's union names market-data paths and a fill is not one, and
-          // adding a member for an object that never reaches a strategy would
-          // put a case in every consumer's switch for a value none of them can
-          // ever see. It is unread on this path; the honest statement is this
-          // comment rather than a fourth enum member.
-          {
-            market: fill.market,
-            symbol: fill.symbol,
-            price: fill.price,
-            priceSource: 'rest-snapshot',
-            bestBid: null,
-            bestAsk: null,
-            asOf: new Date(this.#now()).toISOString(),
-            marketDataVersion: '0',
-            gapBefore: false,
-          },
-          {
-            decisionId: fillDecisionId(event.accountSequence, host.name, index),
-          },
-        );
-
-        if (record !== null) {
-          decisions.push(record);
-        }
-      }
+      throw error;
     }
 
     const commit: FillCommit = {
@@ -238,6 +206,161 @@ export class FillProcessor {
     for (const record of decisions) {
       await this.#options.gateway.submit(record);
     }
+  }
+
+  /**
+   * A wedge — an `INVARIANT_VIOLATION` on the way from an account event to its
+   * commit — brings the submission barrier down too. Not awaited: the sweep is
+   * network work, and this is the event drain chain. `engage` is idempotent,
+   * so the replay on every reconnect is silent after the first. Guarded too:
+   * whatever the trigger does, the error that leaves here is the wedge's own —
+   * that is the diagnosis.
+   */
+  #tripOnWedge(error: unknown, event: StreamAccountEvent): void {
+    if (
+      !(error instanceof DomainError) ||
+      error.code !== 'INVARIANT_VIOLATION'
+    ) {
+      return;
+    }
+
+    try {
+      void this.#options.killSwitch?.engage('fill-wedge', error.message, {
+        accountSequence: event.accountSequence,
+        eventType: event.eventType,
+      });
+    } catch {
+      // Reported by the kill switch itself; nothing to add here.
+    }
+  }
+
+  /**
+   * Step 3: ask each owning strategy and record what it answers.
+   *
+   * The ids are recomputed from the account sequence, so a replay records
+   * nothing new and submits the decisions the log already holds. That is only
+   * sound while `onFill` is pure (SDK contract): a strategy that answers the
+   * replayed fill differently has a decision under an id the log holds for
+   * another one. Submitting the recorded one places an order the strategy no
+   * longer wants; submitting the new one meets the ledger's
+   * `IDEMPOTENCY_CONFLICT`. So the event wedges, like a fill the resolver
+   * cannot explain — cursor unchanged, kill switch tripped — and stays wedged
+   * on every replay until a person fixes the strategy (#88).
+   */
+  #decide(
+    event: StreamAccountEvent,
+    fills: Awaited<ReturnType<FillResolver['resolve']>>['fills'],
+  ): DecisionRecord[] {
+    const decisions: DecisionRecord[] = [];
+
+    for (const { event: fill } of fills) {
+      const host = this.#options.owner.get(instrumentKey(fill));
+
+      if (host === undefined) {
+        // A fill on an instrument no configured strategy owns. It still counts
+        // towards realised PnL — it is the account's money either way — and
+        // there is nobody to ask what to do about it.
+        continue;
+      }
+
+      const answered = host.onFill(fill, this.#options.context);
+      let replayed = false;
+      let fresh = false;
+
+      for (const [index, decision] of answered.entries()) {
+        const decisionId = fillDecisionId(
+          event.accountSequence,
+          host.name,
+          index,
+        );
+        const recorded = this.#options.state.decision(decisionId);
+
+        if (recorded !== undefined) {
+          replayed = true;
+          this.#assertSameDecision(decisionId, recorded, decision);
+        } else if (decision.kind !== 'noop') {
+          fresh = true;
+        }
+
+        const record = this.#options.gateway.record(
+          host.name,
+          decision,
+          // There is no tick here — the decision came from an execution, not
+          // from an observation — and `record()` reads this only to price the
+          // order through `notionalOf`. The fill's own price is the right
+          // number for that: a `MARKET` order sized against the last *quote*
+          // would be measured against something older than the execution that
+          // prompted it, and a priced order ignores this field entirely.
+          //
+          // `priceSource` is the one field here that cannot tell the truth. The
+          // SDK's union names market-data paths and a fill is not one, and
+          // adding a member for an object that never reaches a strategy would
+          // put a case in every consumer's switch for a value none of them can
+          // ever see. It is unread on this path; the honest statement is this
+          // comment rather than a fourth enum member.
+          {
+            market: fill.market,
+            symbol: fill.symbol,
+            price: fill.price,
+            priceSource: 'rest-snapshot',
+            bestBid: null,
+            bestAsk: null,
+            asOf: new Date(this.#now()).toISOString(),
+            marketDataVersion: '0',
+            gapBefore: false,
+          },
+          { decisionId },
+        );
+
+        if (record !== null) {
+          decisions.push(record);
+        }
+      }
+
+      // The same event, the same strategy, a different number of decisions:
+      // a replay that has recorded ids and fresh ones side by side, or one
+      // that stops short of an id the log holds.
+      const beyond = fillDecisionId(
+        event.accountSequence,
+        host.name,
+        answered.length,
+      );
+
+      if ((replayed && fresh) || this.#options.state.decision(beyond)) {
+        this.#diverged(host.name, beyond, 'a different number of decisions');
+      }
+    }
+
+    return decisions;
+  }
+
+  #assertSameDecision(
+    decisionId: string,
+    recorded: DecisionRecord,
+    decision: StrategyDecision,
+  ): void {
+    const same =
+      decision.kind === recorded.kind &&
+      (decision.kind !== 'place' ||
+        sameIntent(decision.intent, recorded.intent)) &&
+      (decision.kind !== 'cancel' || decision.orderId === recorded.orderId);
+
+    if (!same) {
+      this.#diverged(recorded.strategy, decisionId, decision.kind);
+    }
+  }
+
+  #diverged(strategy: string, decisionId: string, answered: string): never {
+    this.#options.reporter.report(
+      'error',
+      'the strategy answered a replayed fill differently',
+      { strategy, decisionId, answered },
+    );
+
+    throw new DomainError(
+      'INVARIANT_VIOLATION',
+      `onFill diverged on replay: ${decisionId} (${answered})`,
+    );
   }
 
   /**

@@ -197,6 +197,18 @@ export class OrderGateway {
             notional: notionalOf(decision.intent, tick as Tick),
           };
 
+    // A reused id is a replay: the fill path recomputes its ids from the
+    // account sequence, and what it must submit is the decision the log holds
+    // under that id, not the one offered now. The key is derived from the id,
+    // and the ledger refuses the old key with a new payload
+    // (`IDEMPOTENCY_CONFLICT`); the caller decides whether the difference is a
+    // fault (#88). `appendDecision`'s own guard stays as the second line.
+    const recorded = this.#state.decision(record.decisionId);
+
+    if (recorded !== undefined) {
+      return recorded;
+    }
+
     this.#state.appendDecision(record);
 
     return record;

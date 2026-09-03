@@ -546,20 +546,35 @@ describe('reconnection', () => {
     expect(h.delays[h.delays.length - 1]).toBeGreaterThanOrEqual(15_000);
   });
 
-  it('resets the backoff once a connection is ready', async () => {
-    const h = harness();
-
+  /** Drives the client into the hold band: `maxFailures` closes in a row. */
+  const exhaust = async (h: Harness): Promise<void> => {
     h.client.start();
 
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
       await h.fire();
       (h.sockets[i] as FakeSocket).drop();
       await settle();
     }
 
+    expect(h.reporter.lines.join('\n')).toMatch(
+      /the market stream has failed repeatedly/u,
+    );
+  };
+
+  /**
+   * #89: `ready` alone is not proof the connection works. A server that accepts
+   * the upgrade, answers `ready`, and closes at once would otherwise reset the
+   * backoff on every attempt and never reach the hold band — a flap storm the
+   * policy exists to slow down. Success is recorded only once the connection
+   * has outlived one heartbeat interval.
+   */
+  it('resets the backoff once a ready connection has held for a heartbeat interval', async () => {
+    const h = harness();
+
+    await exhaust(h);
     await h.fire();
 
-    const socket = h.sockets[3] as FakeSocket;
+    const socket = h.sockets[6] as FakeSocket;
 
     socket.open();
     socket.send({
@@ -569,22 +584,72 @@ describe('reconnection', () => {
     });
     await settle();
 
-    const before = h.delays.length;
+    // The stability timer is armed for one interval, the liveness deadline for
+    // three; firing both lets the connection prove itself and then declares it
+    // dead, so the next delay shows which band the policy is in.
+    expect(h.delays.slice(-2)).toStrictEqual([30_000, 90_000]);
+    await h.fire();
+    await settle();
 
+    // Back at the base of the ordinary band, not in the hold band the run of
+    // failures had reached.
+    expect(h.delays[h.delays.length - 1]).toBe(0);
+  });
+
+  it('treats ready-then-close as a failure, so a flap storm reaches the hold band', async () => {
+    const h = harness();
+
+    h.client.start();
+
+    for (let i = 0; i < 6; i += 1) {
+      await h.fire();
+
+      const socket = h.sockets[i] as FakeSocket;
+
+      socket.open();
+      socket.send({
+        type: 'ready',
+        accountSequence: '1',
+        heartbeatIntervalMs: 30_000,
+      });
+      await settle();
+      socket.drop();
+      await settle();
+    }
+
+    expect(h.reporter.lines.join('\n')).toMatch(
+      /the market stream has failed repeatedly/u,
+    );
+    expect(h.delays[h.delays.length - 1]).toBeGreaterThanOrEqual(15_000);
+  });
+
+  it('does not record success for a connection that was dropped before the interval', async () => {
+    const h = harness();
+
+    await exhaust(h);
+    await h.fire();
+
+    const socket = h.sockets[6] as FakeSocket;
+
+    socket.open();
+    socket.send({
+      type: 'ready',
+      accountSequence: '1',
+      heartbeatIntervalMs: 30_000,
+    });
+    await settle();
     socket.drop();
     await settle();
 
-    // Back at the base of the ordinary band, not wherever the run of failures
-    // had pushed it.
-    expect(h.delays[before]).toBe(0);
+    // Still holding: the stability timer was cancelled with the socket.
+    expect(h.delays[h.delays.length - 1]).toBeGreaterThanOrEqual(15_000);
+    // And firing whatever is left must not reset the policy after the fact.
+    await h.fire();
+    (h.sockets[7] as FakeSocket).drop();
+    await settle();
+    expect(h.delays[h.delays.length - 1]).toBeGreaterThanOrEqual(15_000);
   });
 
-  /**
-   * A half-open socket produces no `onclose` at all: the process sits there
-   * believing it is subscribed while the market moves without it. The server
-   * advertises its heartbeat interval in `ready`, so silence past a multiple of
-   * it is the only evidence available that the connection is gone.
-   */
   it('replaces a socket that stopped sending heartbeats', async () => {
     const h = harness();
 
