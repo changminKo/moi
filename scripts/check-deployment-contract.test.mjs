@@ -258,6 +258,18 @@ describe('check-deployment-contract (A8)', () => {
     ['a message that says "type"', 'echo "please type your rsync path" >&2'],
     ['a trailing comment', 'level="fatal" # type check: keep this in sync'],
     ['a message that says "which"', 'echo "decide which rsync to use" >&2'],
+    [
+      'a message with "then type"',
+      'echo "retry, and then type your password again" >&2',
+    ],
+    [
+      'a message with "do hash"',
+      "echo 'we do hash every payload before sending' >&2",
+    ],
+    [
+      'a comment after a command',
+      'level="$1" && printf %s "$level" # then type it: legacy',
+    ],
   ];
   for (const [name, line] of benignLines)
     it(`still passes when notify.sh gains ${name}`, () => {

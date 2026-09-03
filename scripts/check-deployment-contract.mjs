@@ -731,12 +731,41 @@ check('no committed secrets', () => {
  * above it — a guard in a shape the parser does not read, which must not
  * drop the tool out of the list silently.
  */
+/**
+ * A shell line with its string literals emptied and its comment cut off, so a
+ * probe word (`type`, `which`, `hash`) inside a message or a comment is never
+ * read as a probe. Quotes stay, so `command -v "$tool"` still shows a probe
+ * whose target the checker cannot name. Escapes inside double quotes and
+ * heredocs are out of scope: notify.sh uses neither for a probe.
+ */
+function shellCode(line) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+        out += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
+    out += ch;
+  }
+  return out;
+}
+
 function notifyDependencyGuards(script) {
   // A probe is recognised only in command position — the start of the line
   // or right after `;`, `{`, `(`, `&&`, `||`, `do`, `then`, with an optional
-  // `if`/`!` — so
-  // the words `type`, `which`, `hash` inside a message or a trailing comment
-  // are not read as one.
+  // `if`/`!` — and only in shell code (`shellCode`), never inside a string or
+  // a comment.
   const probe =
     /(?:^|[;{(]|&&|\|\||\bdo|\bthen)\s*(?:if\s+)?!?\s*(?:command -v|type -p|type|which|hash)\s+(\S+)/g;
   const missing = /soft_fail\s+"(\S+) missing\b/;
@@ -745,9 +774,8 @@ function notifyDependencyGuards(script) {
   const probedAt = [];
   lines.forEach((line, index) => {
     const at = `infra/oracle/notify.sh:${index + 1}`;
-    if (/^\s*#/.test(line)) return;
     const here = [];
-    for (const [, raw] of line.matchAll(probe)) {
+    for (const [, raw] of shellCode(line).matchAll(probe)) {
       const tool = raw.replace(/^["']|["']$/g, '');
       assert.ok(
         /^[A-Za-z0-9_.+-]+$/.test(tool.split('/').pop()) && !tool.includes('$'),
