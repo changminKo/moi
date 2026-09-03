@@ -593,6 +593,82 @@ check('publish workflow builds every image compose ships', () => {
   }
 });
 
+/**
+ * #99: the arm64 half of every image is built on a native arm64 runner, never
+ * under QEMU. Under emulation `pnpm fetch` hung for 43 minutes and the publish
+ * ran into its 45-minute timeout; production is arm64, so no arm64 image means
+ * no deploy. The workflow builds each architecture on its own runner, pushes
+ * by digest, and a second job assembles the manifest — this check keeps that
+ * shape from drifting back, and bounds every job so a hang costs minutes.
+ */
+check('publish workflow builds arm64 natively and bounds its jobs', () => {
+  const text = read('.github/workflows/publish.yml');
+  const workflow = readYaml('.github/workflows/publish.yml');
+  assert.doesNotMatch(
+    text,
+    /setup-qemu-action/,
+    'publish.yml must not build under QEMU: each architecture has a native runner (#99)',
+  );
+
+  const images = workflow.jobs.images;
+  const include = images.strategy.matrix.include ?? [];
+  const runners = Object.fromEntries(
+    include
+      .filter((entry) => entry.arch)
+      .map((entry) => [entry.arch, entry.runner]),
+  );
+  assert.deepEqual(
+    Object.keys(runners).sort(),
+    ['amd64', 'arm64'],
+    'publish.yml must build amd64 and arm64',
+  );
+  assert.match(
+    String(runners.arm64),
+    /-arm$/,
+    'publish.yml must build arm64 on a native arm64 runner',
+  );
+  assert.doesNotMatch(
+    String(runners.amd64),
+    /-arm$/,
+    'publish.yml must build amd64 on an amd64 runner',
+  );
+  assert.match(
+    String(images['runs-on']),
+    /^\$\{\{\s*matrix\.runner\s*\}\}$/,
+    'publish.yml images job must run on the runner its matrix entry names',
+  );
+
+  const names = images.strategy.matrix.name ?? [];
+  const built = include
+    .filter((entry) => entry.dockerfile)
+    .map((entry) => entry.name);
+  assert.deepEqual(
+    [...names].sort(),
+    [...built].sort(),
+    'publish.yml matrix names must match its Dockerfile entries one to one',
+  );
+
+  const manifests = workflow.jobs.manifests;
+  assert.equal(
+    manifests?.needs,
+    'images',
+    'publish.yml must assemble manifests only after every build',
+  );
+  const covered = manifests.strategy.matrix.name ?? [];
+  for (const name of names)
+    assert.ok(
+      covered.includes(name),
+      `publish.yml must assemble a manifest for ${name}`,
+    );
+
+  for (const [id, job] of Object.entries(workflow.jobs))
+    assert.ok(
+      typeof job['timeout-minutes'] === 'number' &&
+        job['timeout-minutes'] <= 20,
+      `publish.yml jobs must time out within 20 minutes (${id})`,
+    );
+});
+
 check('production overlay pulls every built image from GHCR', () => {
   // `!reset null` is a compose-specific tag; read the overlay as text so the
   // check does not depend on how a generic YAML parser treats it.

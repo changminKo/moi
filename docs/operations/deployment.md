@@ -310,7 +310,9 @@ requires, and the artefacts are the same ones the local smoke uses.
    `https://$WEB_DOMAIN` / `https://$API_DOMAIN`) → docker login + pull the
    images CI
    published to GHCR (`.github/workflows/publish.yml`, `linux/amd64` and
-   `linux/arm64`; the host never builds — a 1 GB Micro cannot) →
+   `linux/arm64`, each built on a native runner of its own architecture and
+   joined into one manifest — no QEMU; the host never builds — a 1 GB Micro
+   cannot) →
    start postgres/redis if absent (first deploy; running ones are left
    untouched) → one-off migration job with the new image
    (`node dist/migrate-cli.js`) while the old release still serves → `systemctl restart moi` (compose

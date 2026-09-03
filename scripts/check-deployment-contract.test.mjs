@@ -285,6 +285,60 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  /**
+   * #99: the arm64 half of every image is built on a native arm64 runner. Under
+   * QEMU `pnpm fetch` hung for 43 minutes and the publish timed out, which on
+   * an arm64 production host means no deploy at all. Each case is a way the
+   * workflow could drift back.
+   */
+  const publishCases = [
+    [
+      'the publish workflow brings QEMU back',
+      (text) =>
+        text.replace(
+          '      - uses: docker/setup-buildx-action@v4\n',
+          '      - uses: docker/setup-qemu-action@v3\n      - uses: docker/setup-buildx-action@v4\n',
+        ),
+      /publish\.yml must not build under QEMU/,
+    ],
+    [
+      'arm64 is built on an amd64 runner',
+      (text) =>
+        text.replace('runner: ubuntu-24.04-arm', 'runner: ubuntu-24.04'),
+      /publish\.yml must build arm64 on a native arm64 runner/,
+    ],
+    [
+      'a publish job may run for 45 minutes again',
+      (text) => text.replace('timeout-minutes: 20', 'timeout-minutes: 45'),
+      /publish\.yml jobs must time out within 20 minutes/,
+    ],
+    [
+      'the manifest job forgets an image',
+      (text) =>
+        text.replace(
+          /(manifests:[\s\S]*?name: \[paper-api, web), strategy-runner\]/,
+          '$1]',
+        ),
+      /publish\.yml must assemble a manifest for strategy-runner/,
+    ],
+  ];
+  for (const [name, mutate, message] of publishCases)
+    it(`fails when ${name}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, '.github/workflows/publish.yml');
+        const before = readFileSync(file, 'utf8');
+        const after = mutate(before);
+        assert.notEqual(after, before, 'the mutation must land');
+        writeFileSync(file, after);
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   it('fails when the production overlay lets the bot build on the host', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/compose.override.yaml');
