@@ -20,15 +20,32 @@ const event = (eventId: string, accountSequence: string) => ({
   accountSequence,
   payload: { market: { recoveryFill: { US: true } } },
 });
+/** An event whose payload is a full snapshot patch, so it applies LIVE. */
+const patch = (eventId: string, accountSequence: string) => ({
+  type: 'event' as const,
+  eventId,
+  accountSequence,
+  payload: { ...snapshot(accountSequence) },
+});
 
 describe('portfolio reconciliation', () => {
   it('deduplicates an event id', () => {
+    // #95: the fixture must apply LIVE, or the second delivery is swallowed by
+    // the STALE short-circuit and the dedupe path is never exercised.
     const once = reducePortfolio(
       createPortfolioState(snapshot('41')),
-      event('e42', '42'),
+      patch('e42', '42'),
     );
-    const twice = reducePortfolio(once, event('e42', '42'));
+    expect(once.sync).toEqual({ status: 'LIVE', refreshRequested: false });
+    expect(once.snapshot.accountSequence).toBe('42');
+    expect(once.seenEventIds.has('e42')).toBe(true);
+
+    // The same event id again — even with a sequence that would otherwise be
+    // a gap — is a no-op on the very same state object.
+    const twice = reducePortfolio(once, patch('e42', '43'));
     expect(twice).toBe(once);
+    expect(twice.sync.status).toBe('LIVE');
+    expect(twice.snapshot.accountSequence).toBe('42');
   });
 
   it('coalesces a sequence gap and ignores later events while stale', () => {
