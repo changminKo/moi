@@ -214,6 +214,12 @@ export class TwoProcessHarness {
   rest!: FakeTossRestServer;
   ws!: FakeTossWsServer;
   observer!: Client;
+  /**
+   * A second connection that holds one row lock for the drill. It is separate
+   * from `observer` so the observer's sampling queries never run inside the
+   * lock-holding transaction.
+   */
+  #holder: Client | null = null;
   credentials!: { clientId: string; clientSecret: string };
   readonly processes: ApiProcess[] = [];
   readonly observations: Observation[] = [];
@@ -551,6 +557,48 @@ export class TwoProcessHarness {
     return { ...result, ms: Date.now() - started };
   }
 
+  /**
+   * Pin an admitted request inside P1 for as long as the drill needs it
+   * (§10.2-4, §6.6-3). A process with an empty outbox drains and exits about
+   * 60 ms after SIGTERM, so an HTTP probe that merely races the signal sees
+   * DRAINING only on an idle runner. Locking the session row makes the next
+   * mutation from that session block at LEDGER_LOCK_ORDER's first step —
+   * inside the transaction, admitted, in flight — and §6.6-3 keeps the process
+   * in DRAINING until `releaseSession()` lets it finish.
+   */
+  async holdSession(client: DrillClient): Promise<void> {
+    if (this.#holder !== null) throw new Error('a session is already held');
+    this.#holder = new Client({
+      connectionString: this.postgres.getConnectionUri(),
+    });
+    await this.#holder.connect();
+    await this.#holder.query('begin');
+    await this.#holder.query(
+      'select id from anonymous_sessions where id = $1::uuid for update',
+      [client.id],
+    );
+  }
+
+  async releaseSession(): Promise<void> {
+    const holder = this.#holder;
+    if (holder === null) return;
+    this.#holder = null;
+    await holder.query('rollback').catch(() => undefined);
+    await holder.end().catch(() => undefined);
+  }
+
+  /** Backends (other than ours) blocked on a lock while touching `table`. */
+  async backendsBlockedOn(table: string): Promise<number> {
+    const result = await this.observer.query<{ n: number }>(
+      `select count(*)::int as n from pg_stat_activity
+         where wait_event_type = 'Lock'
+           and query ilike $1
+           and pid <> pg_backend_pid()`,
+      [`%${table}%`],
+    );
+    return result.rows[0]?.n ?? 0;
+  }
+
   writeEvidence(name: string, extra: Record<string, unknown>): string {
     const dir = resolve(
       WORKSPACE_ROOT,
@@ -590,6 +638,7 @@ export class TwoProcessHarness {
 
   async dispose(): Promise<void> {
     for (const timer of this.#observers) clearInterval(timer);
+    await this.releaseSession();
     for (const api of this.processes)
       if (api.running) await this.stop(api, 'SIGKILL').catch(() => undefined);
     await this.ws?.stop().catch(() => undefined);

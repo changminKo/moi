@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   type ApiProcess,
@@ -158,6 +159,26 @@ describe('graceful leader handoff drill (§10.2)', () => {
       ).toBe(false);
 
       // ---- 4. SIGTERM P1: drain fences HTTP, P2 serves cancellation ----------
+      // P1 drains an empty outbox in ~30 ms and exits ~60 ms after SIGTERM
+      // (measured across twelve CI runs, passing and failing alike), so the
+      // probes below cannot race the signal: on a loaded runner the first
+      // poll lands before the state flips and the next one after the process
+      // is gone (#65: `timed out waiting for P1 DRAINING`, `fetch failed`).
+      // Instead one admitted request is pinned inside P1 — a cancellation
+      // from a second session whose row the harness holds locked — and
+      // §6.6-3 keeps P1 in DRAINING until that request is released. The
+      // session is separate so P2's cancellation of the LIMIT below is not
+      // blocked by the same lock.
+      const holdClient = await harness.bootstrap(p1);
+      await harness.holdSession(holdClient);
+      const heldCancel = harness.cancelOrder(p1, holdClient, randomUUID());
+      await waitUntil(
+        async () =>
+          (await harness.backendsBlockedOn('anonymous_sessions')) >= 1,
+        5_000,
+        'P1 admitted request blocked on the held session row',
+      );
+      const signalledAt = Date.now();
       const p1Exit = harness.stop(p1);
       await waitUntil(
         async () =>
@@ -167,6 +188,7 @@ describe('graceful leader handoff drill (§10.2)', () => {
         1_000,
         'P1 DRAINING',
       );
+      evidence.step4DrainingObservedMs = Date.now() - signalledAt;
       const drainingReady = await harness.ready(p1);
       expect(drainingReady.status).toBe(503);
       expect(
@@ -195,6 +217,16 @@ describe('graceful leader handoff drill (§10.2)', () => {
       );
       expect(blocked.status).toBe(409);
       expect(blocked.body.code).toBe('CANCEL_ONLY');
+      // Every step-4 observation was made while P1 was pinned in DRAINING.
+      expect(reasons(await harness.trading(p1))).toContain('DRAINING');
+      // Let the admitted request finish: it was admitted before the gate
+      // closed, so it completes (§6.6-3 "이미 허용된 요청만 drain") — with an
+      // unknown order it ends as INVALID_ORDER and touches no ledger row.
+      await harness.releaseSession();
+      const held = await heldCancel;
+      expect(held.status).toBe(400);
+      expect(held.body.code).toBe('INVALID_ORDER');
+      evidence.step4Held = { status: held.status, code: held.body.code };
 
       // ---- 5. P1 exits cleanly with lease audits before P2 acquires ----------
       const exit = await p1Exit;
