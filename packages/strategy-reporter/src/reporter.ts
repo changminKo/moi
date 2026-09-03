@@ -31,6 +31,7 @@ import {
   type ReportTransport,
 } from './discord-transport.js';
 import { LEVEL_COLOURS, type ReportEvent, type ReportField } from './events.js';
+import { footerNotes } from './korean.js';
 import { containsSecret, maskOutbound } from './masking.js';
 import {
   ALERT_LEVELS,
@@ -236,20 +237,15 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
       // `suppressed` is a fact about *this* message — repeats of its own key
       // folded into it. `dropped` and `alertsLost` are facts about the
       // channel: the bucket and the queue are shared, so the counts belong to
-      // whatever message happens to carry them out, not to its subject. They
-      // are labelled apart so a session-swap warn cannot be misread as having
-      // itself dropped three things.
-      const channel = [
-        verdict.dropped > 0 ? `${verdict.dropped} routine dropped` : '',
-        lostNow > 0 ? `${lostNow} alerts lost` : '',
-      ].filter((part) => part.length > 0);
-      const parts = [
-        verdict.suppressed > 0 ? `+${verdict.suppressed} suppressed` : '',
-        channel.length > 0 ? `channel: ${channel.join(', ')}` : '',
-      ].filter((part) => part.length > 0);
+      // whatever message happens to carry them out, not to its subject.
+      // `footerNotes` labels them apart.
       await deliver(
         head.event,
-        parts.length > 0 ? ` · ${parts.join(' · ')}` : '',
+        footerNotes({
+          suppressed: verdict.suppressed,
+          dropped: verdict.dropped,
+          lost: lostNow,
+        }),
       );
     }
   };

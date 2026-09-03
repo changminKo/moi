@@ -15,6 +15,8 @@
  * `number` (AGENTS.md hard rule 5).
  */
 
+import { fieldLabel, localizeMessage, withOriginal } from './korean.js';
+
 export type ReportLevel = 'info' | 'ok' | 'warn' | 'fail';
 
 export interface ReportField {
@@ -55,14 +57,20 @@ export function sessionSwapped(input: {
   readonly sessionId: string;
   readonly reason: string;
 }): ReportEvent {
+  const title = 'session replaced';
+  const description = `The runner is on a new ledger session. Orders resting on the previous session can no longer be cancelled by the bot: ${input.reason}`;
   return {
     level: 'warn',
     kind: 'session-swapped',
-    title: 'session replaced',
-    description: `The runner is on a new ledger session. Orders resting on the previous session can no longer be cancelled by the bot: ${input.reason}`,
+    title: localizeMessage(title) ?? title,
+    // Korean first; the original English stays under it behind a spoiler.
+    description: `러너가 새 원장 세션으로 옮겼습니다. 이전 세션의 미체결 주문은 봇이 더는 취소할 수 없습니다: ${input.reason}\n${withOriginal(`${title} — ${description}`)}`,
     fields: [
-      { name: 'previous sessionId', value: input.previousSessionId },
-      { name: 'sessionId', value: input.sessionId },
+      {
+        name: fieldLabel('previous sessionId'),
+        value: input.previousSessionId,
+      },
+      { name: fieldLabel('sessionId'), value: input.sessionId },
     ],
   };
 }

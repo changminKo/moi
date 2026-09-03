@@ -53,9 +53,14 @@ describe('createReporter', () => {
 
     const [embed] = JSON.parse(discord.bodies()[0] ?? '{}').embeds;
     expect(embed.color).toBe(16_098_596);
-    expect(embed.title).toBe('session replaced');
+    expect(embed.title).toBe('세션이 교체되었습니다');
+    expect(embed.description).toMatch(/^러너가 새 원장 세션/);
+    // The original stays readable behind a spoiler — Discord's 펼쳐보기.
+    expect(embed.description).toContain(
+      '||session replaced — The runner is on a new ledger session.',
+    );
     expect(embed.fields).toContainEqual({
-      name: 'previous sessionId',
+      name: '이전 세션 ID (previous sessionId)',
       value: '01J8Z0Q9',
       inline: true,
     });
@@ -173,7 +178,7 @@ describe('createReporter', () => {
     await reporter.flush();
 
     const [embed] = JSON.parse(discord.bodies()[1] ?? '{}').embeds;
-    expect(embed.footer.text).toContain('+99 suppressed');
+    expect(embed.footer.text).toContain('+99건 생략');
   });
 
   it('keeps a deferred alert queued until a token exists instead of losing it', async () => {
@@ -239,7 +244,7 @@ describe('createReporter', () => {
       .bodies()
       .map((body) => JSON.parse(body).embeds[0].footer.text);
     expect(
-      footers.some((text: string) => text.includes(`${lost} alerts lost`)),
+      footers.some((text: string) => text.includes(`경보 ${lost}건 손실`)),
     ).toBe(true);
   });
 

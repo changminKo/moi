@@ -173,12 +173,20 @@ describe('runUntilStopped', () => {
       ),
     ).rejects.toThrow('the loop died');
 
-    const titles = sent.map(
+    const embeds = sent.map(
       (payload) =>
-        (payload as { embeds: { title: string }[] }).embeds[0]?.title,
+        (payload as { embeds: { title: string; description?: string }[] })
+          .embeds[0],
     );
 
-    expect(titles).toContain('the strategy runner stopped on an error');
+    // The embed is titled in Korean; the runner's English line — the one the
+    // log carries — stays underneath behind a spoiler.
+    expect(embeds.map((embed) => embed?.title)).toContain(
+      '전략 러너가 오류로 멈췄습니다',
+    );
+    expect(embeds.map((embed) => embed?.description)).toContain(
+      '||the strategy runner stopped on an error||',
+    );
   });
 
   it('still flushes the channel when closing the supervisor throws', async () => {

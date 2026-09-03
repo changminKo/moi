@@ -51,7 +51,7 @@ variable costs a counter on `stats()`, never a trading decision and never a
 crash — the position `infra/oracle/notify.sh` takes for deploys.
 
 **A bounded budget.** Aggregation collapses repeats of a key inside a 60 s
-window onto one message carrying `+N suppressed`; a 5-token bucket refilling
+window onto one message carrying `+N건 생략`; a 5-token bucket refilling
 one token per 12 s paces the rest; the last 2 tokens are reserved for `warn`
 and `fail`, so routine traffic can never starve a kill-switch report. Routine
 messages past the reserve are dropped and counted; alerts are queued until a
@@ -70,14 +70,24 @@ on, while the oldest is most likely superseded.
 
 That last case is a real loss and is accounted for as one: `stats().alertsLost`
 counts it separately from routine `dropped`, each loss emits its own
-diagnostic, and the next posted embed carries `channel: N alerts lost` in its
+diagnostic, and the next posted embed carries `채널: 경보 N건 손실` in its
 footer. If the channel is losing alerts, the channel says so.
 
-Footers distinguish the two kinds of count. `+N suppressed` is about *this*
-message — repeats of its own key folded into it. `channel: N routine dropped`
-and `channel: N alerts lost` are about the reporter: the token bucket and the
-queue are shared, so those counts belong to whichever message happens to carry
-them out, not to its subject.
+Footers distinguish the two kinds of count. `+N건 생략` is about *this*
+message — repeats of its own key folded into it. `채널: 일반 N건 버림` and
+`채널: 경보 N건 손실` are about the reporter: the token bucket and the queue are
+shared, so those counts belong to whichever message happens to carry them out,
+not to its subject.
+
+**Korean in the channel, English in the log.** The runner reports in English
+and that line stays the aggregation key, the footer's `kind` and what `docker
+logs` prints. The embed an operator reads is rendered from `src/korean.ts`:
+the title is the Korean for the message, the original English sits under it
+behind a Discord spoiler (`||…||` — 펼쳐보기), and a field whose name the table
+knows is labelled `사유 (reason)`. A message the table does not know posts as
+it is; `apps/strategy-runner/src/reporter-korean.test.ts` fails when a fixed
+runner message has no Korean row, so adding a `report(...)` call means adding a
+row.
 
 ## Channel separation
 
