@@ -244,6 +244,33 @@ describe('OrderGateway happy path', () => {
   });
 });
 
+describe('OrderGateway recording under a reused decision id', () => {
+  /**
+   * #88: the fill path recomputes its decision ids on replay, so a second
+   * `record()` under an id the log already holds is the replay of the first.
+   * What the caller gets back — and what is then submitted — must be the
+   * decision that was recorded, not whatever the strategy answered this time:
+   * the idempotency key is derived from the id, and the ledger refuses the old
+   * key with a new payload (`IDEMPOTENCY_CONFLICT`).
+   */
+  it('returns the recorded decision rather than the one offered now', () => {
+    const { gateway, state } = harness();
+    const first = gateway.record('samsung', BUY, TICK, {
+      decisionId: 'fill:12:samsung:0',
+    });
+    const second = gateway.record(
+      'samsung',
+      { ...BUY, intent: { ...BUY.intent, quantity: '2' } },
+      TICK,
+      { decisionId: 'fill:12:samsung:0' },
+    );
+
+    expect(second).toStrictEqual(first);
+    expect(second?.intent?.quantity).toBe('1');
+    expect(state.pendingDecisions()).toHaveLength(1);
+  });
+});
+
 describe('OrderGateway restart idempotency', () => {
   /**
    * The criterion design §11 names for phase B, as a unit test. The process is

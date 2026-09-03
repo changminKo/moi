@@ -43,7 +43,7 @@ step toolchain
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
 # jq builds the Discord payloads and perl masks them (infra/oracle/notify.sh);
 # hosts bootstrapped before either joined the package list get them here. The
-# deployment-contract checker reads notify.sh's own `command -v` guards and
+# deployment-contract checker reads notify.sh's own dependency guards and
 # fails unless every one of them appears here or in bootstrap.sh, so a tool the
 # alerting path needs cannot be added without being provisioned.
 for tool in jq perl; do

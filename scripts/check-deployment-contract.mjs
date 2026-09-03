@@ -808,6 +808,89 @@ check('no committed secrets', () => {
 });
 
 /**
+ * The external tools `notify.sh` depends on, read from the script.
+ *
+ * A dependency is counted wherever the script **probes** for a command —
+ * `command -v`, `type -p`, `type`, `which`, `hash` — whatever the probe is
+ * wired to: `|| soft_fail`, `|| { soft_fail …; }`, `if ! …; then`. Counting
+ * the probe rather than the `soft_fail` is what keeps the list honest when the
+ * next person writes the guard in another idiom (#86). Two things fail the
+ * build instead of being skipped: a probe whose target this checker cannot
+ * name (a variable, a quoted word), and a `soft_fail "<tool> missing…"`
+ * message with no probe for that tool on the same line or the lines just
+ * above it — a guard in a shape the parser does not read, which must not
+ * drop the tool out of the list silently.
+ */
+/**
+ * A shell line with its string literals emptied and its comment cut off, so a
+ * probe word (`type`, `which`, `hash`) inside a message or a comment is never
+ * read as a probe. Quotes stay, so `command -v "$tool"` still shows a probe
+ * whose target the checker cannot name. Escapes inside double quotes and
+ * heredocs are out of scope: notify.sh uses neither for a probe.
+ */
+function shellCode(line) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+        out += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
+    out += ch;
+  }
+  return out;
+}
+
+function notifyDependencyGuards(script) {
+  // A probe is recognised only in command position — the start of the line
+  // or right after `;`, `{`, `(`, `&&`, `||`, `do`, `then`, with an optional
+  // `if`/`!` — and only in shell code (`shellCode`), never inside a string or
+  // a comment.
+  const probe =
+    /(?:^|[;{(]|&&|\|\||\bdo|\bthen)\s*(?:if\s+)?!?\s*(?:command -v|type -p|type|which|hash)\s+(\S+)/g;
+  const missing = /soft_fail\s+"(\S+) missing\b/;
+  const lines = script.split('\n');
+  const tools = new Set();
+  const probedAt = [];
+  lines.forEach((line, index) => {
+    const at = `infra/oracle/notify.sh:${index + 1}`;
+    const here = [];
+    for (const [, raw] of shellCode(line).matchAll(probe)) {
+      const tool = raw.replace(/^["']|["']$/g, '');
+      assert.ok(
+        /^[A-Za-z0-9_.+-]+$/.test(tool.split('/').pop()) && !tool.includes('$'),
+        `unrecognised dependency guard in ${at}: cannot name the tool "${raw}" probes; guard each tool by its literal name`,
+      );
+      here.push(tool.split('/').pop());
+    }
+    for (const tool of here) {
+      tools.add(tool);
+      probedAt.push({ tool, index });
+    }
+    const named = missing.exec(line)?.[1];
+    if (named === undefined) return;
+    const nearby = probedAt.some(
+      (each) => each.tool === named && index - each.index <= 2,
+    );
+    assert.ok(
+      nearby,
+      `unrecognised dependency guard in ${at}: "${line.trim()}" names ${named} as missing but no probe for it (command -v | type -p | type | which | hash) is on this line or the two above`,
+    );
+  });
+  return [...tools];
+}
+
+/**
  * Everything `notify.sh` needs must actually be on the host.
  *
  * The alerting path is fail-closed by design: a missing dependency means no
@@ -823,11 +906,7 @@ check('no committed secrets', () => {
  * dependency to the alerting path without provisioning it fails the build.
  */
 check('host alerting dependencies are provisioned', () => {
-  const guards = [
-    ...read('infra/oracle/notify.sh').matchAll(
-      /command -v (\S+) >\/dev\/null 2>&1 \|\| soft_fail/g,
-    ),
-  ].map(([, tool]) => tool);
+  const guards = notifyDependencyGuards(read('infra/oracle/notify.sh'));
   assert.ok(
     guards.length > 0,
     'cannot locate notify.sh dependency guards; the parser or the script changed',
