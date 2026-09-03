@@ -325,7 +325,9 @@ describe('startup waits for the API to serve', () => {
     );
   });
 
-  it('names a missing response as unreachable and an answer without a runtime by its status', async () => {
+  it('names an answer without a runtime by its status, and keeps waiting through a missing response', async () => {
+    // Probe 1: the stub's 503 with no body. Probe 2: no response at all.
+    // Probe 3: SERVING.
     const answers: (string | null)[] = [null, 'SERVING'];
     const stub = api(
       { '005930': ['70800'] },
@@ -339,12 +341,14 @@ describe('startup waits for the API to serve', () => {
     );
     const time = clock('2026-08-31T01:00:00.000Z');
     const reporter = createRecordingReporter();
-    let threw = false;
-    // First probe: no response at all. Second: the stub's 503 with no body.
+    let probes = 0;
     const fetch: FetchLike = async (url, init) => {
-      if (!threw && new URL(url).pathname === '/health/market-data') {
-        threw = true;
-        throw new Error('connect ECONNREFUSED');
+      if (new URL(url).pathname === '/health/market-data') {
+        probes += 1;
+
+        if (probes === 2) {
+          throw new Error('connect ECONNREFUSED');
+        }
       }
 
       return stub.fetch(url, init);
@@ -366,9 +370,10 @@ describe('startup waits for the API to serve', () => {
     await supervisor.start();
     supervisor.close();
 
+    expect(probes).toBe(3);
     expect(reporter.lines.filter((l) => l.includes('paper API'))).toStrictEqual(
       [
-        '[info] the paper API is not serving yet; waiting before the first connect runtime=unreachable',
+        '[info] the paper API is not serving yet; waiting before the first connect runtime=http 503',
         `[info] the paper API is serving waitedMs=${2 * SERVING_POLL_MS}`,
       ],
     );
@@ -456,7 +461,17 @@ describe('startup waits for the API to serve', () => {
   });
 
   it('gives up waiting at the deadline, says so once, and connects anyway', async () => {
-    const stub = api({ '005930': ['70800'] }, { runtime: () => 'RECOVERING' });
+    // An API that never answers at all — the label is `unreachable`.
+    const stub = api({ '005930': ['70800'] });
+    let probes = 0;
+    const fetch: FetchLike = async (url, init) => {
+      if (new URL(url).pathname === '/health/market-data') {
+        probes += 1;
+        throw new Error('connect ECONNREFUSED');
+      }
+
+      return stub.fetch(url, init);
+    };
     const time = clock('2026-08-31T01:00:00.000Z');
     const reporter = createRecordingReporter();
     const supervisor = new RunnerSupervisor({
@@ -465,7 +480,7 @@ describe('startup waits for the API to serve', () => {
         [{ market: 'KR', symbol: '005930' }],
       ),
       reporter,
-      fetch: stub.fetch,
+      fetch,
       now: time.now,
       sleep: async (ms) => {
         time.advance(ms);
@@ -477,13 +492,11 @@ describe('startup waits for the API to serve', () => {
     supervisor.close();
 
     expect(stub.calls).toContain('/api/v1/sessions/anonymous');
-    expect(stub.calls.filter((p) => p === '/health/market-data').length).toBe(
-      SERVING_WAIT_MS / SERVING_POLL_MS + 1,
-    );
+    expect(probes).toBe(SERVING_WAIT_MS / SERVING_POLL_MS + 1);
     expect(
       reporter.lines.filter((l) => l.includes('did not reach SERVING')),
     ).toStrictEqual([
-      `[warn] the paper API did not reach SERVING before the wait ran out; connecting anyway runtime=RECOVERING waitedMs=${SERVING_WAIT_MS}`,
+      `[warn] the paper API did not reach SERVING before the wait ran out; connecting anyway runtime=unreachable waitedMs=${SERVING_WAIT_MS}`,
     ]);
   });
 });

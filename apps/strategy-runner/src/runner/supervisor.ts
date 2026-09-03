@@ -380,6 +380,11 @@ export class RunnerSupervisor {
     let announced = false;
 
     for (;;) {
+      // Stopped before we ever asked (a signal that beat `start()`): silent.
+      if (this.#stopped) {
+        return;
+      }
+
       const { runtime, status } = await this.#runtimeState();
       // `unreachable` is reserved for no response at all; an answer without a
       // usable `runtime` is named by its status.
