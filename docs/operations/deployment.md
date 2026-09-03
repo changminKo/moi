@@ -204,7 +204,10 @@ containers after the restart before it reports success. Do not pair a previous
 image tag with `main` or any other code ref, and pin the tag in `moi.env`, not
 on the command line: systemd starts the stack from `moi.env` alone, so a tag
 that lived only in the deploy's environment would verify one release and run
-another — the post-restart container check fails such a deploy.
+another — the post-restart container check fails such a deploy. That failure
+comes after the migration and the restart, so the host is then serving an
+unverified release: set `MOI_IMAGE_TAG` in `moi.env` to the SHA you meant and
+run `deploy.sh` again with that same SHA.
 
 Images published before this label existed can never gain it. To roll back to
 one of them, pin the tag in `moi.env` as above and run

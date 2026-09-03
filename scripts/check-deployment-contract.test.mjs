@@ -788,6 +788,29 @@ describe('check-deployment-contract (A8)', () => {
     }
   });
 
+  it('fails when the deploy wiring is neutralised by a no-op prefix', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_running_container_revisions "$checkout_sha" "\${running_ids[@]}"\n`,
+        `    : verify_running_container_revisions "$checkout_sha" "\${running_ids[@]}"\n`,
+      );
+      assert.notEqual(after, before, 'no-op prefix mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /deploy\.sh must verify the running containers after the restart/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails when deploy stops verifying the running containers', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/deploy.sh');

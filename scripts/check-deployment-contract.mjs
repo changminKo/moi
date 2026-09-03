@@ -963,8 +963,8 @@ check('reference deploy re-executes the checked-out script', () => {
   const checkout = script.indexOf(
     'as_owner git checkout -q --detach FETCH_HEAD',
   );
-  const reexec = script.indexOf(
-    'deploy_reexec "$REPO/infra/oracle/deploy.sh" "$REF"',
+  const reexec = script.search(
+    /^\s*deploy_reexec "\$REPO\/infra\/oracle\/deploy\.sh" "\$REF"$/mu,
   );
   const toolchain = script.indexOf('step toolchain');
 
@@ -990,8 +990,8 @@ check('reference deploy verifies pulled image revisions', () => {
     `mapfile -t release_images < <(withsecrets "\${COMPOSE[*]} config --images" | grep '^ghcr.io/changminko/moi-' | sort -u)`,
   );
   const required = script.indexOf('for required in paper-api web; do');
-  const verify = script.indexOf(
-    `verify_release_image_revisions "$checkout_sha" "\${release_images[@]}"`,
+  const verify = script.search(
+    /^\s*verify_release_image_revisions "\$checkout_sha" "\$\{release_images\[@\]\}"$/mu,
   );
   const migrations = script.indexOf(
     'step "migrations (new image, old release still serving)"',
@@ -1028,8 +1028,11 @@ check(
     const ids = script.indexOf(
       `mapfile -t running_ids < <(withsecrets "\${COMPOSE[*]} ps -q \${running_services[*]}")`,
     );
-    const verify = script.indexOf(
-      `verify_running_container_revisions "$checkout_sha" "\${running_ids[@]}"`,
+    const count = script.indexOf(
+      `[ "\${#running_ids[@]}" -eq "\${#running_services[@]}" ]`,
+    );
+    const verify = script.search(
+      /^\s*verify_running_container_revisions "\$checkout_sha" "\$\{running_ids\[@\]\}"$/mu,
     );
     const done = script.indexOf('deploy_verified "$sha"');
     assert.ok(
@@ -1037,7 +1040,8 @@ check(
         restart < services &&
         services < bot &&
         bot < ids &&
-        ids < verify &&
+        ids < count &&
+        count < verify &&
         verify < done,
       'deploy.sh must verify the running containers after the restart and before deploy_verified',
     );

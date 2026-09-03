@@ -150,6 +150,10 @@ for _ in $(seq 1 40); do
     running_services=(paper-api web)
     [ "$bot_enabled" = 1 ] && running_services+=(bot)
     mapfile -t running_ids < <(withsecrets "${COMPOSE[*]} ps -q ${running_services[*]}")
+    # `ps -q` hides exited containers: a service that died right after the
+    # restart would simply be absent, and the rest would verify in its place.
+    [ "${#running_ids[@]}" -eq "${#running_services[@]}" ] \
+      || { echo "FAIL: expected ${#running_services[@]} running containers (${running_services[*]}), compose ps returned ${#running_ids[@]}"; exit 1; }
     verify_running_container_revisions "$checkout_sha" "${running_ids[@]}"
     sha="$(as_owner git rev-parse --short HEAD)"
     echo "$md"; echo "$tr"; echo "== done (${sha})"
