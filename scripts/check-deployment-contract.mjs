@@ -718,6 +718,45 @@ check('no committed secrets', () => {
 });
 
 /**
+ * The tools `notify.sh` guards with `… || soft_fail`, read from the script.
+ *
+ * A guard is any of the shell's ways of asking whether a command exists —
+ * `command -v`, `type -p`, `type`, `which`, `hash` — with or without a
+ * redirect. A line that reaches `soft_fail` for a missing tool in a shape this
+ * parser does not read is an error, not a miss: the check only holds while
+ * every guard is counted, and a parser that quietly skipped one would be the
+ * silent failure it exists to catch (#86). The message convention
+ * (`"<tool> missing, …"`) is the second witness: a guard whose command and
+ * message name different tools is misread by somebody.
+ */
+function notifyDependencyGuards(script) {
+  const guardLine =
+    /^\s*(?:command -v|type -p|type|which|hash)\s+(\S+)(?:\s*(?:>\/dev\/null 2>&1|&>\/dev\/null|>\/dev\/null|2>\/dev\/null))?\s*\|\|\s*soft_fail\b(?:\s+"([^"]*)")?/;
+  const missingTool = /^(\S+) missing\b/;
+  const guards = [];
+  script.split('\n').forEach((line, index) => {
+    if (!/\|\|\s*soft_fail\b/.test(line)) return;
+    const parsed = guardLine.exec(line);
+    const message = /soft_fail\s+"([^"]*)"/.exec(line)?.[1] ?? '';
+    const named = missingTool.exec(message)?.[1];
+    if (parsed) {
+      const [, tool] = parsed;
+      assert.ok(
+        named === undefined || named === tool,
+        `unrecognised dependency guard in infra/oracle/notify.sh:${index + 1}: the guard probes ${tool} but the message names ${named}`,
+      );
+      guards.push(tool);
+      return;
+    }
+    assert.ok(
+      named === undefined,
+      `unrecognised dependency guard in infra/oracle/notify.sh:${index + 1}: "${line.trim()}" names ${named} as missing but is not a command probe this checker reads (command -v | type -p | type | which | hash)`,
+    );
+  });
+  return guards;
+}
+
+/**
  * Everything `notify.sh` needs must actually be on the host.
  *
  * The alerting path is fail-closed by design: a missing dependency means no
@@ -733,11 +772,7 @@ check('no committed secrets', () => {
  * dependency to the alerting path without provisioning it fails the build.
  */
 check('host alerting dependencies are provisioned', () => {
-  const guards = [
-    ...read('infra/oracle/notify.sh').matchAll(
-      /command -v (\S+) >\/dev\/null 2>&1 \|\| soft_fail/g,
-    ),
-  ].map(([, tool]) => tool);
+  const guards = notifyDependencyGuards(read('infra/oracle/notify.sh'));
   assert.ok(
     guards.length > 0,
     'cannot locate notify.sh dependency guards; the parser or the script changed',
