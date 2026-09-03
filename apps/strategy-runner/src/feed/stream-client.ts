@@ -70,6 +70,14 @@ export const DEFAULT_HEARTBEAT_MS = 30_000;
  * advertising `1` would make the window a formality and #89's defence vanish.
  */
 export const MIN_HEARTBEAT_MS = 1_000;
+/**
+ * The most an advertised interval is taken to be. Node clamps a `setTimeout`
+ * delay above 2^31 − 1 ms to **1 ms**, so an absurdly large value — or
+ * `Infinity` — would fire both timers at once: the mirror image of the floor's
+ * threat, and the same defence gone. Five minutes is far above the server's
+ * 30 s and still a liveness deadline an operator would call a deadline.
+ */
+export const MAX_HEARTBEAT_MS = 300_000;
 
 export interface StreamSocket {
   onopen?: (() => void) | undefined;
@@ -458,7 +466,10 @@ export class StreamClient {
     const stated = typeof advertised === 'number' && advertised > 0;
 
     if (stated) {
-      this.#heartbeatMs = Math.max(advertised, MIN_HEARTBEAT_MS);
+      this.#heartbeatMs = Math.min(
+        Math.max(advertised, MIN_HEARTBEAT_MS),
+        MAX_HEARTBEAT_MS,
+      );
     }
 
     this.#armStability();

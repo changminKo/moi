@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createRecordingReporter } from '../reporter.js';
 import {
   LIVENESS_INTERVALS,
+  MAX_HEARTBEAT_MS,
   MIN_HEARTBEAT_MS,
   StreamClient,
   type StreamHandlers,
@@ -676,6 +677,32 @@ describe('reconnection', () => {
     expect(h.delays.slice(-2)).toStrictEqual([
       MIN_HEARTBEAT_MS,
       MIN_HEARTBEAT_MS * LIVENESS_INTERVALS,
+    ]);
+  });
+
+  /**
+   * The mirror image: Node clamps a `setTimeout` delay above 2^31 − 1 ms to
+   * 1 ms, so a huge advertised interval would fire both timers at once.
+   */
+  it('caps an absurdly large advertised heartbeat interval', async () => {
+    const h = harness();
+
+    h.client.start();
+    await h.fire();
+
+    const socket = h.sockets[0] as FakeSocket;
+
+    socket.open();
+    socket.send({
+      type: 'ready',
+      accountSequence: '1',
+      heartbeatIntervalMs: 1e15,
+    });
+    await settle();
+
+    expect(h.delays.slice(-2)).toStrictEqual([
+      MAX_HEARTBEAT_MS,
+      MAX_HEARTBEAT_MS * LIVENESS_INTERVALS,
     ]);
   });
 
