@@ -5,6 +5,7 @@ import {
   LIVENESS_INTERVALS,
   MAX_HEARTBEAT_MS,
   MIN_HEARTBEAT_MS,
+  SOCKET_ERROR_UNEXPLAINED,
   StreamClient,
   type StreamHandlers,
   type StreamSocket,
@@ -17,7 +18,7 @@ const HYNIX: InstrumentRef = { market: 'KR', symbol: '000660' };
 class FakeSocket implements StreamSocket {
   onopen?: () => void;
   onclose?: (event: { code?: number; reason?: string }) => void;
-  onerror?: (event: { message?: string }) => void;
+  onerror?: (event: { message?: string; error?: unknown }) => void;
   onmessage?: (event: { data: unknown }) => void;
   closed: { code?: number; reason?: string } | null = null;
 
@@ -196,6 +197,33 @@ describe('the stream upgrade', () => {
     expect(dialled).toStrictEqual([
       'wss://paper.example.com/api/v1/stream?quoteSymbols=KR%3A005930',
     ]);
+  });
+
+  it('names the socket error, or says the runtime exposed none, never a blank (#112)', async () => {
+    const h = harness();
+
+    h.client.start();
+    await h.fire();
+
+    const socket = h.sockets[0] as FakeSocket;
+
+    // A runtime that puts the cause on `error`.
+    socket.onerror?.({ message: '', error: new Error('connect ECONNREFUSED') });
+    // `ws`: the message is on the event itself.
+    socket.onerror?.({ message: 'Unexpected server response: 503' });
+    // Node 24.19 (undici 7): `message` is '' and `error` is a TypeError with an
+    // empty message — a refused upgrade shows nothing at all.
+    socket.onerror?.({ message: '', error: new TypeError('') });
+    socket.onerror?.({});
+
+    expect(h.reporter.lines.filter((l) => l.includes('errored'))).toStrictEqual(
+      [
+        '[warn] the market stream errored error=connect ECONNREFUSED',
+        '[warn] the market stream errored error=Unexpected server response: 503',
+        `[warn] the market stream errored error=${SOCKET_ERROR_UNEXPLAINED}`,
+        `[warn] the market stream errored error=${SOCKET_ERROR_UNEXPLAINED}`,
+      ],
+    );
   });
 
   it('subscribes to every configured instrument, comma separated', async () => {

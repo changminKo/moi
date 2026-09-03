@@ -75,6 +75,19 @@ export interface SupervisorOptions {
   readonly recorder?: TickRecorder;
 }
 
+/**
+ * How long `start()` waits for the paper API to report `runtime: 'SERVING'`
+ * before connecting anyway, and how often it asks. A deploy restarts the bot
+ * alongside the API, and the API spends ~20 s in RESTORING → ACQUIRING_LEASES
+ * → RECOVERING first; a WebSocket upgrade in that window is a 503 the socket
+ * cannot tell from any other refusal, so without this wait every deploy opened
+ * with five `stream errored` embeds and the hold band (#112). The deadline is
+ * a ceiling: past it the runner proceeds and the reconnect policy takes over,
+ * exactly as before — it never refuses to start over a slow API.
+ */
+export const SERVING_WAIT_MS = 120_000;
+export const SERVING_POLL_MS = 1_000;
+
 interface RuntimeCell {
   readonly cursors: FeedCursors;
   readonly strategies: Readonly<Record<string, StrategyState>>;
@@ -120,6 +133,8 @@ export class RunnerSupervisor {
   readonly #owner: ReadonlyMap<string, StrategyHost>;
   readonly #recorder: TickRecorder | null;
   #running = false;
+  /** Set by `stop()`; `start()`'s wait and `run()` both honour it. */
+  #stopped = false;
 
   constructor(options: SupervisorOptions) {
     this.#config = options.config;
@@ -293,6 +308,14 @@ export class RunnerSupervisor {
    * portfolio that is about to change.
    */
   async start(): Promise<void> {
+    await this.#awaitServing();
+
+    // A SIGTERM that arrived while we were waiting for the API: there is no
+    // session to establish and no stream to arm — `run()` will return at once.
+    if (this.#stopped) {
+      return;
+    }
+
     await this.#session.establish();
     await this.#gateway.recoverPending();
     // A latch found on disk is announced and swept again before any strategy
@@ -308,6 +331,102 @@ export class RunnerSupervisor {
     // an event that reaches `FillProcessor` before `recoverPending` has run
     // would race a decision the previous process left unsettled.
     this.#stream.start();
+  }
+
+  /**
+   * `GET /health/market-data` → its `runtime`, or `null` when the API cannot
+   * be asked (connection refused, non-JSON). Unauthenticated: the route is
+   * public and this runs before there is a session.
+   */
+  async #runtimeState(): Promise<{
+    readonly runtime: string | null;
+    /** The HTTP status, or `null` when no response came back at all. */
+    readonly status: number | null;
+  }> {
+    try {
+      const response = await this.#api.send({
+        method: 'GET',
+        path: '/health/market-data',
+        authenticated: false,
+      });
+      const runtime = (response.body as { runtime?: unknown } | undefined)
+        ?.runtime;
+
+      return {
+        runtime: typeof runtime === 'string' ? runtime : null,
+        status: response.status,
+      };
+    } catch (error) {
+      // Only the network is swallowed here — an API that is not listening yet
+      // is exactly what this wait is for. A refusal by the client itself (an
+      // origin or path it will not talk to) is a configuration fault and stays
+      // fail-closed.
+      if (error instanceof DomainError) {
+        throw error;
+      }
+
+      return { runtime: null, status: null };
+    }
+  }
+
+  /**
+   * Waits until the API is SERVING, until SERVING_WAIT_MS has passed (plus at
+   * most one request timeout — the deadline is checked between probes), or
+   * until `stop()` is called.
+   */
+  async #awaitServing(): Promise<void> {
+    const startedAt = this.#now();
+    const deadline = startedAt + SERVING_WAIT_MS;
+    let announced = false;
+
+    for (;;) {
+      // Stopped before we ever asked (a signal that beat `start()`): silent.
+      if (this.#stopped) {
+        return;
+      }
+
+      const { runtime, status } = await this.#runtimeState();
+      // `unreachable` is reserved for no response at all; an answer without a
+      // usable `runtime` is named by its status.
+      const seen =
+        runtime ?? (status === null ? 'unreachable' : `http ${status}`);
+
+      if (runtime === 'SERVING') {
+        if (announced) {
+          this.#reporter.report('info', 'the paper API is serving', {
+            waitedMs: this.#now() - startedAt,
+          });
+        }
+
+        return;
+      }
+
+      if (this.#now() >= deadline) {
+        this.#reporter.report(
+          'warn',
+          'the paper API did not reach SERVING before the wait ran out; connecting anyway',
+          { runtime: seen, waitedMs: this.#now() - startedAt },
+        );
+
+        return;
+      }
+
+      if (!announced) {
+        announced = true;
+        this.#reporter.report(
+          'info',
+          'the paper API is not serving yet; waiting before the first connect',
+          { runtime: seen },
+        );
+      }
+
+      // A stop that landed while the probe was in flight: do not sleep on it.
+      if (this.#stopped) {
+        return;
+      }
+
+      await this.#sleep(SERVING_POLL_MS);
+    }
   }
 
   /** One pass. Separated from `run` so a test can drive the loop by hand. */
@@ -337,6 +456,10 @@ export class RunnerSupervisor {
   }
 
   async run(): Promise<void> {
+    if (this.#stopped) {
+      return;
+    }
+
     this.#running = true;
 
     while (this.#running) {
@@ -356,6 +479,7 @@ export class RunnerSupervisor {
   }
 
   stop(): void {
+    this.#stopped = true;
     this.#running = false;
     this.#stream.stop();
   }

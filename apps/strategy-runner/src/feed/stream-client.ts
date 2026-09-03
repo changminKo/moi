@@ -82,9 +82,44 @@ export const MAX_HEARTBEAT_MS = 300_000;
 export interface StreamSocket {
   onopen?: (() => void) | undefined;
   onclose?: ((event: { code?: number; reason?: string }) => void) | undefined;
-  onerror?: ((event: { message?: string }) => void) | undefined;
+  /**
+   * Node 24's built-in `WebSocket` (undici 7) raises an `ErrorEvent` whose
+   * `message` is `''` and whose `error` is a `TypeError` with an empty message
+   * too — a refused upgrade and a refused connection look identical, and the
+   * close code (1006) is the only signal. `ws` puts a message on the event.
+   * Both shapes are read; when neither says anything, the log says so.
+   */
+  onerror?:
+    | ((event: { message?: string; error?: unknown }) => void)
+    | undefined;
   onmessage?: ((event: { data: unknown }) => void) | undefined;
   close(code?: number, reason?: string): void;
+}
+
+/** What the log says when the runtime's socket exposes no reason at all. */
+export const SOCKET_ERROR_UNEXPLAINED =
+  'not exposed by the runtime WebSocket; see the close code';
+
+/**
+ * The one line a socket error gets in the log. `?? 'unknown'` on
+ * `event.message` was not enough: the built-in `WebSocket` reports `''`, not
+ * `undefined`, so every upgrade the API refused arrived as `error=` (#112).
+ * Node 24.19 exposes no reason anywhere on the event (`error` is a `TypeError`
+ * with an empty message), so the honest line names that instead of a blank.
+ */
+export function describeSocketError(event: {
+  message?: string;
+  error?: unknown;
+}): string {
+  if (event.error instanceof Error && event.error.message.length > 0) {
+    return event.error.message;
+  }
+
+  if (typeof event.message === 'string' && event.message.length > 0) {
+    return event.message;
+  }
+
+  return SOCKET_ERROR_UNEXPLAINED;
 }
 
 export type StreamSocketFactory = (
@@ -303,7 +338,7 @@ export class StreamClient {
       // it: the session client's own `GET /api/v1/portfolio` is what discovers
       // an expired session, and everything else is a backoff.
       this.#options.reporter.report('warn', 'the market stream errored', {
-        error: event.message ?? 'unknown',
+        error: describeSocketError(event),
       });
     };
     socket.onclose = (event): void => {
