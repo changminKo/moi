@@ -230,14 +230,14 @@ describe('status-check.sh', () => {
       const degradedPosts = posted(degraded);
       assert.equal(degradedPosts.length, 1, 'same failure is not re-posted');
       assert.equal(embed(degradedPosts[0]).color, 0xe5484d);
-      assert.match(embed(degradedPosts[0]).title, /status FAIL/i);
+      assert.match(embed(degradedPosts[0]).title, /상태 FAIL/);
       rmSync(degraded.dir, { recursive: true, force: true });
 
       const recovered = runStatus(sb);
       assert.match(recovered.stdout, /^ok /);
       const all = posted(sb);
       assert.equal(all.length, 2, 'recovery is announced');
-      assert.match(embed(all[1]).title, /recovered/i);
+      assert.match(embed(all[1]).title, /상태 복구/);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -341,7 +341,7 @@ describe('status-check.sh', () => {
       assert.equal(due.status, 0, due.stderr);
       const all = posted(sb);
       assert.equal(all.length, 2, 'heartbeat posted');
-      assert.match(embed(all[1]).title, /heartbeat/i);
+      assert.match(embed(all[1]).title, /하트비트/);
       assert.equal(embed(all[1]).color, 0x2ecc71);
       assert.equal(stateLines(sb)[1], String(1000000000 + 24 * 3600));
       const again = runStatus(sb, {
@@ -406,7 +406,7 @@ describe('status-check.sh', () => {
       assert.equal(due.status, 0, due.stderr);
       const all = posted(sb);
       assert.equal(all.length, 2);
-      assert.match(embed(all[1]).title, /heartbeat \(fail\)/);
+      assert.match(embed(all[1]).title, /하트비트 \(fail\)/);
       assert.equal(embed(all[1]).color, 0xe5484d);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -587,7 +587,7 @@ describe('status-check.sh bot probe (phase D)', () => {
       assert.equal(looping.status, 0, looping.stderr);
       assert.match(looping.stdout, /^fail .* bot=restarting\/7 /);
       assert.equal(posted(sb).length, 2, 'the flip to fail is announced');
-      assert.equal(embed(posted(sb)[1]).title, 'Moi status FAIL');
+      assert.equal(embed(posted(sb)[1]).title, 'Moi 상태 FAIL');
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -711,10 +711,7 @@ describe('deploy-lib.sh', () => {
         'deploy_begin main\nstep verify\ndeploy_verified abc1234\nexit 0',
       );
       assert.equal(r.status, 0, r.stderr);
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy finished: abc1234',
-      ]);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 완료: abc1234']);
       assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -727,11 +724,8 @@ describe('deploy-lib.sh', () => {
       const r = runDeploy(sb, 'deploy_begin main\nstep migrations\nexit 0');
       assert.equal(r.status, 1);
       const all = posted(sb);
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy failed: main',
-      ]);
-      assert.match(embed(all[1]).description, /step: migrations \(exit 1\)/);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+      assert.match(embed(all[1]).description, /단계: migrations \(exit 1\)/);
       assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -748,7 +742,7 @@ describe('deploy-lib.sh', () => {
       assert.equal(r.status, 1);
       assert.match(
         embed(posted(sb)[1]).description,
-        /step: preflight \(production\) \(exit 1\)/,
+        /단계: preflight \(production\) \(exit 1\)/,
       );
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -890,10 +884,7 @@ deploy_reexec ${JSON.stringify(checkedOutScript)} main
         !existsSync(oldTail),
         'the pre-fetch script body must not resume',
       );
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy finished: fresh123',
-      ]);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 완료: fresh123']);
       assert.ok(!existsSync(env.MOI_DEPLOY_LOCK));
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -920,10 +911,7 @@ deploy_reexec ${JSON.stringify(join(sb.dir, 'checkout', 'missing-deploy.sh'))} m
         !existsSync(join(sb.dir, 'deploy.lock')),
         'the trap must still remove the marker',
       );
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy failed: main',
-      ]);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -1161,10 +1149,7 @@ verify_running_container_revisions ${expected} ctr-paper-api ctr-web`,
         r.stderr,
         new RegExp(`expected ${expected}, got ${running}`),
       );
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy failed: main',
-      ]);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
@@ -1244,8 +1229,8 @@ deploy_verified ${expected}`,
         new RegExp(`release images verified at ${expected}`),
       );
       assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        `deploy finished: ${expected}`,
+        '배포 시작: main',
+        `배포 완료: ${expected}`,
       ]);
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
@@ -1263,13 +1248,10 @@ deploy_verified ${expected}`,
         },
       );
       assert.equal(r.status, 130, r.stderr);
-      assert.deepEqual(titles(sb), [
-        'deploy started: main',
-        'deploy failed: main',
-      ]);
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
       assert.match(
         embed(posted(sb)[1]).description,
-        /step: toolchain \(exit 130\)/,
+        /단계: toolchain \(exit 130\)/,
       );
       assert.ok(!existsSync(join(sb.dir, 'deploy.lock')));
     } finally {
@@ -1290,7 +1272,7 @@ deploy_verified ${expected}`,
       assert.equal(r.status, 143, r.stderr);
       assert.match(
         embed(posted(sb)[1]).description,
-        /step: verify \(exit 143\)/,
+        /단계: verify \(exit 143\)/,
       );
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
