@@ -17,7 +17,7 @@ const HYNIX: InstrumentRef = { market: 'KR', symbol: '000660' };
 class FakeSocket implements StreamSocket {
   onopen?: () => void;
   onclose?: (event: { code?: number; reason?: string }) => void;
-  onerror?: (event: { message?: string }) => void;
+  onerror?: (event: { message?: string; error?: unknown }) => void;
   onmessage?: (event: { data: unknown }) => void;
   closed: { code?: number; reason?: string } | null = null;
 
@@ -196,6 +196,33 @@ describe('the stream upgrade', () => {
     expect(dialled).toStrictEqual([
       'wss://paper.example.com/api/v1/stream?quoteSymbols=KR%3A005930',
     ]);
+  });
+
+  it('names the socket error from its cause when the event message is empty (#112)', async () => {
+    const h = harness();
+
+    h.client.start();
+    await h.fire();
+
+    const socket = h.sockets[0] as FakeSocket;
+
+    // Node's built-in WebSocket: `message` is '', the cause is in `error`.
+    socket.onerror?.({
+      message: '',
+      error: new Error('Received network error or non-101 status code.'),
+    });
+    // `ws`: the message is on the event itself.
+    socket.onerror?.({ message: 'ECONNREFUSED' });
+    // Neither: still a word, never a blank.
+    socket.onerror?.({});
+
+    expect(h.reporter.lines.filter((l) => l.includes('errored'))).toStrictEqual(
+      [
+        '[warn] the market stream errored error=Received network error or non-101 status code.',
+        '[warn] the market stream errored error=ECONNREFUSED',
+        '[warn] the market stream errored error=unknown',
+      ],
+    );
   });
 
   it('subscribes to every configured instrument, comma separated', async () => {

@@ -82,9 +82,36 @@ export const MAX_HEARTBEAT_MS = 300_000;
 export interface StreamSocket {
   onopen?: (() => void) | undefined;
   onclose?: ((event: { code?: number; reason?: string }) => void) | undefined;
-  onerror?: ((event: { message?: string }) => void) | undefined;
+  /**
+   * Node's `WebSocket` raises an `ErrorEvent` whose `message` is `''` and
+   * whose `error` carries the cause ("Received network error or non-101
+   * status code."); `ws` sets `message`. Both shapes are read.
+   */
+  onerror?:
+    | ((event: { message?: string; error?: unknown }) => void)
+    | undefined;
   onmessage?: ((event: { data: unknown }) => void) | undefined;
   close(code?: number, reason?: string): void;
+}
+
+/**
+ * The one line a socket error gets in the log. `??` on `event.message` was not
+ * enough: the built-in `WebSocket` reports `''`, not `undefined`, and every
+ * upgrade the API refused arrived as `error=` (#112).
+ */
+export function describeSocketError(event: {
+  message?: string;
+  error?: unknown;
+}): string {
+  if (event.error instanceof Error && event.error.message.length > 0) {
+    return event.error.message;
+  }
+
+  if (typeof event.message === 'string' && event.message.length > 0) {
+    return event.message;
+  }
+
+  return 'unknown';
 }
 
 export type StreamSocketFactory = (
@@ -303,7 +330,7 @@ export class StreamClient {
       // it: the session client's own `GET /api/v1/portfolio` is what discovers
       // an expired session, and everything else is a backoff.
       this.#options.reporter.report('warn', 'the market stream errored', {
-        error: event.message ?? 'unknown',
+        error: describeSocketError(event),
       });
     };
     socket.onclose = (event): void => {

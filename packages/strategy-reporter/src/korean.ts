@@ -46,6 +46,11 @@ export const KOREAN_MESSAGES: Readonly<Record<string, string>> = {
   // supervisor
   'a market-data gap was observed': '시세 데이터 공백이 관측되었습니다',
   'the market stream is ready': '시세 스트림이 준비되었습니다',
+  'the paper API is not serving yet; waiting before the first connect':
+    '페이퍼 API 가 아직 서빙 전이라 첫 연결을 기다립니다',
+  'the paper API is serving': '페이퍼 API 가 서빙 중입니다',
+  'the paper API did not reach SERVING in time; connecting anyway':
+    '페이퍼 API 가 시간 안에 SERVING 에 도달하지 않아 그대로 연결합니다',
   'a runner cycle failed': '러너 사이클이 실패했습니다',
   'the risk gate refused an order': '리스크 게이트가 주문을 거부했습니다',
   // tick log
@@ -205,6 +210,8 @@ export const KOREAN_FIELD_LABELS: Readonly<Record<string, string>> = {
   refusal: '거부 사유',
   path: '경로',
   failures: '실패 횟수',
+  runtime: '런타임 상태',
+  waitedMs: '대기 시간 (ms)',
   silentMs: '무응답 (ms)',
   eventType: '이벤트 종류',
   fillAccountSequence: '체결 계정 시퀀스',

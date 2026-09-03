@@ -75,6 +75,19 @@ export interface SupervisorOptions {
   readonly recorder?: TickRecorder;
 }
 
+/**
+ * How long `start()` waits for the paper API to report `runtime: 'SERVING'`
+ * before connecting anyway, and how often it asks. A deploy restarts the bot
+ * alongside the API, and the API spends ~20 s in RESTORING → ACQUIRING_LEASES
+ * → RECOVERING first; a WebSocket upgrade in that window is a 503 the socket
+ * cannot tell from any other refusal, so without this wait every deploy opened
+ * with five `stream errored` embeds and the hold band (#112). The deadline is
+ * a ceiling: past it the runner proceeds and the reconnect policy takes over,
+ * exactly as before — it never refuses to start over a slow API.
+ */
+export const SERVING_WAIT_MS = 120_000;
+export const SERVING_POLL_MS = 1_000;
+
 interface RuntimeCell {
   readonly cursors: FeedCursors;
   readonly strategies: Readonly<Record<string, StrategyState>>;
@@ -293,6 +306,7 @@ export class RunnerSupervisor {
    * portfolio that is about to change.
    */
   async start(): Promise<void> {
+    await this.#awaitServing();
     await this.#session.establish();
     await this.#gateway.recoverPending();
     // A latch found on disk is announced and swept again before any strategy
@@ -308,6 +322,72 @@ export class RunnerSupervisor {
     // an event that reaches `FillProcessor` before `recoverPending` has run
     // would race a decision the previous process left unsettled.
     this.#stream.start();
+  }
+
+  /**
+   * `GET /health/market-data` → its `runtime`, or `null` when the API cannot
+   * be asked (connection refused, non-JSON). Unauthenticated: the route is
+   * public and this runs before there is a session.
+   */
+  async #runtimeState(): Promise<string | null> {
+    try {
+      const response = await this.#api.send({
+        method: 'GET',
+        path: '/health/market-data',
+        authenticated: false,
+      });
+      const runtime = (response.body as { runtime?: unknown } | undefined)
+        ?.runtime;
+
+      return typeof runtime === 'string' ? runtime : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Waits until the API is SERVING, or until SERVING_WAIT_MS has passed. */
+  async #awaitServing(): Promise<void> {
+    const startedAt = this.#now();
+    const deadline = startedAt + SERVING_WAIT_MS;
+    let announced = false;
+
+    for (;;) {
+      const runtime = await this.#runtimeState();
+
+      if (runtime === 'SERVING') {
+        if (announced) {
+          this.#reporter.report('info', 'the paper API is serving', {
+            waitedMs: this.#now() - startedAt,
+          });
+        }
+
+        return;
+      }
+
+      if (this.#now() >= deadline) {
+        this.#reporter.report(
+          'warn',
+          'the paper API did not reach SERVING in time; connecting anyway',
+          {
+            runtime: runtime ?? 'unreachable',
+            waitedMs: this.#now() - startedAt,
+          },
+        );
+
+        return;
+      }
+
+      if (!announced) {
+        announced = true;
+        this.#reporter.report(
+          'info',
+          'the paper API is not serving yet; waiting before the first connect',
+          { runtime: runtime ?? 'unreachable' },
+        );
+      }
+
+      await this.#sleep(SERVING_POLL_MS);
+    }
   }
 
   /** One pass. Separated from `run` so a test can drive the loop by hand. */

@@ -10,7 +10,11 @@ import { createRecordingReporter } from '../reporter.js';
 import { StateStore } from '../state/state-store.js';
 import type { FetchLike } from '../transport/paper-api-client.js';
 import { HEARTBEAT_MS } from './kill-switch.js';
-import { RunnerSupervisor } from './supervisor.js';
+import {
+  RunnerSupervisor,
+  SERVING_POLL_MS,
+  SERVING_WAIT_MS,
+} from './supervisor.js';
 
 const ORIGIN = 'http://127.0.0.1:3001';
 
@@ -81,21 +85,32 @@ function api(
   options: {
     /** When set, every order is answered with this status and error code. */
     readonly refuseOrders?: { readonly status: number; readonly code: string };
+    /**
+     * What `/health/market-data` reports as `runtime` on each call; `null`
+     * answers 503 with no body. Defaults to SERVING at once.
+     */
+    readonly runtime?: () => string | null;
   } = {},
 ): {
   readonly fetch: FetchLike;
   readonly placed: { readonly symbol: string; readonly side: string }[];
   readonly attempts: () => number;
+  /** Every path the runner asked for, in order. */
+  readonly calls: string[];
 } {
   const cursor = new Map<string, number>();
   const placed: { readonly symbol: string; readonly side: string }[] = [];
+  const calls: string[] = [];
   let attempts = 0;
 
   return {
     placed,
+    calls,
     attempts: () => attempts,
     fetch: async (url, init) => {
       const path = new URL(url).pathname;
+
+      calls.push(path);
       const reply = (
         status: number,
         body?: unknown,
@@ -107,6 +122,19 @@ function api(
         },
         text: async () => (body === undefined ? '' : JSON.stringify(body)),
       });
+
+      if (path === '/health/market-data') {
+        const runtime =
+          options.runtime === undefined ? 'SERVING' : options.runtime();
+
+        return runtime === null
+          ? reply(503)
+          : reply(200, {
+              runtime,
+              KR: { state: 'NORMAL' },
+              US: { state: 'NORMAL' },
+            });
+      }
 
       if (path === '/api/v1/sessions/anonymous') {
         return reply(
@@ -237,6 +265,120 @@ function clock(startedAt: string): {
 }
 
 const HALF_A_FRESHNESS_WINDOW = 40_000;
+
+/**
+ * #112: a deploy restarts the bot next to the API, and the API is not SERVING
+ * for its first ~20 s. Connecting the stream into that window was five refused
+ * upgrades and the hold band on every deploy.
+ */
+describe('startup waits for the API to serve', () => {
+  it('asks /health/market-data until it says SERVING, then creates the session', async () => {
+    const states = ['RECOVERING', null, 'RECOVERING', 'SERVING'];
+    let probe = 0;
+    const stub = api(
+      { '005930': ['70800'] },
+      {
+        runtime: () =>
+          states[Math.min(probe++, states.length - 1)] as string | null,
+      },
+    );
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const slept: number[] = [];
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      sleep: async (ms) => {
+        slept.push(ms);
+        time.advance(ms);
+      },
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    supervisor.close();
+
+    const health = stub.calls.filter((p) => p === '/health/market-data');
+    const session = stub.calls.indexOf('/api/v1/sessions/anonymous');
+    expect(health).toHaveLength(4);
+    expect(session).toBeGreaterThan(
+      stub.calls.lastIndexOf('/health/market-data'),
+    );
+    expect(slept).toStrictEqual([
+      SERVING_POLL_MS,
+      SERVING_POLL_MS,
+      SERVING_POLL_MS,
+    ]);
+    expect(
+      reporter.lines.filter((l) => l.includes('is not serving yet')),
+    ).toStrictEqual([
+      '[info] the paper API is not serving yet; waiting before the first connect runtime=RECOVERING',
+    ]);
+    expect(reporter.lines).toContain(
+      `[info] the paper API is serving waitedMs=${3 * SERVING_POLL_MS}`,
+    );
+  });
+
+  it('says nothing when the API is already serving', async () => {
+    const stub = api({ '005930': ['70800'] });
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: clock('2026-08-31T01:00:00.000Z').now,
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    supervisor.close();
+
+    expect(stub.calls.filter((p) => p === '/health/market-data')).toHaveLength(
+      1,
+    );
+    expect(reporter.lines.some((l) => l.includes('paper API'))).toBe(false);
+  });
+
+  it('gives up waiting at the deadline, says so once, and connects anyway', async () => {
+    const stub = api({ '005930': ['70800'] }, { runtime: () => 'RECOVERING' });
+    const time = clock('2026-08-31T01:00:00.000Z');
+    const reporter = createRecordingReporter();
+    const supervisor = new RunnerSupervisor({
+      config: config(
+        [grid('grid-samsung', '005930', '70000')],
+        [{ market: 'KR', symbol: '005930' }],
+      ),
+      reporter,
+      fetch: stub.fetch,
+      now: time.now,
+      sleep: async (ms) => {
+        time.advance(ms);
+      },
+      socketFactory: idleSocket,
+    });
+
+    await supervisor.start();
+    supervisor.close();
+
+    expect(stub.calls).toContain('/api/v1/sessions/anonymous');
+    expect(stub.calls.filter((p) => p === '/health/market-data').length).toBe(
+      SERVING_WAIT_MS / SERVING_POLL_MS + 1,
+    );
+    expect(
+      reporter.lines.filter((l) => l.includes('did not reach SERVING')),
+    ).toStrictEqual([
+      `[warn] the paper API did not reach SERVING in time; connecting anyway runtime=RECOVERING waitedMs=${SERVING_WAIT_MS}`,
+    ]);
+  });
+});
 
 /** Design §11, phase E, on the live path rather than in the replay. */
 describe('two strategies in one runner', () => {
