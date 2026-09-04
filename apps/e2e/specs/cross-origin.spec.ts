@@ -1,4 +1,5 @@
 import { expect, test } from '../fixtures/paper-system.js';
+import { RETRY_SESSION } from '../ui-labels.js';
 
 /**
  * Runs only under the `cross-origin-chromium` project, where the page is
@@ -26,6 +27,7 @@ function injectedApiOrigin(page: import('@playwright/test').Page) {
 
 test('calls the injected API origin rather than the origin it was served from', async ({
   page,
+  paperSystem,
 }) => {
   const apiOrigins = new Set<string>();
   page.on('request', (request) => {
@@ -42,7 +44,9 @@ test('calls the injected API origin rather than the origin it was served from', 
   // a cross-origin POST that fails CORS, the CSRF `Origin` check or the cookie
   // leaves the retry button instead.
   await expect(page.getByText('₩10,000,000').first()).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry session' })).toHaveCount(
+  // Spelled in both languages: this is an absence, and the wrong spelling
+  // would pass whatever the screen actually said (`ui-labels.ts`).
+  await expect(page.getByRole('button', { name: RETRY_SESSION })).toHaveCount(
     0,
   );
 
@@ -63,9 +67,13 @@ test('calls the injected API origin rather than the origin it was served from', 
 
   // The stream upgrade crosses the same boundary and is checked against the
   // API's own `publicOrigin`, so it is a second, independent origin check.
+  // Waiting on the harness's own count of live stream sessions makes the
+  // socket's arrival a fact rather than a race against the default 5 s poll.
+  await paperSystem.waitForStream();
   await expect
     .poll(() => [...socketOrigins], {
       message: 'the quote stream must open against the injected API origin',
+      timeout: 15_000,
     })
     .toEqual([String(apiOrigin).replace(/^http/u, 'ws')]);
 });

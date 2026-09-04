@@ -21,13 +21,16 @@ export type ObservedResponse = Readonly<{ url: string; status: number }>;
  * generic "failed to load resource" whose location is the icon URL, so the
  * text alone never identifies it — both halves are read.
  */
-const FAVICON_URL = /favicon[^/]*$/i;
-const LOAD_FAILURE = /404|not found|failed to load resource/i;
+// Anchored on the path segment: `/favicon.ico` is the icon, `/favicon/app.js`
+// is a script under a directory that merely shares the name.
+const FAVICON_URL = /\/favicon[^/]*$/iu;
+// Read from the message only. Folding the URL in would let any error whose
+// location happens to contain "404" excuse itself.
+const LOAD_FAILURE = /404|not found|failed to load resource/iu;
 
 export function isIgnorableConsoleError(record: ConsoleErrorRecord): boolean {
-  const where = record.location ?? '';
-  const path = where.split('?')[0] ?? '';
-  return FAVICON_URL.test(path) && LOAD_FAILURE.test(`${record.text} ${where}`);
+  const path = (record.location ?? '').split('?')[0] ?? '';
+  return FAVICON_URL.test(path) && LOAD_FAILURE.test(record.text);
 }
 
 /**

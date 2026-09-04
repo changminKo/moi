@@ -1,3 +1,23 @@
+/**
+ * The e2e system under test: PostgreSQL and Redis in Testcontainers, the
+ * paper-api routes over a real ledger, a control server the Playwright
+ * fixtures drive, and the web bundle served in both deployment shapes.
+ *
+ * Every port is fixed, because the Playwright config and the fixtures address
+ * them by number:
+ *
+ *   3100  paper-api, single-origin shape (`publicOrigin` = 4173)
+ *   3101  control server (reset, books, fills, stream counts)
+ *   3102  paper-api, cross-origin shape (`publicOrigin` = 4174)
+ *   4173  web through `vite preview`, which proxies `/api` to 3100
+ *   4174  web through `apps/web/server.mjs`, whose `/runtime-config.js`
+ *         sends the browser to 3102 (#25)
+ *
+ * A collision on any of them fails the run at startup (`assertPortFree`)
+ * rather than midway through a journey: a peer's harness on the same machine
+ * is the usual cause, and every test failing inside ~100 ms with
+ * ERR_CONNECTION_REFUSED is its signature.
+ */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -1181,6 +1201,33 @@ async function main(): Promise<void> {
     { mode: 0o600 },
   );
   await runPnpm(['--filter', '@moi/web', 'build']);
+  // The cross-origin server is started and awaited *before* the vite preview,
+  // deliberately. Playwright's `webServer` polls exactly one URL, and it polls
+  // WEB_PORT; bringing CROSS_WEB_PORT up first makes "WEB_PORT answers" mean
+  // "both answer", so no journey can start against a web server that is not
+  // listening yet. It is also the cheaper of the two to start (a bare static
+  // server against an already-built dist), so this costs nothing.
+  //
+  // It serves the very same `dist` through the production static server, which
+  // is what generates `/runtime-config.js` from `PUBLIC_API_ORIGIN`. Nothing
+  // proxies `/api` here: the bundle reads that origin and goes to the other
+  // listener itself.
+  crossWebProcess = spawn(
+    'node',
+    [resolve(workspaceRoot, 'apps/web/server.mjs')],
+    {
+      cwd: workspaceRoot,
+      env: {
+        ...process.env,
+        WEB_DIST_DIR: resolve(workspaceRoot, 'apps/web/dist'),
+        HOST: '127.0.0.1',
+        PORT: String(CROSS_WEB_PORT),
+        PUBLIC_API_ORIGIN: crossApiOrigin,
+      },
+      stdio: 'inherit',
+    },
+  );
+  await waitForWeb(crossWebOrigin);
   webProcess = spawn(
     'pnpm',
     [
@@ -1201,26 +1248,7 @@ async function main(): Promise<void> {
       stdio: 'inherit',
     },
   );
-  // The second shape serves the very same `dist` through the production static
-  // server, which is what generates `/runtime-config.js` from
-  // `PUBLIC_API_ORIGIN`. Nothing proxies `/api` here: the bundle reads that
-  // origin and goes to the other listener itself.
-  crossWebProcess = spawn(
-    'node',
-    [resolve(workspaceRoot, 'apps/web/server.mjs')],
-    {
-      cwd: workspaceRoot,
-      env: {
-        ...process.env,
-        WEB_DIST_DIR: resolve(workspaceRoot, 'apps/web/dist'),
-        HOST: '127.0.0.1',
-        PORT: String(CROSS_WEB_PORT),
-        PUBLIC_API_ORIGIN: crossApiOrigin,
-      },
-      stdio: 'inherit',
-    },
-  );
-  await Promise.all([waitForWeb(publicOrigin), waitForWeb(crossWebOrigin)]);
+  await waitForWeb(publicOrigin);
   console.log(
     `Moi E2E system ready at ${publicOrigin} (single origin) and ${crossWebOrigin} → ${crossApiOrigin} (cross origin)`,
   );

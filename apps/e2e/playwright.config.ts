@@ -54,6 +54,9 @@ export default defineConfig({
   ],
   webServer: {
     command: 'tsx start-system.ts',
+    // One URL is enough: `start-system.ts` brings the cross-origin server on
+    // 4174 up and waits for it *before* starting the preview on 4173, so this
+    // answering means both are listening.
     url: 'http://127.0.0.1:4173/trade',
     reuseExistingServer: false,
     timeout: 120_000,

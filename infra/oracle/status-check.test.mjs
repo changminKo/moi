@@ -40,7 +40,8 @@ const API = {
 // the webhook POST (URL arrives via `-K -` on stdin). It routes on the URL and
 // appends every POST body to a log. FAKE_CURL_FAIL_POST=1 rejects posts,
 // FAKE_CURL_API_DOWN=1 makes every API probe exit 7 with no output.
-// FAKE_CURL_RUNTIME_CONFIG replaces the served /runtime-config.js body;
+// FAKE_CURL_RUNTIME_CONFIG replaces the served /runtime-config.js body (an
+// empty value is a 200 with an empty body, not an absent override);
 // FAKE_CURL_RUNTIME_CONFIG_DOWN=1 makes that one fetch fail as a 404 does.
 function makeSandbox(api) {
   const dir = mkdtempSync(join(tmpdir(), 'moi-status-'));
@@ -71,9 +72,13 @@ case "$url" in
   */api/v1/health/trading) printf '%s' '${api.trading}';;
   */runtime-config.js)
     [ "\${FAKE_CURL_RUNTIME_CONFIG_DOWN:-0}" = 1 ] && exit 22
-    cfg="\${FAKE_CURL_RUNTIME_CONFIG-}"
-    [ -n "$cfg" ] || cfg='${api.runtimeConfig}'
-    printf '%s' "$cfg";;
+    # +set, not :-, so an empty override is a served 200 with an empty body
+    # rather than a fall-through to the default.
+    if [ -n "\${FAKE_CURL_RUNTIME_CONFIG+set}" ]; then
+      printf '%s' "\${FAKE_CURL_RUNTIME_CONFIG}"
+    else
+      printf '%s' '${api.runtimeConfig}'
+    fi;;
   *) echo "unexpected url $url" >&2; exit 7;;
 esac
 `;
@@ -1422,6 +1427,29 @@ deploy_verified abc1234`,
 
   // A web container that never came up, or an edge that does not route the
   // file, is the same class of failure and must not read as a green deploy.
+  // A 200 with nothing in it: the edge answered, so `curl -fsS` succeeds and
+  // only the body check can catch it.
+  it('fails the deploy when /runtime-config.js is served empty', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        { extraEnv: { FAKE_CURL_RUNTIME_CONFIG: '' } },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails the deploy when /runtime-config.js cannot be fetched at all', () => {
     const sb = makeSandbox(API);
     try {

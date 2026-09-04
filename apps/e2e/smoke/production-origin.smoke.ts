@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { MONEY, RETRY_SESSION, WALLET_PANEL } from '../ui-labels.js';
 import {
   apiCallsToOrigin,
   type ConsoleErrorRecord,
@@ -19,13 +20,10 @@ import {
  * real API origin in it, did the session bootstrap actually reach that origin,
  * and did the page stay quiet while doing it.
  *
- * The product default is Korean and a deployed host has no seeded locale, so
- * the two labels are matched in either language.
+ * A deployed host has no seeded locale and the product default is Korean, so
+ * the labels come from `ui-labels.ts`, which spells them both ways.
  */
 const webOrigin = requireSmokeWebOrigin(process.env.SMOKE_WEB_ORIGIN);
-const RETRY_SESSION = /Retry session|세션 다시 시작/u;
-const WALLET_PANEL = /Wallet|지갑/u;
-const MONEY = /[₩$]\s?\d[\d,]*/u;
 
 test('the deployed trade screen bootstraps its session against the configured API origin', async ({
   page,
