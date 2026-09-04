@@ -261,16 +261,16 @@ describe('FakeTossRestServer (§9.2)', () => {
       },
     });
 
-    const bad = await fetch(
-      `${base}/api/v1/market-calendar/KR?date=25-03-2026`,
-      {
+    // A malformed date, a date that does not exist, and no date at all.
+    for (const query of ['?date=25-03-2026', '?date=2026-02-31', '']) {
+      const bad = await fetch(`${base}/api/v1/market-calendar/KR${query}`, {
         headers: { Authorization: `Bearer ${access}` },
-      },
-    );
-    expect(bad.status).toBe(400);
-    expect(await bad.json()).toMatchObject({
-      error: { code: 'unsupported-date', data: { field: 'date' } },
-    });
+      });
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toMatchObject({
+        error: { code: 'unsupported-date', data: { field: 'date' } },
+      });
+    }
   });
 
   it('records requests without token values and honours failNext/invalidateAllTokens', async () => {

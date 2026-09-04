@@ -44,16 +44,22 @@ function contractExample(market: Market, name: string): unknown {
   return structuredClone(example.value);
 }
 
-/** A client whose only answer is `body`; the URL it asked for is captured. */
+/**
+ * A client whose only answer is `body`; the URL it asked for and every decode
+ * event it reported are captured.
+ */
 function clientFor(body: unknown): {
   readonly client: TossRestClient;
   readonly urls: string[];
+  readonly events: { event: string; fields: Record<string, unknown> }[];
 } {
   const urls: string[] = [];
+  const events: { event: string; fields: Record<string, unknown> }[] = [];
   const client = new TossRestClient({
     baseUrl: 'http://127.0.0.1:1/',
     tokenProvider: { getAccessToken: async () => 'test-token' },
     maxRetries: 0,
+    log: (event, fields) => events.push({ event, fields }),
     fetch: async (input) => {
       urls.push(String(input));
       return new Response(JSON.stringify(body), {
@@ -62,12 +68,19 @@ function clientFor(body: unknown): {
       });
     },
   });
-  return { client, urls };
+  return { client, urls, events };
 }
 
 async function decode(market: Market, body: unknown, date = '2026-03-25') {
   const { client } = clientFor(body);
   return client.getCalendarDay(market, date, new AbortController().signal);
+}
+
+/** A KR calendar answer carrying one regular-session window. */
+function krDay(regularMarket: Record<string, unknown>): unknown {
+  return {
+    result: { today: { date: '2026-03-25', integrated: { regularMarket } } },
+  };
 }
 
 describe('TossRestClient.getCalendarDay (#122)', () => {
@@ -175,30 +188,95 @@ describe('TossRestClient.getCalendarDay (#122)', () => {
     expect(day.tradingDate).toBe('2026-03-25');
   });
 
+  describe('reads an absent session key as closed, and says so', () => {
+    const cases: ReadonlyArray<readonly [string, Market, unknown, string]> = [
+      [
+        'a KR `today` without `integrated`',
+        'KR',
+        { result: { today: { date: '2026-03-25' } } },
+        'today.integrated',
+      ],
+      [
+        'a KR `integrated` without `regularMarket`',
+        'KR',
+        { result: { today: { date: '2026-03-25', integrated: {} } } },
+        'today.integrated.regularMarket',
+      ],
+      [
+        'a US `today` without `regularMarket`',
+        'US',
+        { result: { today: { date: '2026-03-25' } } },
+        'today.regularMarket',
+      ],
+    ];
+
+    // The contract requires only `date`, so a provider that omits null fields
+    // would otherwise fail every holiday closed (§16.26, §16.57).
+    for (const [name, market, body, path] of cases) {
+      it(`reports ${name}`, async () => {
+        const { client, events } = clientFor(body);
+
+        const day = await client.getCalendarDay(
+          market,
+          '2026-03-25',
+          new AbortController().signal,
+        );
+
+        expect(day).toEqual({
+          market,
+          tradingDate: '2026-03-25',
+          isTradingDay: false,
+          regularSession: null,
+        });
+        expect(events).toEqual([
+          {
+            event: 'calendar.decode_lenient',
+            fields: { market, tradingDate: '2026-03-25', missing: path },
+          },
+        ]);
+      });
+    }
+
+    it('says nothing when the contract shape is complete', async () => {
+      const { client, events } = clientFor(
+        contractExample('KR', 'businessDay'),
+      );
+
+      await client.getCalendarDay(
+        'KR',
+        '2026-03-25',
+        new AbortController().signal,
+      );
+
+      expect(events).toEqual([]);
+    });
+  });
+
   describe('fails closed rather than reporting a holiday it did not read', () => {
     const cases: ReadonlyArray<readonly [string, Market, unknown]> = [
       ['an empty result array', 'KR', { result: [] }],
       ['a result without `today`', 'KR', { result: {} }],
       ['a `today` that is not an object', 'KR', { result: { today: null } }],
+      ['a `today` that is an array', 'KR', { result: { today: [] } }],
       [
         'a `today` without a date',
         'KR',
         { result: { today: { integrated: null } } },
       ],
       [
-        'a KR `today` without `integrated`',
+        'a `today` whose date is not a string',
         'KR',
-        { result: { today: { date: '2026-03-25' } } },
+        { result: { today: { date: 20260325, integrated: null } } },
       ],
       [
-        'a KR `integrated` without `regularMarket`',
+        'a KR `integrated` that is not an object',
         'KR',
-        { result: { today: { date: '2026-03-25', integrated: {} } } },
+        { result: { today: { date: '2026-03-25', integrated: 'x' } } },
       ],
       [
-        'a US `today` without `regularMarket`',
+        'a `regularMarket` that is not an object',
         'US',
-        { result: { today: { date: '2026-03-25' } } },
+        { result: { today: { date: '2026-03-25', regularMarket: 5 } } },
       ],
       [
         'a regular session without an end',
@@ -239,11 +317,60 @@ describe('TossRestClient.getCalendarDay (#122)', () => {
           },
         },
       ],
+      // `Date.parse` accepts all three; only the first is an instant, and it is
+      // read in the *host's* zone, so a UTC container would move the KR session
+      // nine hours and sit in PRE_OPEN all day.
+      [
+        'a start time without a zone offset',
+        'KR',
+        krDay({
+          startTime: '2026-03-25T09:00:00',
+          endTime: '2026-03-25T15:30:00+09:00',
+        }),
+      ],
+      [
+        'an end time that is only a year',
+        'KR',
+        krDay({
+          startTime: '2026-03-25T09:00:00+09:00',
+          endTime: '2026',
+        }),
+      ],
+      [
+        'a start time in a human format',
+        'KR',
+        krDay({
+          startTime: 'Mar 25 2026 09:00:00 GMT+0900',
+          endTime: '2026-03-25T15:30:00+09:00',
+        }),
+      ],
+      // A window the clock can never be inside reads as PRE_OPEN all day and
+      // rejects every MARKET order — a trading day in name only.
+      [
+        'a session that ends before it starts',
+        'KR',
+        krDay({
+          startTime: '2026-03-25T15:30:00+09:00',
+          endTime: '2026-03-25T09:00:00+09:00',
+        }),
+      ],
+      [
+        'a session that ends exactly when it starts',
+        'KR',
+        krDay({
+          startTime: '2026-03-25T09:00:00+09:00',
+          endTime: '2026-03-25T09:00:00+09:00',
+        }),
+      ],
     ];
 
     for (const [name, market, body] of cases) {
       it(`rejects ${name}`, async () => {
-        await expect(decode(market, body)).rejects.toThrow(/calendar/iu);
+        await expect(decode(market, body)).rejects.toMatchObject({
+          name: 'MarketDataError',
+          code: 'UNSUPPORTED_DATA',
+          message: expect.stringContaining('Invalid Toss calendar response'),
+        });
       });
     }
   });

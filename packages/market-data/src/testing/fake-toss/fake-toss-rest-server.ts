@@ -43,6 +43,14 @@ const KNOWN_PATHS = new Set([
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 
+/** A date that exists: the pattern plus a round trip through the calendar. */
+function isCalendarDate(value: string): boolean {
+  return (
+    DATE_PATTERN.test(value) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
+  );
+}
+
 function shiftDate(date: string, days: number): string {
   const at = new Date(`${date}T00:00:00Z`);
   at.setUTCDate(at.getUTCDate() + days);
@@ -446,11 +454,9 @@ export class FakeTossRestServer {
       '/api/v1/market-calendar/'.length,
     ) as Market;
     const requested = url.searchParams.get('date');
-    if (
-      requested !== null &&
-      (!DATE_PATTERN.test(requested) ||
-        Number.isNaN(Date.parse(`${requested}T00:00:00Z`)))
-    ) {
+    // A real calendar date, round-tripped: `Date.parse` alone rolls 2026-02-31
+    // over into March and would answer 200 for a day that does not exist.
+    if (requested === null || !isCalendarDate(requested)) {
       record(400);
       json(response, 400, {
         error: {
@@ -462,7 +468,7 @@ export class FakeTossRestServer {
       });
       return;
     }
-    const date = requested ?? new Date().toISOString().slice(0, 10);
+    const date = requested;
     const day = (on: string): object => {
       const key = `${market}:${on}`;
       const session = this.#calendar.has(key)

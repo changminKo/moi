@@ -57,9 +57,10 @@ Losing either market's lease connection takes **both** markets to `CANCEL_ONLY`:
 - No stale process holds a live epoch: if a row is live but its process is gone, stop the old container before the new one starts. The new leader acquires a strictly higher epoch, fencing any late writes from the old one.
 - PostgreSQL is reachable (`/health/ready` shows `db: true`).
 
-## Verification: reservations, leader fence, outbox lag, user-stream recovery
+## Verification: reservations, leader fence, outbox lag, user-stream recovery, market session
 
-Run all four before declaring the incident over. Every query is read-only.
+Run all of these before declaring the incident over, and after a deploy.
+Every query is read-only.
 
 1. **Reservations** — no unreleased reservation may outlive its order, and every wallet's `reserved` must equal its unreleased CASH reservations (the same check `paper-api` runs at RESTORING):
    ```sql
@@ -92,7 +93,18 @@ Run all four before declaring the incident over. Every query is read-only.
    ```
    Expected: `oldest_pending_seconds` below 30 and falling; `outbox_oldest_pending_seconds` on `/metrics` agrees.
 4. **User-stream recovery** — open the web app in a fresh anonymous session, place and cancel one small order, and confirm the order list reconciles without a manual refresh. In `/metrics`, `rest_snapshot_request_total{result="ok"}` must increase (gap-triggered snapshot) and `order_event_total{status="error"}` must not.
-5. **Leader handoff drill** — proves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` with two real `dist/main.js` processes against the loopback fake provider (never live Toss):
+5. **Market session** — the phase each market reports matches the wall clock in
+   that market's own time zone:
+   ```bash
+   curl -sS "$API_ORIGIN/api/v1/markets/KR/session" | jq
+   curl -sS "$API_ORIGIN/api/v1/markets/US/session" | jq
+   ```
+   Expected: `phase` is what the current time says (`REGULAR` inside
+   `opensAt`…`closesAt`, `PRE_OPEN`/`POST_CLOSE` outside it), `isTradingDay` is
+   true on a business day, and `opensAt`/`closesAt` are non-null whenever the
+   day trades. A `HOLIDAY` on a business day is the calendar, not the feed —
+   see `market-data-degraded.md`.
+6. **Leader handoff drill** — proves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` with two real `dist/main.js` processes against the loopback fake provider (never live Toss):
    ```bash
    pnpm --filter @moi/paper-api build
    pnpm --filter @moi/paper-api test:drill

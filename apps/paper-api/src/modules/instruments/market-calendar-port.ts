@@ -10,6 +10,13 @@ export interface CalendarPortOptions {
   readonly now?: () => Date;
   /** Budget for one provider calendar call. */
   readonly timeoutMs?: number;
+  /**
+   * Receives `calendar.decode_failed` when the provider call or its decoding
+   * fails. Without it the failure is invisible: the session route answers 503
+   * from an empty `catch`, the admission gate drops the error, and the custom
+   * Fastify error handler replaces the framework's own logging (#122).
+   */
+  readonly log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -30,11 +37,22 @@ export function calendarPortFromSource(
     async get(market: Market): Promise<MarketCalendarFacts> {
       const at = now();
       const tradingDate = tradingDateFor(market, at);
-      const day = await source.getCalendarDay(
-        market,
-        tradingDate,
-        AbortSignal.timeout(timeoutMs),
-      );
+      let day: Awaited<ReturnType<MarketCalendarSource['getCalendarDay']>>;
+      try {
+        day = await source.getCalendarDay(
+          market,
+          tradingDate,
+          AbortSignal.timeout(timeoutMs),
+        );
+      } catch (error) {
+        // The reason, never the answer: a provider body could carry anything.
+        options.log?.('calendar.decode_failed', {
+          market,
+          tradingDate,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
       const opensAt = day.regularSession?.opensAt ?? null;
       const closesAt = day.regularSession?.closesAt ?? null;
       const phase = derivePhase(

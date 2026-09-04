@@ -52,27 +52,34 @@ Read the answer against the pinned contract
 (`packages/market-data/contracts/toss/openapi.json`, paths
 `/api/v1/market-calendar/{KR,US}`):
 
-- `opensAt`/`closesAt` are `null` on a day that should trade — the decoder
-  found no regular session. For KR the session lives at
-  `result.today.integrated.regularMarket`, for US at `result.today.regularMarket`;
-  both are `null` only when that session really is shut, and KR's whole
-  `integrated` is `null` only when the day is shut. This was the shape
-  mismatch behind #122 (spec §16.57).
-- `phase` is `CLOSED` rather than `HOLIDAY` with a window present — the day is
-  tradable but the clock is outside the window. Compare `opensAt`/`closesAt`
-  with `serverTime`; both are absolute instants, so a wrong answer here is a
-  host-clock problem, not a calendar one.
+- `isTradingDay` is `false` with `opensAt`/`closesAt` `null` on a day that
+  should trade — the decoder found no regular session. For KR the session lives
+  at `result.today.integrated.regularMarket`, for US at
+  `result.today.regularMarket`; both are `null` only when that session really is
+  shut, and KR's whole `integrated` is `null` only when the day is shut. This
+  was the shape mismatch behind #122 (spec §16.57).
+- `PRE_OPEN` or `POST_CLOSE` all day with a window that looks right — compare
+  `opensAt`/`closesAt` with `serverTime`. The decoder requires an explicit UTC
+  offset on both bounds, so all three are absolute instants and a disagreement
+  here is the host clock, not the calendar.
 - The route answers 503 `SERVICE_UNAVAILABLE` — the provider call failed or its
   answer did not match the contract, and the process refuses to guess a phase.
-  The route discards the reason, so neither the response nor the log names it;
-  check the provider's status and the egress allow list as above. A MARKET
-  order placed in this window fails with 500 `INTERNAL_ERROR`, not
-  `MARKET_CLOSED`.
+  Grep the application logs for `calendar.decode_failed`: it carries the market,
+  the trading date, and the reason with the offending field named. The failure
+  is remembered for 15 seconds, so a burst of requests produces one log line and
+  one provider call, not one per request. A MARKET order placed in this window
+  fails with 500 `INTERNAL_ERROR`, not `MARKET_CLOSED`.
+- `calendar.decode_lenient` appears — the provider omitted a session key
+  entirely (`today.integrated`, or the `regularMarket` inside it) and the
+  decoder read that as a closed session. That is correct on a real holiday and a
+  provider-shape change on a trading day, so check the date it names before
+  treating the market as shut.
 
-Escalate to engineering with the session-route answers and the window they
-cover. The calendar is read-only, so no admin action corrects a decoding fault,
-and reproducing the provider's raw answer is an operator smoke through the
-compose stack — never a direct call to the provider from anywhere else.
+If the logs name a decode fault, escalate to engineering with those lines and
+the session-route answers. The calendar is read-only, so no admin action
+corrects a decoding fault, and reproducing the provider's raw answer is an
+operator smoke through the compose stack — never a direct call to the provider
+from anywhere else.
 
 ## After a restart
 

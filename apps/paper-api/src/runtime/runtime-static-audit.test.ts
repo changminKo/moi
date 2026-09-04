@@ -125,7 +125,10 @@ describe('runtime static audit (§11.1)', () => {
   it('main.ts only assembles config → bundle → runtime', () => {
     const main = read('../main.ts');
     expect(main).toContain('loadConfig(environment)');
-    expect(main).toContain('createProviderBundle(config)');
+    // The bundle and the runtime share one redacting log, so the adapter's own
+    // decode events pass through `safeAuditLog` too (§16.57).
+    expect(main).toContain('createProviderBundle(config, { log })');
+    expect(main).toContain('safeAuditLog(fields)');
     expect(main).toContain('new ProductionRuntime(');
     expect(main).not.toMatch(
       /cancelOnly|placeImmediateOrder|registerHealthRoutes/,

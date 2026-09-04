@@ -28,28 +28,55 @@ export interface TossRestOptions {
   timeoutMs?: number;
   maxRetries?: number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * Receives decode events the caller should see, today only the lenient
+   * calendar reads (`calendar.decode_lenient`). Fields carry the market, the
+   * trading date and the missing key — never a response body or a token.
+   */
+  log?: (event: string, fields: Record<string, unknown>) => void;
 }
 type JsonObject = Record<string, unknown>;
 
+/**
+ * A date-time with an explicit zone, as every example in the contract carries
+ * (`2026-03-25T09:00:00+09:00`). `Date.parse` alone would accept
+ * `2026-09-04T09:00:00`, which JavaScript reads in the *host's* zone — on a UTC
+ * container that silently moves the KR session nine hours and leaves the market
+ * in `PRE_OPEN` all day.
+ */
+const ZONED_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u;
+
+function calendarFailure(description: string): MarketDataError {
+  return new MarketDataError(
+    'UNSUPPORTED_DATA',
+    `Invalid Toss calendar response: ${description}`,
+  );
+}
+
 function calendarObject(value: unknown, description: string): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error(`Invalid Toss calendar response: ${description}`);
+    throw calendarFailure(`${description} must be an object`);
   return value as JsonObject;
 }
 
 function calendarTime(value: unknown, description: string): string {
-  if (typeof value !== 'string' || Number.isNaN(Date.parse(value)))
-    throw new MarketDataError(
-      'UNSUPPORTED_DATA',
-      `Invalid Toss calendar response: ${description} must be an ISO timestamp`,
+  if (
+    typeof value !== 'string' ||
+    !ZONED_DATE_TIME.test(value) ||
+    Number.isNaN(Date.parse(value))
+  )
+    throw calendarFailure(
+      `${description} must be a date-time with a UTC offset`,
     );
   return value;
 }
 
 /**
  * The contract's `regularMarket`: both bounds, or `null` when that session does
- * not run today. An absent key is not a closed session — it is a shape the
- * decoder does not recognise, so it throws rather than invent a holiday.
+ * not run today. A window that ends at or before it starts is rejected — it
+ * would otherwise pass as a trading day the clock can never be inside, which
+ * reads as `PRE_OPEN` all day and rejects every MARKET order.
  * `singlePriceAuction*` is deliberately ignored: it is a phase inside the
  * regular session, not a bound of it.
  */
@@ -58,11 +85,12 @@ function calendarSession(
   description: string,
 ): MarketSession | null {
   if (value === null) return null;
-  const session = calendarObject(value, `${description} must be an object`);
-  return {
-    opensAt: calendarTime(session.startTime, `${description}.startTime`),
-    closesAt: calendarTime(session.endTime, `${description}.endTime`),
-  };
+  const session = calendarObject(value, description);
+  const opensAt = calendarTime(session.startTime, `${description}.startTime`);
+  const closesAt = calendarTime(session.endTime, `${description}.endTime`);
+  if (Date.parse(closesAt) <= Date.parse(opensAt))
+    throw calendarFailure(`${description} ends at or before it starts`);
+  return { opensAt, closesAt };
 }
 
 export class TossRestClient
@@ -233,34 +261,50 @@ export class TossRestClient
       `/api/v1/market-calendar/${market}?date=${encodeURIComponent(tradingDate)}`,
       signal,
     );
-    const result = calendarObject(body.result, 'result must be an object');
-    const today = calendarObject(
-      result.today,
-      'result.today must be an object',
-    );
+    const result = calendarObject(body.result, 'result');
+    const today = calendarObject(result.today, 'result.today');
     if (typeof today.date !== 'string' || today.date === '')
-      throw new Error('Invalid Toss calendar response: today.date is missing');
+      throw calendarFailure('today.date must be a non-empty string');
+    // The contract marks only `date` as required, so a serializer that drops
+    // null fields answers a holiday as `{"date": "…"}`. Once the date has been
+    // read, an *absent* session key is therefore taken as "closed" rather than
+    // thrown on — but never silently: each one is reported (§16.57). A key that
+    // is present with the wrong type is still a shape this decoder cannot read,
+    // and throws.
+    const missing = (path: string): null => {
+      this.options.log?.('calendar.decode_lenient', {
+        market,
+        tradingDate: today.date,
+        missing: path,
+      });
+      return null;
+    };
     // KR nests the day's sessions under `integrated` (null when KRX and NXT are
     // both shut); US carries the four sessions on the day itself. Only the
     // regular session is read, and `isTradingDay` means "a regular session runs
     // today" for both markets: that is the fact `derivePhase` and the
     // MARKET-order gate need, and a day whose pre/after markets run without a
     // regular session is not one this platform can trade (§16.57).
-    const regular =
-      market === 'KR'
-        ? today.integrated === null
-          ? null
-          : calendarObject(
-              today.integrated,
-              'today.integrated must be an object or null',
-            ).regularMarket
-        : today.regularMarket;
-    const session = calendarSession(
-      regular,
+    const path =
       market === 'KR'
         ? 'today.integrated.regularMarket'
-        : 'today.regularMarket',
-    );
+        : 'today.regularMarket';
+    let regular: unknown;
+    if (market === 'US')
+      regular =
+        'regularMarket' in today
+          ? today.regularMarket
+          : missing('today.regularMarket');
+    else if (!('integrated' in today)) regular = missing('today.integrated');
+    else if (today.integrated === null) regular = null;
+    else {
+      const integrated = calendarObject(today.integrated, 'today.integrated');
+      regular =
+        'regularMarket' in integrated
+          ? integrated.regularMarket
+          : missing(path);
+    }
+    const session = calendarSession(regular, path);
     return {
       market,
       tradingDate: today.date,

@@ -30,22 +30,39 @@ export interface MarketCalendarServiceOptions {
   readonly now?: () => Date;
   /** How long a fetched day is reused before the port is asked again. */
   readonly ttlMs?: number;
+  /** How long a failed fetch is remembered before the port is tried again. */
+  readonly failureTtlMs?: number;
 }
 
 /** Five minutes: short enough to pick up a date rollover, long enough to
  * keep the order-placement path off the provider. */
 const DEFAULT_TTL_MS = 300_000;
 
+/**
+ * Fifteen seconds. A failure is cached too, or a provider that answers a shape
+ * the decoder rejects would draw one fresh call per session request and per
+ * MARKET order — straight into the provider's `MARKET_INFO` rate limit. Short
+ * enough that a recovered provider is picked up almost at once (#122).
+ */
+const DEFAULT_FAILURE_TTL_MS = 15_000;
+
 interface CacheEntry {
   readonly facts: MarketCalendarFacts;
   readonly fetchedAt: number;
 }
 
+interface FailureEntry {
+  readonly error: unknown;
+  readonly failedAt: number;
+}
+
 export class MarketCalendarService {
   #cache = new Map<Market, CacheEntry>();
+  #failures = new Map<Market, FailureEntry>();
   #inFlight = new Map<Market, Promise<MarketCalendarFacts>>();
   readonly #now: () => Date;
   readonly #ttlMs: number;
+  readonly #failureTtlMs: number;
 
   constructor(
     readonly port: MarketCalendarPort,
@@ -53,6 +70,7 @@ export class MarketCalendarService {
   ) {
     this.#now = options.now ?? (() => new Date());
     this.#ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    this.#failureTtlMs = options.failureTtlMs ?? DEFAULT_FAILURE_TTL_MS;
   }
 
   async get(market: Market): Promise<MarketCalendar> {
@@ -65,6 +83,12 @@ export class MarketCalendarService {
     const cached = this.#cache.get(market);
     if (cached && now.getTime() - cached.fetchedAt < this.#ttlMs)
       return cached.facts;
+    // A recent failure is answered from memory with the same error, so a
+    // provider the decoder cannot read is asked once per failure window rather
+    // than once per request.
+    const failed = this.#failures.get(market);
+    if (failed && now.getTime() - failed.failedAt < this.#failureTtlMs)
+      throw failed.error;
     // Collapse a stampede: concurrent misses share one provider call.
     const pending = this.#inFlight.get(market);
     if (pending) return pending;
@@ -72,7 +96,15 @@ export class MarketCalendarService {
       .get(market)
       .then((facts) => {
         this.#cache.set(market, { facts, fetchedAt: this.#now().getTime() });
+        this.#failures.delete(market);
         return facts;
+      })
+      .catch((error: unknown) => {
+        this.#failures.set(market, {
+          error,
+          failedAt: this.#now().getTime(),
+        });
+        throw error;
       })
       .finally(() => {
         this.#inFlight.delete(market);
@@ -82,7 +114,13 @@ export class MarketCalendarService {
   }
 
   clear(market?: Market): void {
-    market ? this.#cache.delete(market) : this.#cache.clear();
+    if (market) {
+      this.#cache.delete(market);
+      this.#failures.delete(market);
+      return;
+    }
+    this.#cache.clear();
+    this.#failures.clear();
   }
 }
 
