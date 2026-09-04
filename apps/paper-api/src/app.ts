@@ -51,6 +51,14 @@ export async function buildApp(
     genReqId: dependencies.requestId ?? (() => randomUUID()),
     bodyLimit: 65_536,
     ajv: { customOptions: { removeAdditional: false } },
+    // Behind the deployment's own proxy `request.ip` is the client, and the
+    // rate limiter keys on it; exposed directly, the header is untrusted.
+    // Exactly the socket peer (hop 0, the proxy) is trusted, never `true`:
+    // `true` believes every entry of X-Forwarded-For and takes the leftmost —
+    // the one the client wrote — so a caller could rotate a header to mint
+    // fresh rate-limit buckets (measured: `true` → forged value, this → the
+    // value the proxy appended). Fastify's typings take no hop count here.
+    trustProxy: config.trustProxy ? (_address, hop) => hop === 0 : false,
   }) as unknown as FastifyInstance;
   app.decorate('redactedLogPaths', redactedLogPaths);
   dependencies.registerIngress?.(app);

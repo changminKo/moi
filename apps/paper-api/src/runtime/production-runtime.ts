@@ -67,7 +67,10 @@ import {
 } from '../modules/stream/stream-upgrade.js';
 import { MetricsRegistry } from '../observability/metrics.js';
 import { requireCsrf } from '../plugins/csrf.js';
-import { LayeredRateLimiter } from '../plugins/rate-limits.js';
+import {
+  LayeredRateLimiter,
+  registerRateLimits,
+} from '../plugins/rate-limits.js';
 import { cookieValue } from '../plugins/session-auth.js';
 import type { Capability, SafetyIncident } from '../safety/capabilities.js';
 import { createDbIncidentRepository } from '../safety/incident-db-repository.js';
@@ -970,12 +973,28 @@ export class ProductionRuntime {
     this.#instruments = instrumentService;
     const app = await buildApp(config, {
       clock: { now: () => Date.now() },
-      registerIngress: (instance) => this.#gate.register(instance),
+      registerIngress: (instance) => {
+        // Rate limits first: a 429 is decided before the admission gate
+        // counts the request, so a flood never inflates the drain. `off` is
+        // a test-harness setting the config refuses in production.
+        if (config.rateLimitsEnabled)
+          registerRateLimits(instance, limiter, {
+            publicOrigin: config.publicOrigin,
+            onRejected: ({ kind, path, requestId }) => {
+              this.metrics.counter('http_rate_limited_total', { kind });
+              this.#log('http.rate_limited', { kind, path, requestId });
+            },
+          });
+        this.#gate.register(instance);
+      },
       registerRoutes: async (instance) => {
         instance.addHook('preHandler', async (request) => {
+          // Route pattern, not the raw URL — a percent-encoded path routes to
+          // the same handler but would skip a raw-prefix test (#34 review).
+          const route = request.routeOptions.url ?? '';
           if (
-            !request.url.startsWith('/api/v1/') ||
-            request.url.startsWith('/api/v1/sessions/anonymous') ||
+            !route.startsWith('/api/v1/') ||
+            route === '/api/v1/sessions/anonymous' ||
             !['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)
           )
             return;

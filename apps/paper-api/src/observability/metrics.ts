@@ -35,6 +35,7 @@ const allowed: Record<string, readonly string[]> = {
   shutdown_drain_seconds: ['phase'],
   shutdown_forced_total: [],
   http_admission_rejected_total: [],
+  http_rate_limited_total: ['kind'],
   http_admission_inflight: [],
   http_admission_drain_remaining: [],
 };

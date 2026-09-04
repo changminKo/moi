@@ -66,6 +66,8 @@ function appConfig(databaseUrl: string): AppConfig {
     adminApiKey: 'runner-admin-key-at-least-32-bytes',
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 5_000,
+    trustProxy: false,
+    rateLimitsEnabled: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
   };
