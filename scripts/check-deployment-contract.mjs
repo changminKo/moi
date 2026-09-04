@@ -1264,6 +1264,9 @@ check('deployment guide', () => {
     /new leader recover/i,
     /NORMAL/,
     /rollback/i,
+    // #46: the rollback section must describe the gate, not a claim.
+    /schema-compatibility/,
+    /SCHEMA_COMPAT_WRITE_OK/,
     /secret injection/i,
     /preflight:deploy/,
     /egress allow list/i,
@@ -1366,6 +1369,196 @@ check('ci workflow', () => {
   );
   const envText = read('.github/workflows/ci.yml');
   assert.ok(!/TOSS_/.test(envText), 'CI must not reference Toss credentials');
+});
+
+/**
+ * #46: the schema-compatibility job is what turns "migrations stay compatible
+ * with the previous release" from a sentence in deployment.md into a gate. It
+ * proves the exact previous commit's image still performs the write path on a
+ * database the current source migrated, and it self-tests that it can fail.
+ * Every identity below is pinned: which commit is "previous", where it is
+ * checked out, how the image is built and tagged, and which suite runs.
+ */
+const SCHEMA_COMPAT_JOB = 'schema-compatibility';
+const SCHEMA_COMPAT_IMAGE_TAG = 'moi-paper-api-schema-compat:previous';
+const SCHEMA_COMPAT_PREVIOUS_PATH = '.schema-compat/previous';
+const SCHEMA_COMPAT_SCRIPT = 'pnpm --filter @moi/paper-api test:schema-compat';
+const ALL_ZERO_SHA = '0'.repeat(40);
+
+check('schema compatibility gate', () => {
+  const workflow = readYaml('.github/workflows/ci.yml');
+  const job = workflow.jobs?.[SCHEMA_COMPAT_JOB];
+  assert.ok(job, `ci.yml must define the ${SCHEMA_COMPAT_JOB} job`);
+  assert.equal(
+    job.needs,
+    'verify',
+    `${SCHEMA_COMPAT_JOB} must run after verify (needs: verify), not beside the container-bound suites`,
+  );
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.ok(
+    Number.isInteger(job['timeout-minutes']) && job['timeout-minutes'] <= 30,
+    `${SCHEMA_COMPAT_JOB} must time out within 30 minutes`,
+  );
+  assert.equal(
+    job.permissions,
+    undefined,
+    `${SCHEMA_COMPAT_JOB} must inherit the workflow's contents: read`,
+  );
+  assert.equal(
+    job.env?.SCHEMA_COMPAT_PREVIOUS_IMAGE,
+    SCHEMA_COMPAT_IMAGE_TAG,
+    `${SCHEMA_COMPAT_JOB} must hand the suite SCHEMA_COMPAT_PREVIOUS_IMAGE=${SCHEMA_COMPAT_IMAGE_TAG}`,
+  );
+  const steps = job.steps ?? [];
+
+  // 1. The previous commit comes from the event and is validated in shell
+  //    before anything is checked out or built.
+  const resolveIndex = steps.findIndex((s) => s.id === 'previous');
+  assert.ok(
+    resolveIndex !== -1,
+    `${SCHEMA_COMPAT_JOB} needs a step with id: previous`,
+  );
+  const resolve = steps[resolveIndex];
+  assert.equal(
+    resolve.env?.PULL_REQUEST_BASE_SHA,
+    `\${{ github.event.pull_request.base.sha }}`,
+    `${SCHEMA_COMPAT_JOB} must resolve the pull-request previous ref from github.event.pull_request.base.sha`,
+  );
+  assert.equal(
+    resolve.env?.PUSH_BEFORE_SHA,
+    `\${{ github.event.before }}`,
+    `${SCHEMA_COMPAT_JOB} must resolve the push previous ref from github.event.before`,
+  );
+  const script = String(resolve.run ?? '');
+  assert.ok(
+    /pull_request\)\s+previous="\$PULL_REQUEST_BASE_SHA"/.test(script) &&
+      /push\)\s+previous="\$PUSH_BEFORE_SHA"/.test(script),
+    `${SCHEMA_COMPAT_JOB} must pick the previous ref by event name from the two event values`,
+  );
+  assert.ok(
+    script.includes("grep -Eq '^[0-9a-f]{40}$'"),
+    `${SCHEMA_COMPAT_JOB} must validate the previous ref as a 40-character hexadecimal SHA`,
+  );
+  assert.ok(
+    script.includes(`"${ALL_ZERO_SHA}"`),
+    `${SCHEMA_COMPAT_JOB} must reject an all-zero previous ref`,
+  );
+  assert.ok(
+    /\*\)[^\n]*exit 1/.test(script) &&
+      (script.match(/exit 1/g) ?? []).length >= 3,
+    `${SCHEMA_COMPAT_JOB} must exit 1 on an unsupported event, a malformed ref, and an all-zero ref`,
+  );
+  assert.ok(
+    script.includes('echo "sha=$previous" >> "$GITHUB_OUTPUT"'),
+    `${SCHEMA_COMPAT_JOB} must expose the validated ref as the step output sha`,
+  );
+
+  // 2. That exact SHA is checked out beside the current tree.
+  const checkoutIndex = steps.findIndex(
+    (s, i) =>
+      i > resolveIndex && String(s.uses ?? '').startsWith('actions/checkout@'),
+  );
+  assert.ok(
+    checkoutIndex !== -1,
+    `${SCHEMA_COMPAT_JOB} must check out the previous release after resolving it`,
+  );
+  const checkout = steps[checkoutIndex];
+  assert.equal(
+    checkout.with?.ref,
+    `\${{ steps.previous.outputs.sha }}`,
+    `${SCHEMA_COMPAT_JOB} must check out the resolved previous SHA, never a branch or tag`,
+  );
+  assert.equal(
+    checkout.with?.path,
+    SCHEMA_COMPAT_PREVIOUS_PATH,
+    `${SCHEMA_COMPAT_JOB} must check out the previous release under ${SCHEMA_COMPAT_PREVIOUS_PATH}`,
+  );
+
+  // 3. The previous source is built locally and loaded, never pushed.
+  const buildIndex = steps.findIndex(
+    (s, i) =>
+      i > checkoutIndex &&
+      String(s.uses ?? '').startsWith('docker/build-push-action@'),
+  );
+  assert.ok(
+    buildIndex !== -1,
+    `${SCHEMA_COMPAT_JOB} must build the previous image with docker/build-push-action after checking it out`,
+  );
+  const build = steps[buildIndex].with ?? {};
+  assert.equal(
+    build.context,
+    SCHEMA_COMPAT_PREVIOUS_PATH,
+    `${SCHEMA_COMPAT_JOB} must build the previous image from ${SCHEMA_COMPAT_PREVIOUS_PATH}`,
+  );
+  assert.equal(
+    build.file,
+    `${SCHEMA_COMPAT_PREVIOUS_PATH}/apps/paper-api/Dockerfile`,
+    `${SCHEMA_COMPAT_JOB} must build the previous image with ${SCHEMA_COMPAT_PREVIOUS_PATH}/apps/paper-api/Dockerfile`,
+  );
+  assert.equal(
+    build.load,
+    true,
+    `${SCHEMA_COMPAT_JOB} must load the previous image into the local Docker daemon (load: true)`,
+  );
+  assert.notEqual(
+    build.push,
+    true,
+    `${SCHEMA_COMPAT_JOB} must never push the previous image`,
+  );
+  assert.equal(
+    String(build.tags ?? ''),
+    SCHEMA_COMPAT_IMAGE_TAG,
+    `${SCHEMA_COMPAT_JOB} must tag the previous image ${SCHEMA_COMPAT_IMAGE_TAG}`,
+  );
+
+  // 4. The dedicated suite, and only it, runs — after the current source is
+  //    installed and built, because the host side imports the current
+  //    migrations.
+  const runs = steps.map((s) => String(s.run ?? ''));
+  const lineIndex = (command) =>
+    runs.findIndex((r) => r.split('\n').some((l) => l.trim() === command));
+  const install = lineIndex('pnpm install --frozen-lockfile');
+  const buildCurrent = lineIndex('pnpm build');
+  const suite = lineIndex(SCHEMA_COMPAT_SCRIPT);
+  assert.ok(
+    suite !== -1,
+    `${SCHEMA_COMPAT_JOB} must run "${SCHEMA_COMPAT_SCRIPT}"`,
+  );
+  assert.ok(
+    install !== -1 &&
+      buildCurrent !== -1 &&
+      buildIndex < install &&
+      install < buildCurrent &&
+      buildCurrent < suite,
+    `${SCHEMA_COMPAT_JOB} must build the previous image, then install and build the current source, then run the suite`,
+  );
+
+  // 5. The package side: the exact script, the files the job relies on, and
+  //    the boundary that keeps the Docker-heavy suite out of `pnpm test`.
+  const manifest = JSON.parse(read('apps/paper-api/package.json'));
+  assert.equal(
+    manifest.scripts?.['test:schema-compat'],
+    'vitest run --config vitest.schema-compat.config.ts',
+    'paper-api test:schema-compat must be "vitest run --config vitest.schema-compat.config.ts"',
+  );
+  assert.ok(
+    /(^|\s)--dir src(\s|$)/.test(String(manifest.scripts?.test ?? '')),
+    'paper-api test script must stay scoped to --dir src so pnpm test never runs the schema-compat suite',
+  );
+  for (const file of [
+    'apps/paper-api/vitest.schema-compat.config.ts',
+    'apps/paper-api/schema-compat/previous-release.integration.test.ts',
+    'apps/paper-api/schema-compat/previous-release-scenario.ts',
+    'apps/paper-api/schema-compat/previous-release-runner.mjs',
+  ])
+    assert.ok(existsSync(path(file)), `schema-compat gate needs ${file}`);
+  const runner = read(
+    'apps/paper-api/schema-compat/previous-release-runner.mjs',
+  );
+  assert.ok(
+    !/from ['"]\.\.?\//.test(runner) && !/import\(\s*['"]\.\.?\//.test(runner),
+    "previous-release-runner.mjs must import only the previous image's compiled modules, never current source",
+  );
 });
 
 if (failures.length > 0) {

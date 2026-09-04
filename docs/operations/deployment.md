@@ -147,7 +147,9 @@ the markets never leave `RECOVERING`. Therefore:
    (`apps/paper-api/src/db/migrate.ts`) as a one-off job against the target
    database using the new image, and let it finish before the new `paper-api`
    starts. Migrations are additive and stay compatible with the previous
-   release so a rollback of the process never requires a schema rollback.
+   release so a rollback of the process never requires a schema rollback;
+   the `schema-compatibility` CI job (below, *Rollback*) is what enforces
+   that on every pull request and every push to `main`.
 2. **Readiness gates traffic.** `/health/live` answers as soon as the process
    is up; `/health/ready` answers 200 only when PostgreSQL and the audit path
    are usable. Route traffic only to ready instances and restart only on
@@ -188,10 +190,40 @@ the markets never leave `RECOVERING`. Therefore:
 
 Rollback redeploys the previous `paper-api` image using the same
 stop-then-start handoff. The database is **not** rolled back: schema changes
-are additive and the previous image must tolerate the newer schema (this is
-verified in CI by running the previous release's tests against the migrated
-schema before a migration is merged). Rolling back a migration requires
-restore from backup with a full stop.
+are additive and the previous image must tolerate the newer schema. CI proves
+exactly that in the `schema-compatibility` job (`.github/workflows/ci.yml`,
+suite `apps/paper-api/schema-compat`, run as
+`pnpm --filter @moi/paper-api test:schema-compat`):
+
+1. The *previous* source is the event's own prior commit — the pull request's
+   `base.sha`, or `github.event.before` on a push to `main` — validated as a
+   full non-zero SHA before anything is checked out. No branch, tag, or
+   mutable image tag ever stands in for it. That commit is checked out under
+   `.schema-compat/previous`, built with its own `apps/paper-api/Dockerfile`,
+   and loaded locally as `moi-paper-api-schema-compat:previous`; nothing is
+   pushed.
+2. The *current* checkout's `migrateToLatest` migrates a fresh PostgreSQL 17
+   database on an isolated Docker network (with a fresh Redis).
+3. The previous image runs once on that network. Its own compiled production
+   runtime (`/app/apps/paper-api/dist`) boots with the deterministic fake
+   provider, opens an anonymous session, receives a KR order book, submits a
+   `MARKET` `BUY`, and must report the order `FILLED` — a status its fill
+   persistence writes only in the transaction that inserted the `fills` row.
+   The one-shot container must exit 0 and print `SCHEMA_COMPAT_WRITE_OK`.
+4. The harness then proves it can fail: on a second fresh, migrated database
+   it adds `fills.schema_compat_probe text NOT NULL` — a column no release
+   knows — and the same run must end with a nonzero exit whose output names
+   that column in a not-null violation. A green positive half is therefore a
+   real observation, not a runner that cannot fail.
+
+Because the previous runtime also runs its own `migrateToLatest` at boot, a
+recorded migration it does not know makes the old image refuse to start
+("corrupted migrations: previously executed migration … is missing"). The gate
+reports that as an incompatibility, which is the truth about such a rollback;
+a release that adds a migration must therefore also decide how the previous
+image is expected to boot, and record that decision (spec §16) before the job
+can pass. Rolling back a migration itself requires restore from backup with a
+full stop.
 
 On the reference host, the rollback ref and image tag are one release identity:
 set `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`, then invoke

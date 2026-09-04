@@ -114,3 +114,78 @@ jobs:
           path: apps/paper-api/test-results/leader-handoff
           retention-days: 14
           if-no-files-found: ignore
+
+  # #46: the exact previous release must still write through the schema this
+  # checkout migrates to, or a rollback after a migration is not a rollback.
+  # The previous source is the event's own prior commit — never a branch, a
+  # tag, or a mutable image — built here and run once against a database the
+  # current source migrated (see apps/paper-api/schema-compat).
+  schema-compatibility:
+    name: Previous release against the current schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: verify
+    env:
+      SCHEMA_COMPAT_PREVIOUS_IMAGE: moi-paper-api-schema-compat:previous
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve the previous release commit
+        id: previous
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        # Fail closed: a missing value, a short or non-hex ref, or the all-zero
+        # SHA of a branch creation never turns into "compare against main".
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) previous="$PULL_REQUEST_BASE_SHA" ;;
+            push) previous="$PUSH_BEFORE_SHA" ;;
+            *) echo "::error::unsupported event $GITHUB_EVENT_NAME"; exit 1 ;;
+          esac
+          if ! printf '%s\n' "$previous" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::previous ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+          if [ "$previous" = "0000000000000000000000000000000000000000" ]; then
+            echo "::error::previous ref is the all-zero SHA (no previous commit)"
+            exit 1
+          fi
+          echo "sha=$previous" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the previous release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.previous.outputs.sha }}
+          path: .schema-compat/previous
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the previous paper-api image
+        uses: docker/build-push-action@v7
+        with:
+          context: .schema-compat/previous
+          file: .schema-compat/previous/apps/paper-api/Dockerfile
+          load: true
+          push: false
+          tags: moi-paper-api-schema-compat:previous
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      # The host side of the suite runs the *current* migrations from source,
+      # so the current workspace packages must be installed and built.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Previous image writes through the current schema
+        run: pnpm --filter @moi/paper-api test:schema-compat
