@@ -44,6 +44,48 @@ describe('TossRestClient against the loopback fake (B6)', () => {
     ).rejects.toMatchObject({ code: 'RATE_LIMITED', retryAfterMs: 2_000 });
   });
 
+  it('reads the calendar the fake serves: an open day, a seeded holiday, a weekend (#122)', async () => {
+    const client = new TossRestClient({
+      baseUrl: server.baseUrl,
+      tokenProvider: new OAuthTokenProvider({
+        baseUrl: server.baseUrl,
+        ...server.issueCredentials(),
+      }),
+      sleep: async () => undefined,
+    });
+    const day = (market: 'KR' | 'US', date: string) =>
+      client.getCalendarDay(market, date, new AbortController().signal);
+
+    await expect(day('KR', '2026-03-25')).resolves.toEqual({
+      market: 'KR',
+      tradingDate: '2026-03-25',
+      isTradingDay: true,
+      regularSession: {
+        opensAt: '2026-03-25T09:00:00+09:00',
+        closesAt: '2026-03-25T15:30:00+09:00',
+      },
+    });
+    await expect(day('US', '2026-03-25')).resolves.toMatchObject({
+      isTradingDay: true,
+      regularSession: {
+        opensAt: '2026-03-25T22:30:00+09:00',
+        closesAt: '2026-03-26T05:00:00+09:00',
+      },
+    });
+
+    server.seedCalendarDay('KR', '2026-03-25', null);
+    await expect(day('KR', '2026-03-25')).resolves.toEqual({
+      market: 'KR',
+      tradingDate: '2026-03-25',
+      isTradingDay: false,
+      regularSession: null,
+    });
+    await expect(day('KR', '2026-03-28')).resolves.toMatchObject({
+      isTradingDay: false,
+      regularSession: null,
+    });
+  });
+
   it('refreshes the token once after a 401 and then surfaces AUTH_FAILED', async () => {
     const credentials = server.issueCredentials();
     let now = Date.now();

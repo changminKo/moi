@@ -183,6 +183,96 @@ describe('FakeTossRestServer (§9.2)', () => {
     });
   });
 
+  it('serves the market calendar in the contract shape, seeded and by default (#122)', async () => {
+    const access = await token();
+    const read = async (market: string, date: string): Promise<unknown> => {
+      const response = await fetch(
+        `${base}/api/v1/market-calendar/${market}?date=${date}`,
+        { headers: { Authorization: `Bearer ${access}` } },
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+
+    // A weekday nobody seeded runs the canonical session — never the empty
+    // catch-all envelope this path used to fall through to.
+    expect(await read('KR', '2026-03-25')).toMatchObject({
+      success: true,
+      result: {
+        today: {
+          date: '2026-03-25',
+          integrated: {
+            preMarket: { startTime: '2026-03-25T08:00:00+09:00' },
+            regularMarket: {
+              startTime: '2026-03-25T09:00:00+09:00',
+              endTime: '2026-03-25T15:30:00+09:00',
+            },
+          },
+        },
+        previousBusinessDay: { date: '2026-03-24' },
+        nextBusinessDay: { date: '2026-03-26' },
+      },
+    });
+    expect(await read('US', '2026-03-25')).toMatchObject({
+      result: {
+        today: {
+          date: '2026-03-25',
+          regularMarket: {
+            startTime: '2026-03-25T22:30:00+09:00',
+            endTime: '2026-03-26T05:00:00+09:00',
+          },
+        },
+      },
+    });
+
+    // A weekend is closed, and its neighbours skip the weekend.
+    expect(await read('KR', '2026-03-28')).toMatchObject({
+      result: {
+        today: { date: '2026-03-28', integrated: null },
+        previousBusinessDay: { date: '2026-03-27' },
+        nextBusinessDay: { date: '2026-03-30' },
+      },
+    });
+
+    server.seedCalendarDay('KR', '2026-03-25', null);
+    server.seedCalendarDay('US', '2026-03-25', {
+      startTime: '2026-03-25T23:30:00+09:00',
+      endTime: '2026-03-26T06:00:00+09:00',
+    });
+    expect(await read('KR', '2026-03-25')).toMatchObject({
+      result: { today: { date: '2026-03-25', integrated: null } },
+    });
+    expect(await read('US', '2026-03-25')).toMatchObject({
+      result: {
+        today: {
+          regularMarket: {
+            startTime: '2026-03-25T23:30:00+09:00',
+            endTime: '2026-03-26T06:00:00+09:00',
+          },
+        },
+      },
+    });
+    expect(await read('US', '2026-07-03')).toMatchObject({
+      result: {
+        today: {
+          date: '2026-07-03',
+          dayMarket: { startTime: '2026-07-03T09:00:00+09:00' },
+        },
+      },
+    });
+
+    const bad = await fetch(
+      `${base}/api/v1/market-calendar/KR?date=25-03-2026`,
+      {
+        headers: { Authorization: `Bearer ${access}` },
+      },
+    );
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({
+      error: { code: 'unsupported-date', data: { field: 'date' } },
+    });
+  });
+
   it('records requests without token values and honours failNext/invalidateAllTokens', async () => {
     server.seedSnapshot('KR', '005930', '72000', {
       asks: [{ price: '72100', volume: '1' }],

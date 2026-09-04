@@ -8,6 +8,7 @@ import type {
   MarketCalendarSource,
   MarketOrderBookSnapshot,
   MarketPrice,
+  MarketSession,
   MarketSnapshotSource,
   RecoverySnapshot,
   TokenProvider,
@@ -29,6 +30,40 @@ export interface TossRestOptions {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 type JsonObject = Record<string, unknown>;
+
+function calendarObject(value: unknown, description: string): JsonObject {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`Invalid Toss calendar response: ${description}`);
+  return value as JsonObject;
+}
+
+function calendarTime(value: unknown, description: string): string {
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value)))
+    throw new MarketDataError(
+      'UNSUPPORTED_DATA',
+      `Invalid Toss calendar response: ${description} must be an ISO timestamp`,
+    );
+  return value;
+}
+
+/**
+ * The contract's `regularMarket`: both bounds, or `null` when that session does
+ * not run today. An absent key is not a closed session — it is a shape the
+ * decoder does not recognise, so it throws rather than invent a holiday.
+ * `singlePriceAuction*` is deliberately ignored: it is a phase inside the
+ * regular session, not a bound of it.
+ */
+function calendarSession(
+  value: unknown,
+  description: string,
+): MarketSession | null {
+  if (value === null) return null;
+  const session = calendarObject(value, `${description} must be an object`);
+  return {
+    opensAt: calendarTime(session.startTime, `${description}.startTime`),
+    closesAt: calendarTime(session.endTime, `${description}.endTime`),
+  };
+}
 
 export class TossRestClient
   implements
@@ -198,25 +233,39 @@ export class TossRestClient
       `/api/v1/market-calendar/${market}?date=${encodeURIComponent(tradingDate)}`,
       signal,
     );
-    const result = body.result as JsonObject;
-    const row = (result.today as JsonObject | undefined) ?? result;
-    if (!row || typeof row !== 'object')
-      throw new Error('Invalid Toss calendar response');
-    const x = row as Record<string, unknown>;
-    const date = String(x.date ?? tradingDate);
-    const trading = Boolean(x.isTradingDay ?? x.tradingDay ?? x.isOpen);
-    const session = x.regularSession as Record<string, unknown> | undefined;
+    const result = calendarObject(body.result, 'result must be an object');
+    const today = calendarObject(
+      result.today,
+      'result.today must be an object',
+    );
+    if (typeof today.date !== 'string' || today.date === '')
+      throw new Error('Invalid Toss calendar response: today.date is missing');
+    // KR nests the day's sessions under `integrated` (null when KRX and NXT are
+    // both shut); US carries the four sessions on the day itself. Only the
+    // regular session is read, and `isTradingDay` means "a regular session runs
+    // today" for both markets: that is the fact `derivePhase` and the
+    // MARKET-order gate need, and a day whose pre/after markets run without a
+    // regular session is not one this platform can trade (§16.57).
+    const regular =
+      market === 'KR'
+        ? today.integrated === null
+          ? null
+          : calendarObject(
+              today.integrated,
+              'today.integrated must be an object or null',
+            ).regularMarket
+        : today.regularMarket;
+    const session = calendarSession(
+      regular,
+      market === 'KR'
+        ? 'today.integrated.regularMarket'
+        : 'today.regularMarket',
+    );
     return {
       market,
-      tradingDate: date,
-      isTradingDay: trading,
-      regularSession:
-        trading && session
-          ? {
-              opensAt: String(session.opensAt ?? session.open ?? ''),
-              closesAt: String(session.closesAt ?? session.close ?? ''),
-            }
-          : null,
+      tradingDate: today.date,
+      isTradingDay: session !== null,
+      regularSession: session,
     };
   }
   async getFxRate(
