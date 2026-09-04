@@ -364,8 +364,32 @@ requires, and the artefacts are the same ones the local smoke uses.
    untouched) → one-off migration job with the new image
    (`node dist/migrate-cli.js`) while the old release still serves → `systemctl restart moi` (compose
    recreates containers stop-then-start, the 45 s grace period lets the leader
-   drain) → readiness, both markets `NORMAL`, placement enabled, and every
-   running runtime container carries the checked-out revision label.
+   drain) → readiness, both markets `NORMAL`, placement enabled, every
+   running runtime container carries the checked-out revision label, and
+   `https://$WEB_DOMAIN/runtime-config.js` is the assignment
+   `apps/web/server.mjs` emits and its `apiOrigin` equals
+   `https://$API_DOMAIN` exactly (a longer origin, a URL ending in it, or the
+   origin mentioned elsewhere in the body all fail).
+
+   That last one is narrower than it looks. On this host `API_DOMAIN` equals
+   `WEB_DOMAIN` (the single-origin edge, spec §16.29), so it reduces to "the
+   served config names `https://$WEB_DOMAIN`"; the origin only discriminates
+   in a two-host deployment such as the base compose. Nor is it what catches a
+   mis-set `PUBLIC_API_ORIGIN` — the preflight refuses that before the deploy
+   begins. Its value is that this is the **only request the deploy makes to
+   `WEB_DOMAIN`**: everything else addresses `API_DOMAIN`, so it is the first
+   proof that the edge routes the web container, that the container came up,
+   and that it served a generated config rather than the unconfigured copy in
+   `apps/web/public`, which names no origin at all.
+
+   Concretely, it catches an edge that does not route the web container, a web
+   container that never came up, the unconfigured `apps/web/public` copy
+   deployed in place of the generated one, and an `apiOrigin` naming a
+   different host, port or scheme. It says nothing about the API path — that
+   `/api/*` reaches paper-api is what the `/api/v1/health/trading` probe
+   above tells you, since that path is itself under `/api/*` — and nothing
+   about whether a browser can complete a session. Only the post-deploy smoke
+   below covers that, and it is the check that would have caught #25 outright.
    Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
    and passing that same full SHA to `deploy.sh`; mixing a tag and a different
    ref fails before migrations.
@@ -379,6 +403,78 @@ requires, and the artefacts are the same ones the local smoke uses.
    and `pg_dump` through `docker compose exec postgres` for backups (see
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
+
+## Post-deploy browser smoke
+
+Run this from a workstation after every deploy:
+
+```bash
+SMOKE_WEB_ORIGIN=https://$WEB_DOMAIN pnpm smoke:prod
+```
+
+The host runs Docker only, so `deploy.sh` cannot open a browser, and every
+check it does make talks to the API. The first Oracle release passed all of
+them while the app showed nothing but a retry button: the bundle ignored the
+injected runtime config, posted to the static server and got a 405 (#25). The
+runtime-config guard added to `deploy.sh` closes the server half of that — and
+only the server half, since it reads the file rather than running the bundle;
+this closes the browser half.
+
+The client was never at fault. `createApiClient` has read `/runtime-config.js`
+since the session bootstrap first shipped, and it called the page's own origin
+because that is what the config it was served named. The issue's own summary
+blames the client; it is wrong, and the fix was on the serving side.
+
+It opens `/trade` in headless Chromium and requires all of:
+
+- `/runtime-config.js` is served and carries a literal API origin. The
+  unconfigured fallback in `apps/web/public` assigns `window.location.origin`
+  and names none, so a web container started without `PUBLIC_API_ORIGIN`
+  fails here.
+- The session bootstrap reaches the wallet panel with an amount rendered. The
+  "Retry session" / "세션 다시 시작" button is what a failed bootstrap leaves
+  behind, and the two outcomes are raced so a failure is reported as a failed
+  bootstrap rather than an unexplained timeout.
+- At least one `/api/v1/…` response came back successfully from the origin the
+  runtime config named — the bundle honoured what it read.
+- The page logged no console error other than a missing favicon.
+
+A failure means the deployment is serving a browser app that does not work,
+whatever `/health/*` says. Roll back (`MOI_IMAGE_TAG=<full commit sha>`, step 7
+above) rather than leave it up.
+
+**Treat a failed run's artifacts as credentials.** On failure Playwright keeps
+a trace and a screenshot under `apps/e2e/test-results/`, and because this run
+drove the real deployment that trace contains a live `moi_session` cookie and
+its CSRF token — enough to act as that session. Read them locally, then delete
+the directory. Never attach them to an issue, a pull request, or a chat
+message, and never copy them to a shared host (rule 2). The directory is
+git-ignored, so nothing stops a stray `-f` add from committing it.
+
+The smoke never runs in CI: it needs a live origin, refuses to start without
+`SMOKE_WEB_ORIGIN`, and lives in `apps/e2e/playwright.smoke.config.ts`, which
+the CI e2e run (`testDir: './specs'`) never sees. Playwright's Chromium has to
+be installed once on the workstation:
+
+```bash
+pnpm --filter @moi/e2e exec playwright install chromium
+```
+
+`SMOKE_WEB_ORIGIN` must be HTTPS unless it is a loopback host, since the run
+carries a live session.
+
+The judgements it makes are pure functions in `apps/e2e/smoke/smoke-contract.ts`
+with their own tests, so the part that can be checked without a deployment is
+checked by `pnpm test`. CI covers the two-origin shape separately: the
+`cross-origin-chromium` Playwright project serves the bundle through
+`apps/web/server.mjs` on an origin of its own and drives the journeys across
+the boundary, which the single-origin stack and the vite dev proxy cannot do.
+That project reaches CORS, the CSRF `Origin` check, credentialed fetch and the
+WebSocket `Origin` check. It does **not** reach the cookie: its two origins are
+`127.0.0.1` on different ports, which is cross-origin but same-site, so
+`SameSite=Lax` sends the cookie either way. The cross-site cookie loss behind
+the single-origin edge decision (spec §16.29) has no automated coverage and
+stays an operator check.
 
 ## Write rate limits
 

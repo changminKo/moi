@@ -1048,6 +1048,60 @@ check(
   },
 );
 
+// #25: every other deploy verification talks to the API, and the first Oracle
+// release passed all of them while the browser app was unusable. The web image
+// carries its own configuration, so the deploy reads back the one file the
+// browser learns the API origin from.
+check(
+  'reference deploy verifies the browser runtime config before reporting success',
+  () => {
+    const script = readShell('infra/oracle/deploy.sh');
+    const containers = script.search(
+      /^\s*verify_running_container_revisions "\$checkout_sha" "\$\{running_ids\[@\]\}"$/mu,
+    );
+    const runtimeConfig = script.search(
+      /^\s*verify_runtime_config_origin "\$WEB_DOMAIN" "https:\/\/\$\{API_DOMAIN\}"$/mu,
+    );
+    const done = script.indexOf('deploy_verified "$sha"');
+    assert.ok(
+      containers >= 0 && containers < runtimeConfig && runtimeConfig < done,
+      'deploy.sh must read https://$WEB_DOMAIN/runtime-config.js and require https://$API_DOMAIN in it, after the container check and before deploy_verified',
+    );
+    const guard =
+      readShell('infra/oracle/deploy-lib.sh').match(
+        /verify_runtime_config_origin\(\) \{\n([\s\S]*?)\n\}/u,
+      )?.[1] ?? '';
+    // Bounded like every other curl a deploy or the status timer makes
+    // (status-check.sh, notify.sh): a hung edge must fail this step rather
+    // than hold the release open indefinitely.
+    assert.match(
+      guard,
+      /curl -fsS --max-time \d+ "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
+      'deploy-lib.sh must fetch the runtime config the browser itself reads, with a --max-time bound',
+    );
+    // Codex review (#25, HIGH): "contains the origin" passed for a longer
+    // origin, a URL ending in the origin, and the origin named elsewhere in
+    // the body. The guard parses the one assignment the web server emits and
+    // compares the value for equality; both halves are pinned here so neither
+    // file can drift without the other.
+    const template = 'window.__MOI_RUNTIME_CONFIG__ = Object.freeze(';
+    assert.ok(
+      read('apps/web/server.mjs').includes(`${template}\${json});`),
+      `deploy-lib.sh must parse the runtime-config assignment apps/web/server.mjs emits: the server no longer renders ${template}<json>);`,
+    );
+    assert.ok(
+      guard.includes(`local prefix='${template}{"apiOrigin":"'`) &&
+        guard.includes(`local suffix='"});'`),
+      `deploy-lib.sh must parse the runtime-config assignment apps/web/server.mjs emits (prefix ${template}{"apiOrigin":" and suffix "});)`,
+    );
+    assert.ok(
+      guard.includes('[ "$named_origin" != "$api_origin" ]') &&
+        !/\*"\$\{?api_origin\}?"\*/u.test(guard),
+      'deploy-lib.sh must compare the parsed apiOrigin with the API origin for equality, never as a substring of the body',
+    );
+  },
+);
+
 // #34: the write limiter keys on `request.ip`. Behind the overlay's Caddy that
 // is the client only if the API trusts X-Forwarded-For; exposed directly (the
 // base compose publishes the port) it must not, or a header buys a fresh bucket.

@@ -163,6 +163,91 @@ verify_release_image_revisions() { verify_revisions image "$@"; }
 # are the last word.
 verify_running_container_revisions() { verify_revisions container "$@"; }
 
+# #25: every other verification here talks to the API. The browser app is a
+# second image with its own configuration, and the first Oracle release passed
+# all of them while `/trade` was unusable: `POST /api/v1/sessions/anonymous`
+# reached the static server (405, GET/HEAD only) and the page showed nothing
+# but "Retry session".
+#
+# The cause was the served configuration, not the client. `createApiClient`
+# has read `/runtime-config.js` since the session bootstrap first shipped; it
+# called the page's own origin because that is what the config it was given
+# named — `apps/web/public/runtime-config.js` assigns
+# `window.location.origin`, and the issue's own summary blaming the client is
+# wrong.
+#
+# What this adds is narrower than it first looks, and worth stating exactly:
+#
+#   * On the reference host `API_DOMAIN` equals `WEB_DOMAIN` (the single-origin
+#     Caddy edge, spec §16.29), so there the check reduces to "the served
+#     `/runtime-config.js` names `https://$WEB_DOMAIN`". The origin is only
+#     discriminating in a two-host deployment, which is what the base compose
+#     is (`PUBLIC_ORIGIN` and `PUBLIC_API_ORIGIN` on different origins).
+#   * It is not what catches a mis-set `PUBLIC_API_ORIGIN` either: the
+#     preflight already refuses to deploy unless `PUBLIC_ORIGIN` and
+#     `PUBLIC_API_ORIGIN` name `WEB_DOMAIN` and `API_DOMAIN`
+#     (`scripts/preflight-deploy.mjs`), and that runs before any of this.
+#   * Its real value is that this is the only request the whole deploy makes
+#     to `WEB_DOMAIN` at all. Everything else addresses `API_DOMAIN`. So it is
+#     the first proof that the edge routes the web container, that the
+#     container came up, and that it generated and served this file rather
+#     than the unconfigured copy in `apps/web/public` — which assigns
+#     `window.location.origin` and names no origin whatsoever.
+#
+# So, concretely, what it catches: an edge that does not route the web
+# container and a container that never came up (the fetch fails); the
+# unconfigured `apps/web/public` copy deployed in place of the generated one
+# (several lines, so the prefix cannot match); and an `apiOrigin` naming a
+# different host, port or scheme.
+#
+# What it does not catch: anything about the API path. That `/api/*` reaches
+# paper-api is what the `/api/v1/health/trading` probe above says, since that
+# path is itself under `/api/*`. And neither of them says the browser can
+# complete a session: a POST-only edge fault, a CSP that blocks the bundle, a
+# stale asset hash, a JavaScript error. Only the operator browser smoke
+# (`pnpm smoke:prod`) covers that, and it is the check that would have caught
+# #25 outright.
+verify_runtime_config_origin() {
+  local web_domain="$1" api_origin="$2" body
+  # --max-time as everywhere else a deploy or the status timer calls curl
+  # (status-check.sh, notify.sh): a hung edge must fail the step, not the run.
+  if ! body="$(curl -fsS --max-time 10 "https://${web_domain}/runtime-config.js")"; then
+    echo "FAIL: cannot fetch https://${web_domain}/runtime-config.js" >&2
+    return 1
+  fi
+  # apps/web/server.mjs emits exactly one controlled assignment,
+  #   window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"<origin>"});
+  # so the guard parses that shape and compares the value for equality. A
+  # substring test accepted an origin that merely began or ended with the
+  # expected one, or the expected one mentioned anywhere else in the body
+  # (Codex review of #25). No eval: the body is never executed. The contract
+  # checker pins this prefix to the template in apps/web/server.mjs.
+  local prefix='window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"'
+  local suffix='"});'
+  local named_origin
+  case "$body" in
+    "${prefix}"*"${suffix}") ;;
+    *)
+      echo "FAIL: https://${web_domain}/runtime-config.js is not the runtime config apps/web/server.mjs emits; refusing to guess the API origin" >&2
+      return 1
+      ;;
+  esac
+  named_origin="${body#"$prefix"}"
+  named_origin="${named_origin%"$suffix"}"
+  # A quote inside the value means the object carried more than apiOrigin.
+  case "$named_origin" in
+    *'"'*)
+      echo "FAIL: https://${web_domain}/runtime-config.js is not the runtime config apps/web/server.mjs emits; refusing to guess the API origin" >&2
+      return 1
+      ;;
+  esac
+  if [ "$named_origin" != "$api_origin" ]; then
+    echo "FAIL: https://${web_domain}/runtime-config.js does not name ${api_origin} (apiOrigin is ${named_origin}); the browser app would call some other origin" >&2
+    return 1
+  fi
+  echo "runtime config: ${web_domain} names ${api_origin}"
+}
+
 # Called by deploy.sh only after readiness, both markets NORMAL and placement
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {
