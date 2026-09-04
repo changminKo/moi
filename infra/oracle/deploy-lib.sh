@@ -163,20 +163,37 @@ verify_release_image_revisions() { verify_revisions image "$@"; }
 # are the last word.
 verify_running_container_revisions() { verify_revisions container "$@"; }
 
-# #25: every other verification talks to the API. The browser app is a second
-# image with its own configuration, and the first Oracle release passed all of
-# them while `/trade` was unusable — the bundle called its own origin, so
-# `POST /api/v1/sessions/anonymous` reached the static server (405, GET/HEAD
-# only) and the page showed nothing but "Retry session". `/runtime-config.js`
-# is the file the browser reads that origin from, so read it back and require
-# the API origin to appear in it. One GET, and it fails the deploy.
+# #25: every other verification here talks to the API. The browser app is a
+# second image with its own configuration, and the first Oracle release passed
+# all of them while `/trade` was unusable — the bundle called its own origin,
+# so `POST /api/v1/sessions/anonymous` reached the static server (405, GET/HEAD
+# only) and the page showed nothing but "Retry session".
 #
-# What it proves is the server side: the web container was configured and the
-# edge routes the file. It cannot prove the bundle honours what it reads —
-# that is the operator browser smoke (`pnpm smoke:prod`).
+# What this adds is narrower than it first looks, and worth stating exactly:
+#
+#   * On the reference host `API_DOMAIN` equals `WEB_DOMAIN` (the single-origin
+#     Caddy edge, spec §16.29), so there the check reduces to "the served
+#     `/runtime-config.js` names `https://$WEB_DOMAIN`". The origin is only
+#     discriminating in a two-host deployment, which is what the base compose
+#     is (`PUBLIC_ORIGIN` and `PUBLIC_API_ORIGIN` on different origins).
+#   * It is not what catches a mis-set `PUBLIC_API_ORIGIN` either: the
+#     preflight already refuses to deploy unless `PUBLIC_ORIGIN` and
+#     `PUBLIC_API_ORIGIN` name `WEB_DOMAIN` and `API_DOMAIN`
+#     (`scripts/preflight-deploy.mjs`), and that runs before any of this.
+#   * Its real value is that this is the only request the whole deploy makes
+#     to `WEB_DOMAIN` at all. Everything else addresses `API_DOMAIN`. So it is
+#     the first proof that the edge routes the web container, that the
+#     container came up, and that it generated and served this file rather
+#     than the unconfigured copy in `apps/web/public` — which assigns
+#     `window.location.origin` and names no origin whatsoever.
+#
+# Either way it proves only the server side. That the bundle honours what it
+# reads is the operator browser smoke (`pnpm smoke:prod`).
 verify_runtime_config_origin() {
   local web_domain="$1" api_origin="$2" body
-  if ! body="$(curl -fsS "https://${web_domain}/runtime-config.js")"; then
+  # --max-time as everywhere else a deploy or the status timer calls curl
+  # (status-check.sh, notify.sh): a hung edge must fail the step, not the run.
+  if ! body="$(curl -fsS --max-time 10 "https://${web_domain}/runtime-config.js")"; then
     echo "FAIL: cannot fetch https://${web_domain}/runtime-config.js" >&2
     return 1
   fi

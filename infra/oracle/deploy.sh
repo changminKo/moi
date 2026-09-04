@@ -155,10 +155,10 @@ for _ in $(seq 1 40); do
     [ "${#running_ids[@]}" -eq "${#running_services[@]}" ] \
       || { echo "FAIL: expected ${#running_services[@]} running containers (${running_services[*]}), compose ps returned ${#running_ids[@]}"; exit 1; }
     verify_running_container_revisions "$checkout_sha" "${running_ids[@]}"
-    # The API answered every probe above. The browser app is a second image
-    # with its own configuration, and #25 was exactly a release where that
-    # configuration was wrong while the API was perfect: the bundle called its
-    # own origin and `/trade` never got past "Retry session".
+    # Every probe above addressed API_DOMAIN. This is the deploy's only
+    # request to WEB_DOMAIN, so it is the first thing to say that the edge
+    # routes the web container and that the container served the runtime
+    # config it was configured with (#25; deploy-lib.sh states the limits).
     verify_runtime_config_origin "$WEB_DOMAIN" "https://${API_DOMAIN}"
     sha="$(as_owner git rev-parse --short HEAD)"
     echo "$md"; echo "$tr"; echo "== done (${sha})"

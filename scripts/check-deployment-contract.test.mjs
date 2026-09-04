@@ -813,6 +813,28 @@ describe('check-deployment-contract (A8)', () => {
 
   // #25: the API-side probes all stay green when the browser app is the thing
   // that is broken, so removing this one guard must not pass the checker.
+  // An unbounded curl in the verify phase holds the release open on a hung
+  // edge instead of failing the step.
+  it('fails when the runtime config fetch loses its timeout bound', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'curl -fsS --max-time 10 "https://',
+        'curl -fsS "https://',
+      );
+      assert.notEqual(after, before, 'max-time mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /with a --max-time bound/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails when deploy stops verifying the browser runtime config', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/deploy.sh');

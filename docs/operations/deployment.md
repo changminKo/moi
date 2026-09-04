@@ -368,12 +368,19 @@ requires, and the artefacts are the same ones the local smoke uses.
    `https://$WEB_DOMAIN/runtime-config.js` is the assignment
    `apps/web/server.mjs` emits and its `apiOrigin` equals
    `https://$API_DOMAIN` exactly (a longer origin, a URL ending in it, or the
-   origin mentioned elsewhere in the body all fail). That
-   last one is the browser's half: the web app is a second image with its own
-   configuration, every other check talks to the API, and #25 was a release
-   where all of them passed while `/trade` was unusable. It proves the file
-   the browser reads was generated with an API origin in it — not that the
-   bundle honours it, which is what the post-deploy smoke below is for.
+   origin mentioned elsewhere in the body all fail).
+
+   That last one is narrower than it looks. On this host `API_DOMAIN` equals
+   `WEB_DOMAIN` (the single-origin edge, spec §16.29), so it reduces to "the
+   served config names `https://$WEB_DOMAIN`"; the origin only discriminates
+   in a two-host deployment such as the base compose. Nor is it what catches a
+   mis-set `PUBLIC_API_ORIGIN` — the preflight refuses that before the deploy
+   begins. Its value is that this is the **only request the deploy makes to
+   `WEB_DOMAIN`**: everything else addresses `API_DOMAIN`, so it is the first
+   proof that the edge routes the web container, that the container came up,
+   and that it served a generated config rather than the unconfigured copy in
+   `apps/web/public`, which names no origin at all. What it cannot prove is
+   that the bundle honours what it reads — that is the post-deploy smoke below.
    Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
    and passing that same full SHA to `deploy.sh`; mixing a tag and a different
    ref fails before migrations.
@@ -400,8 +407,9 @@ The host runs Docker only, so `deploy.sh` cannot open a browser, and every
 check it does make talks to the API. The first Oracle release passed all of
 them while the app showed nothing but a retry button: the bundle ignored the
 injected runtime config, posted to the static server and got a 405 (#25). The
-runtime-config guard added to `deploy.sh` closes the server half of that; this
-closes the browser half.
+runtime-config guard added to `deploy.sh` closes the server half of that — and
+only the server half, since it reads the file rather than running the bundle;
+this closes the browser half.
 
 It opens `/trade` in headless Chromium and requires all of:
 

@@ -83,15 +83,16 @@ handoff therefore remains unchecked below.
   shape. The browser itself is
   covered twice: the CI e2e suite runs the anonymous-session, order-lifecycle
   and cross-origin journeys through `apps/web/server.mjs` on an origin of its
-  own (`cross-origin-chromium`, 58 tests total), and the operator runs
+  own (`cross-origin-chromium`, 8 of the suite's 58 tests), and the operator runs
   `SMOKE_WEB_ORIGIN=https://$WEB_DOMAIN pnpm smoke:prod` against the deployed
   host after every release (`docs/operations/deployment.md`, *Post-deploy
   browser smoke*). The smoke's own judgements are unit-tested
-  (`apps/e2e/smoke/smoke-contract.test.ts`) and it was exercised against a live
-  server: it passes on a correctly configured origin, reports "declares no
-  literal apiOrigin" against one serving the unconfigured fallback, and reports
-  "retry" against one whose configured API origin answers 405 — the shape of
-  #25. **Each release records its own production smoke run in the deploy log**;
+  (`apps/e2e/smoke/smoke-contract.test.ts`). Evidence (2026-09-04, local e2e
+  harness, commit `2eb3d08` — no production host was contacted): the smoke
+  passes against the harness cross-origin server, reports "declares no literal
+  apiOrigin" against the vite preview serving the unconfigured fallback, and
+  reports `Expected: "wallet" / Received: "retry"` against a static server
+  configured to call an API origin that answers 405 — the shape of #25. **Each release records its own production smoke run in the deploy log**;
   the mechanism, not a particular run, is what this line attests.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.

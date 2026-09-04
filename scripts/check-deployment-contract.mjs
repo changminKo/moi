@@ -1071,10 +1071,13 @@ check(
       readShell('infra/oracle/deploy-lib.sh').match(
         /verify_runtime_config_origin\(\) \{\n([\s\S]*?)\n\}/u,
       )?.[1] ?? '';
+    // Bounded like every other curl a deploy or the status timer makes
+    // (status-check.sh, notify.sh): a hung edge must fail this step rather
+    // than hold the release open indefinitely.
     assert.match(
       guard,
-      /curl -fsS "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
-      'deploy-lib.sh must fetch the runtime config the browser itself reads',
+      /curl -fsS --max-time \d+ "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
+      'deploy-lib.sh must fetch the runtime config the browser itself reads, with a --max-time bound',
     );
     // Codex review (#25, HIGH): "contains the origin" passed for a longer
     // origin, a URL ending in the origin, and the origin named elsewhere in
