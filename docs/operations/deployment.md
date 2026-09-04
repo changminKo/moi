@@ -182,7 +182,8 @@ the markets never leave `RECOVERING`. Therefore:
    with `peakConcurrentConnections === 2` and `evictions === 0`; evidence is
    written to `apps/paper-api/test-results/leader-handoff/`. Then verify with
    the checks in any runbook's *Verification* section:
-   reservations, leader fence, outbox lag, user-stream recovery.
+   reservations, leader fence, outbox lag, user-stream recovery, and the market
+   session each market reports for the current time.
 
 ## Rollback
 

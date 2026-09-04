@@ -20,6 +20,7 @@ import {
 } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { ZERO_FEE_SCHEDULES } from '../config.js';
+import { tradingDateFor } from '../modules/instruments/market-session.js';
 import { ProductionRuntime } from './production-runtime.js';
 import { createTossProviderBundle } from './provider-bundle.js';
 
@@ -123,9 +124,14 @@ async function startToss(): Promise<{
   rest.seedInstrument('KR', '005930', '삼성전자');
   rest.seedInstrument('US', 'AAPL', '애플');
   const tokenRefreshes: string[] = [];
+  const logs: string[] = [];
+  const log = (event: string, fields: Record<string, unknown>): void => {
+    logs.push(JSON.stringify({ event, ...fields }));
+  };
   const bundle = createTossProviderBundle(config(credentials), {
     symbols: SYMBOLS,
     onTokenRefresh: (r) => tokenRefreshes.push(r),
+    log,
   });
   // The fake WS accepts whatever token the fake REST issued.
   const originalGet = bundle.tokenProvider.getAccessToken.bind(
@@ -136,12 +142,11 @@ async function startToss(): Promise<{
     ws.allowToken(token);
     return token;
   };
-  const logs: string[] = [];
   const runtime = new ProductionRuntime({
     config: config(credentials),
     bundle,
     signals: false,
-    log: (event, fields) => logs.push(JSON.stringify({ event, ...fields })),
+    log,
   });
   running.push(runtime);
   await runtime.start();
@@ -224,6 +229,53 @@ describe('ProductionRuntime with the toss bundle (B7/B8)', () => {
       expect(ws.evictions).toBe(0);
       const metrics = await (await fetch(`${origin}/metrics`)).text();
       expect(metrics).toMatch(/feed_reconnect_total\{market="(KR|US)"\} 1/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'serves the market session route from the Toss calendar decoder (#122)',
+    async () => {
+      const { origin, logs } = await startToss();
+      const now = new Date();
+      const krDate = tradingDateFor('KR', now);
+      // Seeded rather than left to the fake's weekday default, so the case
+      // holds on a weekend too.
+      rest.seedCalendarDay('KR', krDate, {
+        startTime: `${krDate}T09:00:00+09:00`,
+        endTime: `${krDate}T15:30:00+09:00`,
+      });
+      rest.seedCalendarDay('US', tradingDateFor('US', now), null);
+
+      const kr = await json(`${origin}/api/v1/markets/KR/session`);
+      const us = await json(`${origin}/api/v1/markets/US/session`);
+
+      // The phase itself is clock-dependent; what this pins is that the
+      // decoder, the port and the route agree the day trades.
+      expect(kr).toMatchObject({
+        market: 'KR',
+        isTradingDay: true,
+        opensAt: `${krDate}T09:00:00+09:00`,
+        closesAt: `${krDate}T15:30:00+09:00`,
+      });
+      expect(kr.phase).not.toBe('HOLIDAY');
+      expect(['REGULAR', 'PRE_OPEN', 'POST_CLOSE']).toContain(kr.phase);
+      expect(us).toMatchObject({
+        market: 'US',
+        phase: 'HOLIDAY',
+        isTradingDay: false,
+        opensAt: null,
+        closesAt: null,
+      });
+      expect(
+        rest
+          .requests()
+          .filter((r) => r.path.startsWith('/api/v1/market-calendar/')),
+      ).toHaveLength(2);
+      // Nothing lenient and nothing failed: the fake serves the full shape.
+      expect(logs.filter((line) => line.includes('calendar.decode'))).toEqual(
+        [],
+      );
     },
     TEST_TIMEOUT_MS,
   );

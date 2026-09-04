@@ -15,6 +15,11 @@ export interface FakeBook {
   readonly asks: readonly FakeBookLevel[];
   readonly bids: readonly FakeBookLevel[];
 }
+/** The regular-session window of one seeded calendar day (contract bounds). */
+export interface FakeCalendarSession {
+  readonly startTime: string;
+  readonly endTime: string;
+}
 export interface FakeRestRequestRecord {
   readonly method: string;
   readonly path: string;
@@ -35,6 +40,167 @@ const KNOWN_PATHS = new Set([
   '/api/v1/market-calendar/US',
   '/api/v1/exchange-rate',
 ]);
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
+
+/** A date that exists: the pattern plus a round trip through the calendar. */
+function isCalendarDate(value: string): boolean {
+  return (
+    DATE_PATTERN.test(value) &&
+    new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value
+  );
+}
+
+function shiftDate(date: string, days: number): string {
+  const at = new Date(`${date}T00:00:00Z`);
+  at.setUTCDate(at.getUTCDate() + days);
+  return at.toISOString().slice(0, 10);
+}
+function isWeekend(date: string): boolean {
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return day === 0 || day === 6;
+}
+/** Nearest weekday strictly before (`step` −1) or after (`step` +1) `date`. */
+function nearestWeekday(date: string, step: number): string {
+  let cursor = shiftDate(date, step);
+  while (isWeekend(cursor)) cursor = shiftDate(cursor, step);
+  return cursor;
+}
+
+/** The zone whose local clock defines each market's session times. */
+const MARKET_TIME_ZONE: Readonly<Record<Market, string>> = {
+  KR: 'Asia/Seoul',
+  US: 'America/New_York',
+};
+
+/** Minutes `timeZone` is offset from UTC at `instant`. */
+function zoneOffsetMinutes(timeZone: string, instant: number): number {
+  const name = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    timeZoneName: 'longOffset',
+  })
+    .formatToParts(new Date(instant))
+    .find((part) => part.type === 'timeZoneName')?.value;
+  const parsed = /^GMT([+-])(\d{2}):(\d{2})$/u.exec(name ?? '');
+  // A bare "GMT" means the zone sits at UTC on that date.
+  if (!parsed) return 0;
+  return (
+    (parsed[1] === '-' ? -1 : 1) * (Number(parsed[2]) * 60 + Number(parsed[3]))
+  );
+}
+
+/**
+ * The instant `hh:mm` local time falls on, on `date`, in `timeZone`. The offset
+ * is read twice: once for the wall time read as UTC, then again at the instant
+ * that produced, so a date on the far side of a DST change resolves correctly.
+ */
+function marketInstant(
+  date: string,
+  timeZone: string,
+  hh: number,
+  mm: number,
+): number {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const naive = Date.parse(`${date}T${pad(hh)}:${pad(mm)}:00Z`);
+  const first = naive - zoneOffsetMinutes(timeZone, naive) * 60_000;
+  return naive - zoneOffsetMinutes(timeZone, first) * 60_000;
+}
+
+/**
+ * The contract renders every calendar time in KST (`+09:00`), for both markets.
+ * Seoul has no DST, so the rendering is a fixed nine-hour shift.
+ */
+function kst(instant: number): string {
+  return `${new Date(instant + 9 * 3_600_000).toISOString().slice(0, 19)}+09:00`;
+}
+
+function localSession(
+  date: string,
+  market: Market,
+  opens: readonly [number, number],
+  closes: readonly [number, number],
+): FakeCalendarSession {
+  const zone = MARKET_TIME_ZONE[market];
+  return {
+    startTime: kst(marketInstant(date, zone, opens[0], opens[1])),
+    endTime: kst(marketInstant(date, zone, closes[0], closes[1])),
+  };
+}
+
+/**
+ * The regular session a market runs on an unseeded weekday, defined in the
+ * market's *own* clock (Seoul 09:00–15:30, New York 09:30–16:00) and rendered
+ * in KST at that date's real offset. Hard-coding the KST window instead would
+ * pin the US session to daylight time and put January's 08:45 EST inside the
+ * regular session. Weekends are closed.
+ */
+const DEFAULT_REGULAR_SESSION: Readonly<
+  Record<Market, (date: string) => FakeCalendarSession>
+> = {
+  KR: (date) => localSession(date, 'KR', [9, 0], [15, 30]),
+  US: (date) => localSession(date, 'US', [9, 30], [16, 0]),
+};
+
+/**
+ * One `KrMarketDay`. Only `regularMarket` follows the seed: the pre/after
+ * markets keep the contract's canonical windows so a decoder that reads the
+ * wrong session gets a visibly wrong answer rather than a plausible one.
+ */
+function krMarketDay(
+  date: string,
+  regular: FakeCalendarSession | null,
+): object {
+  if (regular === null) return { date, integrated: null };
+  return {
+    date,
+    integrated: {
+      preMarket: {
+        startTime: `${date}T08:00:00+09:00`,
+        singlePriceAuctionStartTime: `${date}T08:50:00+09:00`,
+        endTime: `${date}T09:00:00+09:00`,
+      },
+      regularMarket: {
+        startTime: regular.startTime,
+        singlePriceAuctionStartTime: `${date}T15:20:00+09:00`,
+        endTime: regular.endTime,
+      },
+      afterMarket: {
+        startTime: `${date}T15:30:00+09:00`,
+        singlePriceAuctionEndTime: `${date}T15:40:00+09:00`,
+        endTime: `${date}T20:00:00+09:00`,
+      },
+    },
+  };
+}
+
+/**
+ * One `UsMarketDay`; a holiday is all four sessions null. Pre- and after-market
+ * follow New York's clock like the regular session does; `dayMarket` is Toss's
+ * own Korean-daytime session and stays anchored to the KST date.
+ */
+function usMarketDay(
+  date: string,
+  regular: FakeCalendarSession | null,
+): object {
+  if (regular === null)
+    return {
+      date,
+      dayMarket: null,
+      preMarket: null,
+      regularMarket: null,
+      afterMarket: null,
+    };
+  return {
+    date,
+    dayMarket: {
+      startTime: `${date}T09:00:00+09:00`,
+      endTime: `${date}T16:50:00+09:00`,
+    },
+    preMarket: localSession(date, 'US', [4, 0], [9, 30]),
+    regularMarket: { startTime: regular.startTime, endTime: regular.endTime },
+    afterMarket: localSession(date, 'US', [16, 0], [18, 0]),
+  };
+}
 
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -73,6 +239,7 @@ export class FakeTossRestServer {
     string,
     { market: Market; symbol: string; name: string }
   >();
+  readonly #calendar = new Map<string, FakeCalendarSession | null>();
   readonly #failNext = new Map<string, { status: number; remaining: number }>();
   readonly #requests: FakeRestRequestRecord[] = [];
   #tokenTtlSeconds = DEFAULT_TOKEN_TTL_SECONDS;
@@ -141,6 +308,18 @@ export class FakeTossRestServer {
   }
   seedInstrument(market: Market, symbol: string, name: string): void {
     this.#instruments.set(`${market}:${symbol}`, { market, symbol, name });
+  }
+  /**
+   * Overrides one calendar day. `null` closes the market's regular session that
+   * day; an unseeded day runs the canonical session on a weekday and is closed
+   * on a weekend.
+   */
+  seedCalendarDay(
+    market: Market,
+    date: string,
+    regularMarket: FakeCalendarSession | null,
+  ): void {
+    this.#calendar.set(`${market}:${date}`, regularMarket);
   }
   requests(): readonly FakeRestRequestRecord[] {
     return [...this.#requests];
@@ -306,8 +485,64 @@ export class FakeTossRestServer {
       });
       return;
     }
+    if (url.pathname.startsWith('/api/v1/market-calendar/')) {
+      this.#calendarDay(url, response, record);
+      return;
+    }
     record(200);
     json(response, 200, { success: true, result: [] });
+  }
+
+  /**
+   * `GET /api/v1/market-calendar/{KR,US}` in the contract's shape: `today` plus
+   * the neighbouring business days. Without this the path fell through to the
+   * empty catch-all envelope, which a decoder could only read as a holiday
+   * (#122).
+   */
+  #calendarDay(
+    url: URL,
+    response: ServerResponse,
+    record: (status: number) => void,
+  ): void {
+    const market = url.pathname.slice(
+      '/api/v1/market-calendar/'.length,
+    ) as Market;
+    const requested = url.searchParams.get('date');
+    // A real calendar date, round-tripped: `Date.parse` alone rolls 2026-02-31
+    // over into March and would answer 200 for a day that does not exist.
+    if (requested === null || !isCalendarDate(requested)) {
+      record(400);
+      json(response, 400, {
+        error: {
+          requestId: 'fake',
+          code: 'unsupported-date',
+          message: '요청한 조회 일자를 지원하지 않습니다.',
+          data: { field: 'date' },
+        },
+      });
+      return;
+    }
+    const date = requested;
+    const day = (on: string): object => {
+      const key = `${market}:${on}`;
+      const session = this.#calendar.has(key)
+        ? (this.#calendar.get(key) ?? null)
+        : isWeekend(on)
+          ? null
+          : DEFAULT_REGULAR_SESSION[market](on);
+      return market === 'KR'
+        ? krMarketDay(on, session)
+        : usMarketDay(on, session);
+    };
+    record(200);
+    json(response, 200, {
+      success: true,
+      result: {
+        today: day(date),
+        previousBusinessDay: day(nearestWeekday(date, -1)),
+        nextBusinessDay: day(nearestWeekday(date, 1)),
+      },
+    });
   }
 
   async #token(

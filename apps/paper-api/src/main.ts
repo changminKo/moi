@@ -19,19 +19,22 @@ export async function startProductionServer(
   options: StartOptions = {},
 ): Promise<ProductionRuntime> {
   const config = loadConfig(environment);
-  const bundle = createProviderBundle(config);
+  // One redacting log for both halves: the adapter reports decode events of its
+  // own, and every field passes through `safeAuditLog` before it is printed.
+  const log = (event: string, fields: Record<string, unknown>): void =>
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        event,
+        ...safeAuditLog(fields),
+        at: new Date().toISOString(),
+      }),
+    );
+  const bundle = createProviderBundle(config, { log });
   const runtime = new ProductionRuntime({
     config,
     bundle,
-    log: (event, fields) =>
-      console.log(
-        JSON.stringify({
-          level: 'info',
-          event,
-          ...safeAuditLog(fields),
-          at: new Date().toISOString(),
-        }),
-      ),
+    log,
     ...(options.signals !== undefined ? { signals: options.signals } : {}),
   });
   await runtime.start();
