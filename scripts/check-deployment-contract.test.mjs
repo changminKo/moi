@@ -36,6 +36,11 @@ const TRACKED = [
   'packages/market-data/src/toss',
   'apps/paper-api/src/config.ts',
   'apps/paper-api/src/config.test.ts',
+  // #46: the previous-release schema gate is a package script, a vitest
+  // config, the host suite, and the runner the previous image executes.
+  'apps/paper-api/vitest.config.ts',
+  'apps/paper-api/vitest.schema-compat.config.ts',
+  'apps/paper-api/schema-compat',
   // The workspace-dependency coverage check walks the app manifests.
   'apps/paper-api/package.json',
   'apps/web/package.json',
@@ -855,6 +860,161 @@ describe('check-deployment-contract (A8)', () => {
       assert.match(
         result.stderr,
         /deploy-lib\.sh must read the revision label publish\.yml writes/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * #46: the schema-compatibility job proves the exact previous release still
+   * writes through the migrated schema. Each case is one way the job could
+   * quietly stop proving that — a mutable previous identity, a skipped
+   * validation, a build that does not load the image, or a different suite.
+   */
+  const ALL_ZERO_SHA = '0000000000000000000000000000000000000000';
+  const schemaCompatCases = [
+    [
+      'the schema-compatibility job is removed',
+      (text) => text.replace(/\n {2}schema-compatibility:\n[\s\S]*$/u, '\n'),
+      /ci\.yml must define the schema-compatibility job/u,
+    ],
+    [
+      'the job no longer waits for verify',
+      (text) =>
+        text.replace(
+          /(\n {2}schema-compatibility:\n(?: {4}[^\n]*\n)*?) {4}needs: verify\n/u,
+          '$1',
+        ),
+      /schema-compatibility must run after verify/u,
+    ],
+    [
+      'the pull-request previous ref is not the base SHA',
+      (text) =>
+        text.replace(
+          `\${{ github.event.pull_request.base.sha }}`,
+          `\${{ github.sha }}`,
+        ),
+      /must resolve the pull-request previous ref from github\.event\.pull_request\.base\.sha/u,
+    ],
+    [
+      'the push previous ref is not the event before SHA',
+      (text) =>
+        text.replace(`\${{ github.event.before }}`, `\${{ github.sha }}`),
+      /must resolve the push previous ref from github\.event\.before/u,
+    ],
+    [
+      'the previous ref is no longer validated as a full SHA',
+      // A function replacement: in a replacement *string* `$'` means "the
+      // text after the match" and would splice the rest of the workflow in.
+      (text) => text.replace("'^[0-9a-f]{40}$'", () => "'^[0-9a-f]+$'"),
+      /must validate the previous ref as a 40-character hexadecimal SHA/u,
+    ],
+    [
+      'an all-zero previous ref is accepted',
+      (text) => text.replace(`"${ALL_ZERO_SHA}"`, '""'),
+      /must reject an all-zero previous ref/u,
+    ],
+    [
+      'the previous checkout uses a mutable ref',
+      (text) =>
+        text.replace(`ref: \${{ steps.previous.outputs.sha }}`, 'ref: main'),
+      /must check out the resolved previous SHA/u,
+    ],
+    [
+      'the previous checkout lands in the current tree',
+      (text) => text.replace(/\n\s*path: \.schema-compat\/previous\n/u, '\n'),
+      /must check out the previous release under \.schema-compat\/previous/u,
+    ],
+    [
+      'the previous image is built from the current checkout',
+      (text) => text.replace('context: .schema-compat/previous', 'context: .'),
+      /must build the previous image from \.schema-compat\/previous/u,
+    ],
+    [
+      'the previous image is built from the current Dockerfile',
+      (text) =>
+        text.replace(
+          'file: .schema-compat/previous/apps/paper-api/Dockerfile',
+          'file: apps/paper-api/Dockerfile',
+        ),
+      /must build the previous image with \.schema-compat\/previous\/apps\/paper-api\/Dockerfile/u,
+    ],
+    [
+      'the previous image is not loaded into the local daemon',
+      (text) => text.replace(/\n\s*load: true\n/u, '\n'),
+      /must load the previous image into the local Docker daemon/u,
+    ],
+    [
+      'the previous image is tagged differently from what the suite expects',
+      (text) =>
+        text.replace(
+          'tags: moi-paper-api-schema-compat:previous',
+          'tags: moi-paper-api-schema-compat:latest',
+        ),
+      /must tag the previous image moi-paper-api-schema-compat:previous/u,
+    ],
+    [
+      'the job runs a different suite',
+      (text) =>
+        text.replace(
+          'pnpm --filter @moi/paper-api test:schema-compat',
+          'pnpm --filter @moi/paper-api test',
+        ),
+      /must run "pnpm --filter @moi\/paper-api test:schema-compat"/u,
+    ],
+  ];
+  for (const [name, mutate, message] of schemaCompatCases)
+    it(`fails when ${name}`, () => {
+      const dir = copyRepo((d) => {
+        const file = join(d, '.github/workflows/ci.yml');
+        const before = readFileSync(file, 'utf8');
+        const after = mutate(before);
+        assert.notEqual(after, before, 'the mutation must land');
+        writeFileSync(file, after);
+      });
+      try {
+        const result = run(dir);
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  it('fails when the schema-compat package script changes', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/paper-api/package.json');
+      const manifest = JSON.parse(readFileSync(file, 'utf8'));
+      manifest.scripts['test:schema-compat'] = 'vitest run schema-compat';
+      writeFileSync(file, JSON.stringify(manifest, null, 2));
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(
+        result.stderr,
+        /test:schema-compat must be "vitest run --config vitest\.schema-compat\.config\.ts"/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('fails when the ordinary test script would sweep the schema-compat suite in', () => {
+    // vitest's default include is every *.test.ts under the package, so the
+    // `--dir src` boundary is what keeps the Docker-heavy cross-version suite
+    // out of `pnpm test`.
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/paper-api/package.json');
+      const manifest = JSON.parse(readFileSync(file, 'utf8'));
+      manifest.scripts.test = 'vitest run --passWithNoTests';
+      writeFileSync(file, JSON.stringify(manifest, null, 2));
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(
+        result.stderr,
+        /paper-api test script must stay scoped to --dir src/u,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -51,6 +51,23 @@ handoff therefore remains unchecked below.
   with identical ledger/audit counts and zero checked invariant violations.
 - [x] The previous read surface and a pre-backup anonymous-session cookie read
   the forward-compatible restored schema without rolling migrations back.
+- [x] **The exact previous `paper-api` image writes through the current
+  schema** (#46). Gate: CI job `schema-compatibility` (`needs: verify`) builds
+  the event's previous commit (`pull_request.base.sha` / push `before`,
+  validated as a full non-zero SHA) as `moi-paper-api-schema-compat:previous`
+  and runs `pnpm --filter @moi/paper-api test:schema-compat`. Required
+  evidence per release: the positive half green — the previous container
+  exits 0 after printing `SCHEMA_COMPAT_WRITE_OK` for anonymous session →
+  KR `005930` `MARKET` `BUY` → `FILLED` on a database migrated by the current
+  source — **and** the negative half green — the same run against
+  `fills.schema_compat_probe text NOT NULL` exits nonzero with
+  `null value in column "schema_compat_probe" of relation "fills" violates
+  not-null constraint` in its output. Local evidence 2026-09-04 against the
+  image built from `6eb2eae`: positive 3.05 s with the marker printed;
+  negative 2.68 s, previous API answered the placement with HTTP 500 and the
+  container exited 1 (`engine.fill_rejected` names the probe column). A
+  release whose CI run lacks either half is not ready, whatever the test file
+  says.
 - [x] Reference-host deploys are mutually exclusive before fetch. Evidence:
   `infra/oracle/status-check.test.mjs` holds one real deploy-lib process open,
   proves a second invocation exits 75 without running its body, and proves the

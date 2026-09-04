@@ -30,8 +30,15 @@ acceptance criteria. Behaviour changes still follow TDD, the gates in
   across `exec` and guard against a second re-exec.
 - [x] **#83 P0 — verify image provenance.** Publish OCI revision labels and
   refuse an image whose revision differs from the requested checkout SHA.
-- [ ] **#46 P0 for schema releases — test old-image/new-schema compatibility.**
-  Replace the current documentary claim with an actual gate.
+- [x] **#46 P0 for schema releases — test old-image/new-schema compatibility.**
+  Replace the current documentary claim with an actual gate. Done: CI job
+  `schema-compatibility` builds the event's exact previous commit and runs
+  `apps/paper-api/schema-compat` — current migrations on a fresh database,
+  the previous image's compiled runtime performing anonymous session → KR
+  market buy → persisted fill with the fake provider, plus a self-test that
+  an incompatible `NOT NULL` `fills` column makes that run fail. The
+  deployment-contract checker pins the job's previous-ref resolution,
+  checkout path, build context/Dockerfile/tag/load, and package script.
 - [ ] **#25 P1 — production-origin browser smoke.** Exercise the deployed web
   origin, runtime API origin, session bootstrap, and browser errors.
 
@@ -138,3 +145,4 @@ The order above is strict. PR #97 currently computes realised PnL from
 | 2026-09-02 | #44 | Complete locally | TDD RED→GREEN; `pnpm check`, `pnpm check:deployment`, and `pnpm test:deployment` (55/55) |
 | 2026-09-02 | #28 | Complete locally | TDD RED→GREEN; fresh-script exec, inherited-mutex, forged-guard, and contract-mutation coverage; deployment tests 58/58 |
 | 2026-09-02 | #83 | Complete locally | TDD RED→GREEN; publish-label and deploy-wiring mutation coverage; matching, mismatched, missing, and wrong-cardinality revision tests; deployment tests 64/64 |
+| 2026-09-04 | #46 | Complete locally | TDD RED→GREEN; schema-compat suite RED without `SCHEMA_COMPAT_PREVIOUS_IMAGE` (no Docker started) → GREEN 3/3 against the image built from `6eb2eae` (positive `SCHEMA_COMPAT_WRITE_OK`; negative exit 1 naming `schema_compat_probe`); 15 new CI/checker mutation cases RED (56/71) → GREEN (71/71) |

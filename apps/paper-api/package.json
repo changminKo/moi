@@ -7,7 +7,8 @@
     "build": "tsc --build && node --eval \"fs.rmSync('dist/db/migrations', { recursive: true, force: true }); fs.cpSync('src/db/migrations', 'dist/db/migrations', { recursive: true })\"",
     "test": "vitest run --passWithNoTests --dir src",
     "typecheck": "tsc --build --pretty false",
-    "test:drill": "vitest run --config vitest.drill.config.ts"
+    "test:drill": "vitest run --config vitest.drill.config.ts",
+    "test:schema-compat": "vitest run --config vitest.schema-compat.config.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.3.0",
