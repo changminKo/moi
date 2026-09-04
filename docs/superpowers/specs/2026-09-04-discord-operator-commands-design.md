@@ -131,11 +131,13 @@ Discord Gateway (wss) ──INTERACTION_CREATE──▶ packages/discord-gateway
 disengage(by: { readonly by: string; readonly reason: string }): Promise<'released' | 'not-engaged'>
 ```
 
-- 순서: 파일 래치 삭제(`JsonCell.remove`, 없으면 통과) → 메모리 `#engagement`
-  해제 → `warn` 보고(`kill-switch.released`, source 였던 것·by·reason). 파일을
-  먼저 지우는 이유: 메모리를 먼저 풀고 파일 삭제가 실패하면 "도는 봇 + 재시작
-  시 다시 걸리는 파일" 이라는 반쪽 상태가 되고, 그 반대는 "파일 없는데 배리어
-  닫힘" 으로 다음 `disengage` 나 재시작이 풀 수 있다.
+- 순서: 파일 래치 삭제(`JsonCell.remove` — **신규**, `ENOENT` 는 성공, 그 밖은
+  던진다) → 메모리 `#engagement` 해제 → `warn` 보고(`kill-switch.released`,
+  source 였던 것·by·reason). 파일을 먼저 지우는 이유: 메모리를 먼저 풀고 파일
+  삭제가 실패하면 "도는 봇 + 재시작 시 다시 걸리는 파일" 이라는 반쪽 상태가
+  되고, 그 반대는 "파일 없는데 배리어 닫힘" 으로 다음 `disengage` 나 재시작이
+  풀 수 있다. 삭제가 던지면 반환값을 늘리지 않고 `error` 한 줄(오류 코드만)을
+  낸 뒤 그 오류를 그대로 던진다 — 래치는 메모리·디스크 양쪽에 남는다.
 - **자동 트립도 푼다**(사용자 결정 4). 단 `loss-limit` 은 `RiskGate.
   lossLimitBreach(now)` 가 같은 UTC 일에 계속 참이므로 **다음 cycle 에 즉시
   재걸린다** — 이것이 의도한 안전장치고 응답에 그대로 적는다("일 손실 한도가
@@ -155,10 +157,23 @@ disengage(by: { readonly by: string; readonly reason: string }): Promise<'releas
   reason } }`. 원자적 교체 쓰기(킬 스위치 래치와 같은 셀).
 - `OrderGateway.submit` 앞의 배리어 질문에 전략 이름이 들어간다: `permits(kind,
   strategyName)` 은 킬 스위치 **그리고** 해당 전략 pause 둘 다 통과해야 `place`
-  를 허용한다. `cancel` 은 항상 허용(킬 스위치와 대칭).
-- pause 된 전략은 틱을 **받는다**(지표 상태를 잃지 않기 위해) — 결정만 halted 로
-  정산되고 기록된다(`decision.outcome = 'paused'`). 잔여 주문은 건드리지 않는다.
-- 재시작 시 파일을 읽어 그대로 복원하고 `info` 로 한 번 보고한다.
+  를 허용한다. `cancel` 은 항상 허용(킬 스위치와 대칭). 게이트웨이가 어느 쪽에
+  막혔는지 알아야 정산 결과가 갈리므로 판정은 `BarrierVerdict = boolean |
+  'paused'` — `false` 는 킬 스위치(`KILL_SWITCH`), `'paused'` 는 전략 정지
+  (`STRATEGY_PAUSED`). 기존 `(kind) => boolean` 콜백은 그대로 대입 가능하다.
+  전략 이름은 이미 `DecisionRecord.strategy`(= `ConfiguredStrategy.name`,
+  설정이 중복을 거부)로 흐르므로 새 키는 없다.
+- pause 된 전략은 틱을 **받는다**(지표 상태를 잃지 않기 위해) — 결정만
+  `SubmissionOutcome = 'paused'` 로 정산되고 기록된다. `paused` 는 `halted` 와
+  같이 "내보내지 않은" 결정이므로 일일 진입 예산(`dailyEntryNotional` 의
+  `neverSent` 규칙)에서 제외한다 — 그렇지 않으면 다시 켠 전략이 쓰지도 않은
+  예산에 막힌다. 잔여 주문은 건드리지 않는다.
+- 재시작 시 생성자가 파일을 읽어 복원하고, 알림은 `start()` 가 부르는
+  `announceRestored()` 가 `info` 로 한 번 낸다(킬 스위치와 같은 규칙: 생성은
+  읽기만, 쓰기·보고는 시작 시). 파일이 읽히지 않으면 **통째로 버리고 `warn` 한
+  줄** — 이 셀만 fail closed 가 아닌 이유: 깨진 정지 파일로 기동을 거부하면
+  `restart: unless-stopped` 아래서 채팅으로 고칠 길이 없고, 최악의 결과는
+  "정지가 풀린 전략" 인데 전체 킬 스위치가 그 위에 그대로 있다.
 
 ### 2.5 설정과 시크릿
 
