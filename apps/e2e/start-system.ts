@@ -46,16 +46,9 @@ import { PaperEngine } from '../paper-api/src/engine/paper-engine.js';
 import type { LeaderLease } from '../paper-api/src/market-data/leader-lease.js';
 import { MarketStateStore } from '../paper-api/src/market-data/market-state-store.js';
 import { RecoveryCoordinator } from '../paper-api/src/market-data/recovery-coordinator.js';
-import { registerFxRoutes } from '../paper-api/src/modules/fx/fx-routes.js';
 import { FxService } from '../paper-api/src/modules/fx/fx-service.js';
-import { registerHealthRoutes } from '../paper-api/src/modules/health/health-routes.js';
-import { registerInstrumentRoutes } from '../paper-api/src/modules/instruments/instrument-routes.js';
-import { InstrumentService } from '../paper-api/src/modules/instruments/instrument-service.js';
 import { OrderPlacementService } from '../paper-api/src/modules/orders/order-placement-service.js';
-import { registerOrderRoutes } from '../paper-api/src/modules/orders/order-routes.js';
 import { OrderService } from '../paper-api/src/modules/orders/order-service.js';
-import { registerPortfolioRoutes } from '../paper-api/src/modules/portfolio/portfolio-routes.js';
-import { registerSessionRoutes } from '../paper-api/src/modules/session/session-routes.js';
 import {
   createUnitOfWorkSessionStore,
   type SessionPrincipal,
@@ -77,13 +70,21 @@ import {
   createStreamUpgradeHandler,
   type StreamUpgradeHandler,
 } from '../paper-api/src/modules/stream/stream-upgrade.js';
-import { requireCsrf } from '../paper-api/src/plugins/csrf.js';
 import { LayeredRateLimiter } from '../paper-api/src/plugins/rate-limits.js';
 import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
 import { feeModelFor } from '../paper-api/src/runtime/fee-schedule.js';
 import { createFillPersistence } from '../paper-api/src/runtime/fill-persistence.js';
 import { createOrderCancellation } from '../paper-api/src/runtime/order-cancellation.js';
 import { createTriggerPersistence } from '../paper-api/src/runtime/trigger-persistence.js';
+import { harnessRoutes } from './harness/paper-api-routes.js';
+import {
+  assertPortFree,
+  listen,
+  runPnpm,
+  settle,
+  stopChild,
+  waitForWeb,
+} from './harness/processes.js';
 import { stateFilePath } from './state-file.js';
 
 const API_PORT = 3100;
@@ -677,88 +678,6 @@ async function controlApi(
   json(response, 404, { error: 'control not found' });
 }
 
-async function listen(server: Server, port: number): Promise<void> {
-  await new Promise<void>((resolveListen, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolveListen();
-    });
-  });
-}
-
-async function assertPortFree(port: number): Promise<void> {
-  const probe = createServer();
-  await listen(probe, port);
-  await new Promise<void>((resolveClose, reject) =>
-    probe.close((error) => (error ? reject(error) : resolveClose())),
-  );
-}
-
-async function runPnpm(args: readonly string[]): Promise<void> {
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn('pnpm', [...args], {
-      cwd: workspaceRoot,
-      env: {
-        ...process.env,
-        VITE_MOI_ALLOW_LOCAL_HTTP: 'true',
-      },
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code) =>
-      code === 0
-        ? resolveRun()
-        : reject(new Error(`pnpm ${args.join(' ')} exited ${code}`)),
-    );
-  });
-}
-
-async function waitForWeb(origin: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(origin);
-      if (response.ok) return;
-    } catch {
-      // The condition is polled until the bounded readiness deadline.
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  throw new Error(`web server at ${origin} did not become ready`);
-}
-
-async function stopChild(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolveExit) =>
-    child.once('exit', () => resolveExit()),
-  );
-  child.kill('SIGTERM');
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const graceful = await Promise.race([
-    exited.then(() => true),
-    new Promise<false>((resolveTimeout) => {
-      timeout = setTimeout(() => resolveTimeout(false), 5_000);
-    }),
-  ]);
-  if (timeout) clearTimeout(timeout);
-  if (!graceful) {
-    child.kill('SIGKILL');
-    await exited;
-  }
-}
-
-async function settle(
-  work: (() => Promise<unknown>) | undefined,
-): Promise<void> {
-  if (!work) return;
-  try {
-    await work();
-  } catch (error) {
-    console.error('E2E teardown step failed', error);
-  }
-}
-
 function cleanup(): Promise<void> {
   cleanupPromise ??= (async () => {
     await settle(
@@ -1019,122 +938,41 @@ async function main(): Promise<void> {
   // Both deployment shapes are the same system — one database, one engine
   // set, one control server — and differ only in the origin the browser
   // sits on. The API bakes that origin into `publicOrigin` (CORS, the
-  // `Origin` fence in `buildApp`, the CSRF hook below and the WebSocket
-  // upgrade all compare against it), so each shape gets its own listener
-  // over the shared services.
+  // `Origin` fence in `buildApp`, the CSRF rule and the WebSocket upgrade
+  // all compare against it), so each shape gets its own listener over the
+  // shared services. The routes themselves live in
+  // `harness/paper-api-routes.ts`.
+  const registerRoutesFor = harnessRoutes({
+    pool,
+    sessionService,
+    unitOfWork,
+    orderService,
+    fxService,
+    principal,
+    mode: () => mode,
+    marketVersion: () => marketVersion,
+    books,
+    health,
+    snapshots: {
+      enter: async () => {
+        snapshotRequestCount += 1;
+        snapshotInFlight += 1;
+        snapshotMaxConcurrency = Math.max(
+          snapshotMaxConcurrency,
+          snapshotInFlight,
+        );
+        await snapshotBarrier;
+      },
+      leave: () => {
+        snapshotInFlight -= 1;
+        snapshotCompletedCount += 1;
+      },
+    },
+  });
   const buildPaperApi = (instanceConfig: AppConfig) =>
     buildApp(instanceConfig, {
       clock: { now: () => Date.now() },
-      registerRoutes: async (app) => {
-        app.addHook('preHandler', async (request) => {
-          if (
-            request.method === 'GET' &&
-            request.url.startsWith('/api/v1/portfolio')
-          ) {
-            snapshotRequestCount += 1;
-            snapshotInFlight += 1;
-            snapshotMaxConcurrency = Math.max(
-              snapshotMaxConcurrency,
-              snapshotInFlight,
-            );
-            await snapshotBarrier;
-          }
-          if (
-            request.method === 'POST' &&
-            request.url.startsWith('/api/v1/sessions/anonymous')
-          )
-            return;
-          if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
-            return;
-          // The production CSRF rule itself, not a copy of its condition
-          // (Codex review of #25): each listener passes its own origin and
-          // secret, so the cross-origin listener rejects the single-origin
-          // page's requests the way production would.
-          requireCsrf(request, await principal(request), {
-            secret: instanceConfig.csrfSecret,
-            origin: instanceConfig.publicOrigin,
-          });
-        });
-        app.addHook('onResponse', async (request) => {
-          if (
-            request.method === 'GET' &&
-            request.url.startsWith('/api/v1/portfolio')
-          ) {
-            snapshotInFlight -= 1;
-            snapshotCompletedCount += 1;
-          }
-        });
-        await registerSessionRoutes(app, sessionService as SessionService);
-        await registerHealthRoutes(app, {
-          db: async () => {
-            await pool.query('select 1');
-            return true;
-          },
-          audit: () => true,
-          marketData: () => ({ mode }),
-          trading: () => health(),
-        });
-        await registerInstrumentRoutes(
-          app,
-          new InstrumentService({
-            catalog: [
-              {
-                market: 'KR',
-                symbol: '005930',
-                name: 'Samsung Electronics',
-                tradable: true,
-                currency: 'KRW',
-              },
-              {
-                market: 'US',
-                symbol: 'AAPL',
-                name: 'Apple',
-                tradable: true,
-                currency: 'USD',
-              },
-            ],
-          }),
-          // Mirrors `ProductionRuntime.#quote` field for field, including the
-          // book: a harness that answers in a shape production never serves
-          // cannot catch a wire/type mismatch, and this one used to answer
-          // `bids`/`asks` spelled `size` — the web's spelling, not the wire's —
-          // which is precisely why e2e stayed green through the crash.
-          (market, symbol) => {
-            const current = books.get(`${market}:${symbol}`) ?? {
-              bids: [
-                { price: market === 'KR' ? '69900' : '199', volume: '10' },
-              ],
-              asks: [
-                { price: market === 'KR' ? '70000' : '200', volume: '10' },
-              ],
-            };
-            return {
-              market,
-              symbol,
-              price: current.asks[0]?.price ?? null,
-              asOf: new Date().toISOString(),
-              health: mode === 'NORMAL' ? 'HEALTHY' : mode,
-              recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
-              marketDataVersion: marketVersion.toString(),
-              currency: market === 'KR' ? 'KRW' : 'USD',
-              bids: current.bids,
-              asks: current.asks,
-            };
-          },
-        );
-        await registerPortfolioRoutes(app, {
-          principal,
-          unitOfWork: unitOfWork as UnitOfWork,
-        });
-        await registerFxRoutes(app, fxService, {
-          principal,
-          canFx: () => mode !== 'CANCEL_ONLY',
-        });
-        await registerOrderRoutes(app, {
-          principal,
-          service: orderService,
-        });
-      },
+      registerRoutes: registerRoutesFor(instanceConfig),
     });
   apiApp = await buildPaperApi(config);
   crossApiApp = await buildPaperApi(crossConfig);
@@ -1200,7 +1038,7 @@ async function main(): Promise<void> {
     }),
     { mode: 0o600 },
   );
-  await runPnpm(['--filter', '@moi/web', 'build']);
+  await runPnpm(workspaceRoot, ['--filter', '@moi/web', 'build']);
   // The cross-origin server is started and awaited *before* the vite preview,
   // deliberately. Playwright's `webServer` polls exactly one URL, and it polls
   // WEB_PORT; bringing CROSS_WEB_PORT up first makes "WEB_PORT answers" mean

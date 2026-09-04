@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsx --test smoke/smoke-contract.test.ts playwright.config.test.ts",
+    "test": "tsx --test '**/*.test.ts'",
     "test:e2e": "playwright test",
     "test:smoke": "playwright test --config playwright.smoke.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
