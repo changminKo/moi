@@ -123,6 +123,31 @@ describe('requireSmokeWebOrigin', () => {
     );
   });
 
+  // The smoke drives a real deployment and carries a live session cookie, so
+  // plain HTTP off the loopback would put it on the wire. `server.mjs` draws
+  // the same line for PUBLIC_API_ORIGIN.
+  it('refuses plain HTTP for anything but a loopback host', () => {
+    assert.throws(
+      () => requireSmokeWebOrigin('http://moi.example'),
+      /must use HTTPS outside loopback/,
+    );
+    assert.throws(
+      () => requireSmokeWebOrigin('http://10.0.0.4:8080'),
+      /must use HTTPS outside loopback/,
+    );
+  });
+
+  it('allows plain HTTP on a loopback host, which is how it is rehearsed', () => {
+    assert.equal(
+      requireSmokeWebOrigin('http://127.0.0.1:4174'),
+      'http://127.0.0.1:4174',
+    );
+    assert.equal(
+      requireSmokeWebOrigin('http://localhost:4174'),
+      'http://localhost:4174',
+    );
+  });
+
   it('refuses anything that is not a bare http(s) origin', () => {
     assert.throws(() => requireSmokeWebOrigin('moi.example'), /absolute URL/);
     assert.throws(

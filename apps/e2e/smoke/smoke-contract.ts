@@ -64,6 +64,10 @@ export function requireSmokeWebOrigin(value: string | undefined): string {
   return assertBareOrigin(value, 'SMOKE_WEB_ORIGIN');
 }
 
+// Loopback spellings, as `apps/web/server.mjs` lists them for
+// PUBLIC_API_ORIGIN. `URL` renders an IPv6 host bracketed.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
 function assertBareOrigin(value: string, label: string): string {
   let url: URL;
   try {
@@ -73,6 +77,14 @@ function assertBareOrigin(value: string, label: string): string {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:')
     throw new Error(`${label} must use http or https, got ${value}`);
+  // The smoke drives a real deployment and its trace carries a live session
+  // cookie; plain HTTP off the loopback would put that on the wire. Loopback
+  // stays allowed because that is how the smoke is rehearsed against the e2e
+  // harness. Same line `server.mjs` draws for PUBLIC_API_ORIGIN.
+  if (url.protocol === 'http:' && !LOOPBACK_HOSTS.has(url.hostname))
+    throw new Error(
+      `${label} must use HTTPS outside loopback hosts, got ${value}`,
+    );
   if (url.username || url.password)
     throw new Error(`${label} must not include credentials`);
   if (url.pathname !== '/' || url.search || url.hash)

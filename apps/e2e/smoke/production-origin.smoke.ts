@@ -12,8 +12,14 @@ import {
 /**
  * What `deploy.sh` cannot see. Every check it makes talks to the API, and the
  * first Oracle release passed all of them while `/trade` was unusable: the
- * bundle ignored the injected runtime config, called its own origin, got a 405
- * from the static server and showed nothing but the retry button (#25).
+ * bundle posted to the page's own origin, got a 405 from the static server
+ * and showed nothing but the retry button (#25).
+ *
+ * The client was never the fault — it has read `/runtime-config.js` since the
+ * session bootstrap first shipped, and it called the page origin because the
+ * config it was served named it. That is why the guard `deploy.sh` now runs
+ * reads the file, and why this exists as well: only a browser can say the
+ * bundle got as far as a working session.
  *
  * So this opens the deployed page in a real browser and asks the three
  * questions the API could never answer: was the runtime config served with a

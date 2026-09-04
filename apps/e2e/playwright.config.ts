@@ -35,7 +35,9 @@ export default defineConfig({
     // one. Nothing proxies `/api` here, so the session bootstrap, the CSRF
     // `Origin` check, the credentialed fetches and the WebSocket upgrade are
     // all genuinely cross-origin — the paths the single-origin stack and the
-    // vite dev proxy cannot exercise. Two specs rather than the whole suite:
+    // vite dev proxy cannot exercise. Not the cookie: both origins are
+    // `127.0.0.1` on different ports, which is cross-origin but same-site, so
+    // `SameSite=Lax` sends it regardless. Two specs rather than the whole suite:
     // they cover session bootstrap, order placement, streamed fills and the
     // in-page snapshot read, which is every one of those paths, and the suite
     // runs serially so a third copy of the journeys buys little. No retry

@@ -5,9 +5,18 @@ import { RETRY_SESSION } from '../ui-labels.js';
  * Runs only under the `cross-origin-chromium` project, where the page is
  * served by `apps/web/server.mjs` on its own origin and the API listens on
  * another (playwright.config.ts). It is the regression test for #25: a release
- * whose bundle ignored the injected runtime config and called its own origin,
- * which every API-side deploy check passed while the screen showed nothing but
+ * where the served runtime config named the page's own origin, so the bundle
+ * — honouring what it read — posted to the static server and got a 405, while
+ * every API-side deploy check passed and the screen showed nothing but
  * "Retry session".
+ *
+ * What this project does and does not reach. Both origins are `127.0.0.1` on
+ * different ports, so they are cross-*origin* but same-*site*: CORS
+ * preflight, the CSRF `Origin` check, credentialed fetch and the WebSocket
+ * `Origin` check are all genuinely exercised, and the cookie is not — ports
+ * are not part of a site, so `SameSite=Lax` sends it either way. The
+ * cross-site cookie loss that §16.29 describes (two DuckDNS subdomains being
+ * separate sites) cannot be reproduced here, and nothing below claims it.
  *
  * The other specs in this project prove the journeys still work across the
  * boundary. This one proves the boundary is really there — without it a
@@ -41,8 +50,8 @@ test('calls the injected API origin rather than the origin it was served from', 
 
   await page.goto('/trade');
   // The wallet is the session bootstrap having succeeded across the boundary:
-  // a cross-origin POST that fails CORS, the CSRF `Origin` check or the cookie
-  // leaves the retry button instead.
+  // a cross-origin POST that fails CORS or the CSRF `Origin` check leaves the
+  // retry button instead.
   await expect(page.getByText('₩10,000,000').first()).toBeVisible();
   // Spelled in both languages: this is an absence, and the wrong spelling
   // would pass whatever the screen actually said (`ui-labels.ts`).
