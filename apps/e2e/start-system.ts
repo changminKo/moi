@@ -38,8 +38,8 @@ import { registerPortfolioRoutes } from '../paper-api/src/modules/portfolio/port
 import { registerSessionRoutes } from '../paper-api/src/modules/session/session-routes.js';
 import {
   createUnitOfWorkSessionStore,
+  type SessionPrincipal,
   SessionService,
-  verifyCsrfToken,
 } from '../paper-api/src/modules/session/session-service.js';
 import { SESSION_COOKIE } from '../paper-api/src/modules/session/session-token.js';
 import {
@@ -57,6 +57,7 @@ import {
   createStreamUpgradeHandler,
   type StreamUpgradeHandler,
 } from '../paper-api/src/modules/stream/stream-upgrade.js';
+import { requireCsrf } from '../paper-api/src/plugins/csrf.js';
 import { LayeredRateLimiter } from '../paper-api/src/plugins/rate-limits.js';
 import { cookieValue } from '../paper-api/src/plugins/session-auth.js';
 import { feeModelFor } from '../paper-api/src/runtime/fee-schedule.js';
@@ -769,9 +770,7 @@ function cleanup(): Promise<void> {
   return cleanupPromise;
 }
 
-async function principal(
-  request: unknown,
-): Promise<{ id: string; status: string }> {
+async function principal(request: unknown): Promise<SessionPrincipal> {
   if (!sessionService) throw new Error('session service is not initialized');
   const token = cookieValue(request as FastifyRequest, SESSION_COOKIE);
   if (!token)
@@ -1027,17 +1026,14 @@ async function main(): Promise<void> {
             return;
           if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
             return;
-          const authenticated = await principal(request);
-          const csrf = request.headers['x-csrf-token'];
-          if (
-            request.headers.origin !== instanceConfig.publicOrigin ||
-            typeof csrf !== 'string' ||
-            !verifyCsrfToken(instanceConfig.csrfSecret, authenticated.id, csrf)
-          )
-            throw Object.assign(new Error('CSRF validation failed'), {
-              code: 'FORBIDDEN',
-              statusCode: 403,
-            });
+          // The production CSRF rule itself, not a copy of its condition
+          // (Codex review of #25): each listener passes its own origin and
+          // secret, so the cross-origin listener rejects the single-origin
+          // page's requests the way production would.
+          requireCsrf(request, await principal(request), {
+            secret: instanceConfig.csrfSecret,
+            origin: instanceConfig.publicOrigin,
+          });
         });
         app.addHook('onResponse', async (request) => {
           if (
