@@ -388,6 +388,8 @@ client address is `request.ip`, which behind Caddy is the proxy unless the API
 trusts `X-Forwarded-For` — so the Oracle overlay sets `TRUST_PROXY: "true"` on
 `paper-api` (Caddy is the only ingress there; the API publishes no port) and
 the base compose, which exposes the API directly, keeps the default `false`.
+Trust means exactly one hop: the address Caddy appended, never one the client
+wrote first, so a forged header cannot choose its own bucket.
 The deployment-contract checker holds both. The limiter state is in-process:
 one API process, no Redis involvement.
 
