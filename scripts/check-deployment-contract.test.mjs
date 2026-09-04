@@ -811,6 +811,188 @@ describe('check-deployment-contract (A8)', () => {
     }
   });
 
+  // #25: the API-side probes all stay green when the browser app is the thing
+  // that is broken, so removing this one guard must not pass the checker.
+  // An unbounded curl in the verify phase holds the release open on a hung
+  // edge instead of failing the step.
+  it('fails when the runtime config fetch loses its timeout bound', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'curl -fsS --max-time 10 "https://',
+        'curl -fsS "https://',
+      );
+      assert.notEqual(after, before, 'max-time mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /with a --max-time bound/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy stops verifying the browser runtime config', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+        '',
+      );
+      assert.notEqual(after, before, 'runtime-config mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must read https:\/\/\$WEB_DOMAIN\/runtime-config\.js/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Named for exactly what it covers. The checker reads `deploy.sh`'s wiring
+  // and `deploy-lib.sh`'s body as text, so it catches the call being removed,
+  // commented out, `:`-prefixed, or pointed elsewhere. It cannot catch a
+  // guard whose body was neutralised — an early `return 0` leaves every
+  // pinned line in place — and it is not meant to: the deploy-lib tests in
+  // `infra/oracle/status-check.test.mjs` execute the function, and that is
+  // the gate a hollowed-out body dies on. Review lane 2 measured the split:
+  // of five mutations, the shell tests caught 6/6 and the checker alone
+  // missed only the `return 0` body.
+  it('fails when the deploy.sh call to the guard is neutralised by a `:` prefix', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+        `    : verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+      );
+      assert.notEqual(after, before, 'no-op prefix mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must read https:\/\/\$WEB_DOMAIN\/runtime-config\.js/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The guard is only as good as the file it reads: a probe pointed at some
+  // other path would pass the wiring check while proving nothing.
+  it('fails when deploy-lib stops fetching /runtime-config.js', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      // Spelled without the shell placeholder so the needle is a plain
+      // string: the fetched path is what makes the guard mean anything.
+      const after = before.replace('/runtime-config.js"', '/"');
+      assert.notEqual(
+        after,
+        before,
+        'runtime-config fetch mutation matched nothing',
+      );
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must fetch the runtime config the browser itself reads/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Codex review (#25, HIGH): the first guard accepted the API origin as a
+  // substring of the body. The checker pins the parse of the controlled
+  // assignment and the exact comparison, so a regression to either shape of
+  // "contains" fails the build rather than the next release.
+  it('fails when deploy-lib accepts the API origin as a substring again', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        '  if [ "$named_origin" != "$api_origin" ]; then\n',
+        '  if [[ "$body" != *"$api_origin"* ]]; then\n',
+      );
+      assert.notEqual(after, before, 'substring mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must compare the parsed apiOrigin with the API origin for equality/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy-lib parses a shape apps/web/server.mjs does not emit', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `local prefix='window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"'`,
+        `local prefix='window.__MOI_CONFIG__ = Object.freeze({"apiOrigin":"'`,
+      );
+      assert.notEqual(after, before, 'prefix mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must parse the runtime-config assignment apps\/web\/server\.mjs emits/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The other side of the same pin: if the web server changes what it emits,
+  // the deploy guard would reject every release — the checker says so first.
+  it('fails when apps/web/server.mjs stops emitting the assignment deploy-lib parses', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/web/server.mjs');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'window.__MOI_RUNTIME_CONFIG__ = Object.freeze(',
+        'window.__MOI_RUNTIME_CONFIG__ = (',
+      );
+      assert.notEqual(after, before, 'server.mjs mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must parse the runtime-config assignment apps\/web\/server\.mjs emits/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails when deploy stops verifying the running containers', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/deploy.sh');

@@ -1,3 +1,23 @@
+/**
+ * The e2e system under test: PostgreSQL and Redis in Testcontainers, the
+ * paper-api routes over a real ledger, a control server the Playwright
+ * fixtures drive, and the web bundle served in both deployment shapes.
+ *
+ * Every port is fixed, because the Playwright config and the fixtures address
+ * them by number:
+ *
+ *   3100  paper-api, single-origin shape (`publicOrigin` = 4173)
+ *   3101  control server (reset, books, fills, stream counts)
+ *   3102  paper-api, cross-origin shape (`publicOrigin` = 4174)
+ *   4173  web through `vite preview`, which proxies `/api` to 3100
+ *   4174  web through `apps/web/server.mjs`, whose `/runtime-config.js`
+ *         sends the browser to 3102 (#25)
+ *
+ * A collision on any of them fails the run at startup (`assertPortFree`)
+ * rather than midway through a journey: a peer's harness on the same machine
+ * is the usual cause, and every test failing inside ~100 ms with
+ * ERR_CONNECTION_REFUSED is its signature.
+ */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -26,20 +46,13 @@ import { PaperEngine } from '../paper-api/src/engine/paper-engine.js';
 import type { LeaderLease } from '../paper-api/src/market-data/leader-lease.js';
 import { MarketStateStore } from '../paper-api/src/market-data/market-state-store.js';
 import { RecoveryCoordinator } from '../paper-api/src/market-data/recovery-coordinator.js';
-import { registerFxRoutes } from '../paper-api/src/modules/fx/fx-routes.js';
 import { FxService } from '../paper-api/src/modules/fx/fx-service.js';
-import { registerHealthRoutes } from '../paper-api/src/modules/health/health-routes.js';
-import { registerInstrumentRoutes } from '../paper-api/src/modules/instruments/instrument-routes.js';
-import { InstrumentService } from '../paper-api/src/modules/instruments/instrument-service.js';
 import { OrderPlacementService } from '../paper-api/src/modules/orders/order-placement-service.js';
-import { registerOrderRoutes } from '../paper-api/src/modules/orders/order-routes.js';
 import { OrderService } from '../paper-api/src/modules/orders/order-service.js';
-import { registerPortfolioRoutes } from '../paper-api/src/modules/portfolio/portfolio-routes.js';
-import { registerSessionRoutes } from '../paper-api/src/modules/session/session-routes.js';
 import {
   createUnitOfWorkSessionStore,
+  type SessionPrincipal,
   SessionService,
-  verifyCsrfToken,
 } from '../paper-api/src/modules/session/session-service.js';
 import { SESSION_COOKIE } from '../paper-api/src/modules/session/session-token.js';
 import {
@@ -63,14 +76,43 @@ import { feeModelFor } from '../paper-api/src/runtime/fee-schedule.js';
 import { createFillPersistence } from '../paper-api/src/runtime/fill-persistence.js';
 import { createOrderCancellation } from '../paper-api/src/runtime/order-cancellation.js';
 import { createTriggerPersistence } from '../paper-api/src/runtime/trigger-persistence.js';
+import { harnessRoutes } from './harness/paper-api-routes.js';
+import {
+  assertPortFree,
+  listen,
+  runPnpm,
+  settle,
+  stopChild,
+  waitForWeb,
+} from './harness/processes.js';
 import { stateFilePath } from './state-file.js';
 
 const API_PORT = 3100;
 const WEB_PORT = 4173;
 const CONTROL_PORT = 3101;
+// The second deployment shape (#25). Production comes in two:
+//
+//   * the Oracle reference host, where Caddy serves the app and the API from
+//     one hostname and routes by path (spec §16.29) — modelled by the vite
+//     preview proxy on WEB_PORT, which is what every project used to use;
+//   * the base compose, where `apps/web/server.mjs` serves the bundle on its
+//     own origin and injects `PUBLIC_API_ORIGIN` into `/runtime-config.js`,
+//     so the browser talks to the API cross-origin.
+//
+// Only the first was ever exercised, and it is the one that cannot see a
+// wrong API origin: every request goes to the page's own origin either way.
+// These two ports carry the second shape. A different port is a different
+// origin, so the browser really performs CORS preflight, credentialed fetch,
+// the CSRF `Origin` check and the WebSocket `Origin` check. The API's
+// `publicOrigin` is per-instance, so the shape needs its own listener rather
+// than a second web server pointed at the first.
+const CROSS_API_PORT = 3102;
+const CROSS_WEB_PORT = 4174;
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(packageRoot, '../..');
 const publicOrigin = `http://127.0.0.1:${WEB_PORT}`;
+const crossWebOrigin = `http://127.0.0.1:${CROSS_WEB_PORT}`;
+const crossApiOrigin = `http://127.0.0.1:${CROSS_API_PORT}`;
 const controlCredential = randomBytes(32).toString('base64url');
 
 type Market = 'KR' | 'US';
@@ -86,6 +128,7 @@ const streamHub = new StreamHub();
 const streamEvents = new Map<string, DurableAccountEvent[]>();
 const streamSessions = new Set<string>();
 let streamBridge: StreamUpgradeHandler | undefined;
+let crossStreamBridge: StreamUpgradeHandler | undefined;
 let streamHeartbeat: StreamHeartbeatLoop | undefined;
 let mode: Mode = 'NORMAL';
 let snapshotRequestCount = 0;
@@ -98,8 +141,10 @@ let pool: Pool;
 let postgres: StartedTestContainer;
 let redis: StartedTestContainer;
 let apiApp: FastifyInstance;
+let crossApiApp: FastifyInstance | undefined;
 let controlServer: Server;
 let webProcess: ChildProcess | undefined;
+let crossWebProcess: ChildProcess | undefined;
 let database: Database | undefined;
 let unitOfWork: UnitOfWork | undefined;
 let sessionService: SessionService | undefined;
@@ -633,88 +678,6 @@ async function controlApi(
   json(response, 404, { error: 'control not found' });
 }
 
-async function listen(server: Server, port: number): Promise<void> {
-  await new Promise<void>((resolveListen, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolveListen();
-    });
-  });
-}
-
-async function assertPortFree(port: number): Promise<void> {
-  const probe = createServer();
-  await listen(probe, port);
-  await new Promise<void>((resolveClose, reject) =>
-    probe.close((error) => (error ? reject(error) : resolveClose())),
-  );
-}
-
-async function runPnpm(args: readonly string[]): Promise<void> {
-  await new Promise<void>((resolveRun, reject) => {
-    const child = spawn('pnpm', [...args], {
-      cwd: workspaceRoot,
-      env: {
-        ...process.env,
-        VITE_MOI_ALLOW_LOCAL_HTTP: 'true',
-      },
-      stdio: 'inherit',
-    });
-    child.once('error', reject);
-    child.once('exit', (code) =>
-      code === 0
-        ? resolveRun()
-        : reject(new Error(`pnpm ${args.join(' ')} exited ${code}`)),
-    );
-  });
-}
-
-async function waitForWeb(): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(publicOrigin);
-      if (response.ok) return;
-    } catch {
-      // The condition is polled until the bounded readiness deadline.
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  throw new Error('web preview did not become ready');
-}
-
-async function stopChild(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolveExit) =>
-    child.once('exit', () => resolveExit()),
-  );
-  child.kill('SIGTERM');
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const graceful = await Promise.race([
-    exited.then(() => true),
-    new Promise<false>((resolveTimeout) => {
-      timeout = setTimeout(() => resolveTimeout(false), 5_000);
-    }),
-  ]);
-  if (timeout) clearTimeout(timeout);
-  if (!graceful) {
-    child.kill('SIGKILL');
-    await exited;
-  }
-}
-
-async function settle(
-  work: (() => Promise<unknown>) | undefined,
-): Promise<void> {
-  if (!work) return;
-  try {
-    await work();
-  } catch (error) {
-    console.error('E2E teardown step failed', error);
-  }
-}
-
 function cleanup(): Promise<void> {
   cleanupPromise ??= (async () => {
     await settle(
@@ -727,9 +690,13 @@ function cleanup(): Promise<void> {
     );
     streamHeartbeat?.stop();
     streamBridge?.detach();
+    crossStreamBridge?.detach();
     await settle(() => streamHub.closeAll(1012, 'SERVICE_RESTART'));
     await settle(apiApp ? () => apiApp.close() : undefined);
+    const crossApi = crossApiApp;
+    await settle(crossApi ? () => crossApi.close() : undefined);
     await settle(() => stopChild(webProcess));
+    await settle(() => stopChild(crossWebProcess));
     const feed = fakeMarketData;
     const ledger = database;
     await settle(feed ? () => feed.close() : undefined);
@@ -742,9 +709,7 @@ function cleanup(): Promise<void> {
   return cleanupPromise;
 }
 
-async function principal(
-  request: unknown,
-): Promise<{ id: string; status: string }> {
+async function principal(request: unknown): Promise<SessionPrincipal> {
   if (!sessionService) throw new Error('session service is not initialized');
   const token = cookieValue(request as FastifyRequest, SESSION_COOKIE);
   if (!token)
@@ -786,7 +751,11 @@ async function executeCancelOrAmend(command: {
 }
 
 async function main(): Promise<void> {
-  await Promise.all([API_PORT, WEB_PORT, CONTROL_PORT].map(assertPortFree));
+  await Promise.all(
+    [API_PORT, WEB_PORT, CONTROL_PORT, CROSS_API_PORT, CROSS_WEB_PORT].map(
+      assertPortFree,
+    ),
+  );
   postgres = await new GenericContainer('postgres:16-alpine')
     .withEnvironment({
       POSTGRES_USER: 'moi',
@@ -849,6 +818,12 @@ async function main(): Promise<void> {
     rateLimitsEnabled: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
+  };
+  // Same everything, one different port and one different browser origin.
+  const crossConfig: AppConfig = {
+    ...config,
+    port: CROSS_API_PORT,
+    publicOrigin: crossWebOrigin,
   };
   database = createDatabase(config.databaseUrl);
   unitOfWork = new UnitOfWork(database, { backoff: async () => undefined });
@@ -960,119 +935,49 @@ async function main(): Promise<void> {
       await drainOutbox();
     },
   });
-  apiApp = await buildApp(config, {
-    clock: { now: () => Date.now() },
-    registerRoutes: async (app) => {
-      app.addHook('preHandler', async (request) => {
-        if (
-          request.method === 'GET' &&
-          request.url.startsWith('/api/v1/portfolio')
-        ) {
-          snapshotRequestCount += 1;
-          snapshotInFlight += 1;
-          snapshotMaxConcurrency = Math.max(
-            snapshotMaxConcurrency,
-            snapshotInFlight,
-          );
-          await snapshotBarrier;
-        }
-        if (
-          request.method === 'POST' &&
-          request.url.startsWith('/api/v1/sessions/anonymous')
-        )
-          return;
-        if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
-          return;
-        const authenticated = await principal(request);
-        const csrf = request.headers['x-csrf-token'];
-        if (
-          request.headers.origin !== publicOrigin ||
-          typeof csrf !== 'string' ||
-          !verifyCsrfToken(config.csrfSecret, authenticated.id, csrf)
-        )
-          throw Object.assign(new Error('CSRF validation failed'), {
-            code: 'FORBIDDEN',
-            statusCode: 403,
-          });
-      });
-      app.addHook('onResponse', async (request) => {
-        if (
-          request.method === 'GET' &&
-          request.url.startsWith('/api/v1/portfolio')
-        ) {
-          snapshotInFlight -= 1;
-          snapshotCompletedCount += 1;
-        }
-      });
-      await registerSessionRoutes(app, sessionService as SessionService);
-      await registerHealthRoutes(app, {
-        db: async () => {
-          await pool.query('select 1');
-          return true;
-        },
-        audit: () => true,
-        marketData: () => ({ mode }),
-        trading: () => health(),
-      });
-      await registerInstrumentRoutes(
-        app,
-        new InstrumentService({
-          catalog: [
-            {
-              market: 'KR',
-              symbol: '005930',
-              name: 'Samsung Electronics',
-              tradable: true,
-              currency: 'KRW',
-            },
-            {
-              market: 'US',
-              symbol: 'AAPL',
-              name: 'Apple',
-              tradable: true,
-              currency: 'USD',
-            },
-          ],
-        }),
-        // Mirrors `ProductionRuntime.#quote` field for field, including the
-        // book: a harness that answers in a shape production never serves
-        // cannot catch a wire/type mismatch, and this one used to answer
-        // `bids`/`asks` spelled `size` — the web's spelling, not the wire's —
-        // which is precisely why e2e stayed green through the crash.
-        (market, symbol) => {
-          const current = books.get(`${market}:${symbol}`) ?? {
-            bids: [{ price: market === 'KR' ? '69900' : '199', volume: '10' }],
-            asks: [{ price: market === 'KR' ? '70000' : '200', volume: '10' }],
-          };
-          return {
-            market,
-            symbol,
-            price: current.asks[0]?.price ?? null,
-            asOf: new Date().toISOString(),
-            health: mode === 'NORMAL' ? 'HEALTHY' : mode,
-            recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
-            marketDataVersion: marketVersion.toString(),
-            currency: market === 'KR' ? 'KRW' : 'USD',
-            bids: current.bids,
-            asks: current.asks,
-          };
-        },
-      );
-      await registerPortfolioRoutes(app, {
-        principal,
-        unitOfWork: unitOfWork as UnitOfWork,
-      });
-      await registerFxRoutes(app, fxService, {
-        principal,
-        canFx: () => mode !== 'CANCEL_ONLY',
-      });
-      await registerOrderRoutes(app, {
-        principal,
-        service: orderService,
-      });
+  // Both deployment shapes are the same system — one database, one engine
+  // set, one control server — and differ only in the origin the browser
+  // sits on. The API bakes that origin into `publicOrigin` (CORS, the
+  // `Origin` fence in `buildApp`, the CSRF rule and the WebSocket upgrade
+  // all compare against it), so each shape gets its own listener over the
+  // shared services. The routes themselves live in
+  // `harness/paper-api-routes.ts`.
+  const registerRoutesFor = harnessRoutes({
+    pool,
+    sessionService,
+    unitOfWork,
+    orderService,
+    fxService,
+    principal,
+    mode: () => mode,
+    marketVersion: () => marketVersion,
+    books,
+    health,
+    snapshots: {
+      enter: async () => {
+        snapshotRequestCount += 1;
+        snapshotInFlight += 1;
+        snapshotMaxConcurrency = Math.max(
+          snapshotMaxConcurrency,
+          snapshotInFlight,
+        );
+        await snapshotBarrier;
+      },
+      leave: () => {
+        snapshotInFlight -= 1;
+        snapshotCompletedCount += 1;
+      },
     },
   });
+  const buildPaperApi = (instanceConfig: AppConfig) =>
+    buildApp(instanceConfig, {
+      clock: { now: () => Date.now() },
+      registerRoutes: registerRoutesFor(instanceConfig),
+    });
+  apiApp = await buildPaperApi(config);
+  crossApiApp = await buildPaperApi(crossConfig);
   await apiApp.ready();
+  await crossApiApp.ready();
   const streamSessionService = sessionService;
   streamBridge = createStreamUpgradeHandler({
     server: apiApp.server,
@@ -1091,6 +996,26 @@ async function main(): Promise<void> {
     tradableSymbols: new Set(['KR:005930', 'US:AAPL']),
   });
   streamBridge.attach();
+  // The same hub behind the second listener: a browser on the cross-origin
+  // page upgrades against `crossApiOrigin`, and the upgrade handler checks the
+  // `Origin` header against that listener's own public origin.
+  crossStreamBridge = createStreamUpgradeHandler({
+    server: crossApiApp.server,
+    publicOrigin: crossWebOrigin,
+    sessionService: {
+      authenticate: async (token) => {
+        const result = await streamSessionService.authenticate(token);
+        streamSessions.add(result.session.id);
+        return result;
+      },
+    },
+    limiter: new LayeredRateLimiter(),
+    hub: streamHub,
+    gate: { isOpen: () => true },
+    source: streamSource,
+    tradableSymbols: new Set(['KR:005930', 'US:AAPL']),
+  });
+  crossStreamBridge.attach();
   streamHeartbeat = new StreamHeartbeatLoop({ hub: streamHub });
   streamHeartbeat.start();
   controlServer = createServer((request, response) => {
@@ -1102,6 +1027,7 @@ async function main(): Promise<void> {
   });
   await Promise.all([
     apiApp.listen({ host: config.host, port: config.port }),
+    crossApiApp.listen({ host: crossConfig.host, port: crossConfig.port }),
     listen(controlServer, CONTROL_PORT),
   ]);
   await writeFile(
@@ -1112,7 +1038,34 @@ async function main(): Promise<void> {
     }),
     { mode: 0o600 },
   );
-  await runPnpm(['--filter', '@moi/web', 'build']);
+  await runPnpm(workspaceRoot, ['--filter', '@moi/web', 'build']);
+  // The cross-origin server is started and awaited *before* the vite preview,
+  // deliberately. Playwright's `webServer` polls exactly one URL, and it polls
+  // WEB_PORT; bringing CROSS_WEB_PORT up first makes "WEB_PORT answers" mean
+  // "both answer", so no journey can start against a web server that is not
+  // listening yet. It is also the cheaper of the two to start (a bare static
+  // server against an already-built dist), so this costs nothing.
+  //
+  // It serves the very same `dist` through the production static server, which
+  // is what generates `/runtime-config.js` from `PUBLIC_API_ORIGIN`. Nothing
+  // proxies `/api` here: the bundle reads that origin and goes to the other
+  // listener itself.
+  crossWebProcess = spawn(
+    'node',
+    [resolve(workspaceRoot, 'apps/web/server.mjs')],
+    {
+      cwd: workspaceRoot,
+      env: {
+        ...process.env,
+        WEB_DIST_DIR: resolve(workspaceRoot, 'apps/web/dist'),
+        HOST: '127.0.0.1',
+        PORT: String(CROSS_WEB_PORT),
+        PUBLIC_API_ORIGIN: crossApiOrigin,
+      },
+      stdio: 'inherit',
+    },
+  );
+  await waitForWeb(crossWebOrigin);
   webProcess = spawn(
     'pnpm',
     [
@@ -1133,14 +1086,17 @@ async function main(): Promise<void> {
       stdio: 'inherit',
     },
   );
-  await waitForWeb();
-  console.log(`Moi E2E system ready at ${publicOrigin}`);
+  await waitForWeb(publicOrigin);
+  console.log(
+    `Moi E2E system ready at ${publicOrigin} (single origin) and ${crossWebOrigin} → ${crossApiOrigin} (cross origin)`,
+  );
 }
 
 process.once('SIGTERM', () => void cleanup().finally(() => process.exit(0)));
 process.once('SIGINT', () => void cleanup().finally(() => process.exit(0)));
 process.once('exit', () => {
   webProcess?.kill('SIGTERM');
+  crossWebProcess?.kill('SIGTERM');
 });
 
 await main().catch(async (error: unknown) => {

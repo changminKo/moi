@@ -30,6 +30,8 @@ const API = {
   marketData:
     '{"KR":{"state":"NORMAL","reasons":[]},"US":{"state":"NORMAL","reasons":[]},"runtime":"SERVING"}',
   trading: '{"placement":true,"cancellation":true,"fx":true,"reasons":[]}',
+  runtimeConfig:
+    'window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"https://api.moi.example"});',
   free: 'Mem: 954 400 100 10 454 600\nSwap: 4095 100 3995',
   df: 'Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/sda1 50000000 20000000 30000000 40% /',
 };
@@ -38,6 +40,9 @@ const API = {
 // the webhook POST (URL arrives via `-K -` on stdin). It routes on the URL and
 // appends every POST body to a log. FAKE_CURL_FAIL_POST=1 rejects posts,
 // FAKE_CURL_API_DOWN=1 makes every API probe exit 7 with no output.
+// FAKE_CURL_RUNTIME_CONFIG replaces the served /runtime-config.js body (an
+// empty value is a 200 with an empty body, not an absent override);
+// FAKE_CURL_RUNTIME_CONFIG_DOWN=1 makes that one fetch fail as a 404 does.
 function makeSandbox(api) {
   const dir = mkdtempSync(join(tmpdir(), 'moi-status-'));
   const bin = join(dir, 'bin');
@@ -65,6 +70,15 @@ case "$url" in
   */health/ready) [ -n "$write_out" ] && printf '%s' "${api.ready}"; [ "${api.ready}" = 200 ] || exit 22;;
   */health/market-data) printf '%s' '${api.marketData}';;
   */api/v1/health/trading) printf '%s' '${api.trading}';;
+  */runtime-config.js)
+    [ "\${FAKE_CURL_RUNTIME_CONFIG_DOWN:-0}" = 1 ] && exit 22
+    # +set, not :-, so an empty override is a served 200 with an empty body
+    # rather than a fall-through to the default.
+    if [ -n "\${FAKE_CURL_RUNTIME_CONFIG+set}" ]; then
+      printf '%s' "\${FAKE_CURL_RUNTIME_CONFIG}"
+    else
+      printf '%s' '${api.runtimeConfig}'
+    fi;;
   *) echo "unexpected url $url" >&2; exit 7;;
 esac
 `;
@@ -1232,6 +1246,257 @@ deploy_verified ${expected}`,
         '배포 시작: main',
         `배포 완료: ${expected}`,
       ]);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // #25: every check above this line talks to the API. The browser app is a
+  // separate image with its own configuration, and the first Oracle release
+  // passed all of them while `/trade` showed nothing but "Retry session".
+  // `/runtime-config.js` is what the browser actually reads, so the deploy
+  // reads it back and requires the API origin to be named in it.
+  it('accepts a runtime config that names the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+      );
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(
+        r.stdout,
+        /runtime config: app\.moi\.example names https:\/\/api\.moi\.example/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // The regression itself: a bundle configured to call its own origin. Every
+  // API probe stays green because the API is fine — the browser is the only
+  // thing that is broken.
+  it('rejects a runtime config that names the web origin instead of the API', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG:
+              'window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"https://app.moi.example"});',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js does not name https:\/\/api\.moi\.example/,
+      );
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Codex review (#25, HIGH): the first cut accepted the API origin as a
+  // substring of the whole body. `apps/web/server.mjs` emits exactly one
+  // controlled assignment, so the guard parses that assignment and compares
+  // the `apiOrigin` value for equality — a longer origin, a URL that merely
+  // ends in the origin, or the origin mentioned somewhere else in the file
+  // would each have passed while the browser called some other host.
+  const runtimeConfigOf = (apiOrigin) =>
+    `window.__MOI_RUNTIME_CONFIG__ = Object.freeze(${JSON.stringify({ apiOrigin })});`;
+
+  it('rejects an apiOrigin that merely starts with the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG: runtimeConfigOf(
+              'https://api.moi.example.attacker.example',
+            ),
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js does not name https:\/\/api\.moi\.example \(apiOrigin is https:\/\/api\.moi\.example\.attacker\.example\)/,
+      );
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an apiOrigin that merely ends with the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG: runtimeConfigOf(
+              'https://app.moi.example/?next=https://api.moi.example',
+            ),
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js does not name https:\/\/api\.moi\.example \(apiOrigin is https:\/\/app\.moi\.example\/\?next=https:\/\/api\.moi\.example\)/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a runtime config that names the API origin outside apiOrigin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG:
+              'window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"https://app.moi.example","docs":"https://api.moi.example"});',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // An edge that answers every path with the SPA's index.html serves a 200
+  // whose CSP meta names the API origin. That is not the runtime config.
+  it('rejects an index.html fallback even when its markup mentions the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG:
+              '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="connect-src \'self\' https://api.moi.example"></head><body></body></html>',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // A web container that never came up, or an edge that does not route the
+  // file, is the same class of failure and must not read as a green deploy.
+  // The likeliest real misdeploy: the copy that ships in `apps/web/public`
+  // reaching the edge instead of the one the server generates. Its body is
+  // read from that file so the test cannot drift from what would be served.
+  it('rejects the unconfigured runtime config that ships in apps/web/public', () => {
+    const sb = makeSandbox(API);
+    const shipped = readFileSync(
+      resolve(here, '../../apps/web/public/runtime-config.js'),
+      'utf8',
+    );
+    try {
+      // It names no origin at all — it assigns `window.location.origin`, so
+      // the browser calls whatever host served the page.
+      assert.doesNotMatch(shipped, /"apiOrigin"\s*:\s*"/u);
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        { extraEnv: { FAKE_CURL_RUNTIME_CONFIG: shipped } },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // A 200 with nothing in it: the edge answered, so `curl -fsS` succeeds and
+  // only the body check can catch it.
+  it('fails the deploy when /runtime-config.js is served empty', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        { extraEnv: { FAKE_CURL_RUNTIME_CONFIG: '' } },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the deploy when /runtime-config.js cannot be fetched at all', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        { extraEnv: { FAKE_CURL_RUNTIME_CONFIG_DOWN: '1' } },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /cannot fetch https:\/\/app\.moi\.example\/runtime-config\.js/,
+      );
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
