@@ -104,6 +104,30 @@ const MALFORMED_DECIMALS = [
   '{}',
 ] as const;
 
+/** One filled LIMIT order carrying exactly one fill, for fill-shape tests. */
+const FILL_BASE = {
+  id: 'fill-1',
+  symbol: '005930',
+  quantity: '1',
+  price: '70000',
+  fee: '10',
+} as const;
+const filledOrder = (fill: Record<string, unknown>) => ({
+  id: 'order-1',
+  market: 'KR',
+  symbol: '005930',
+  type: 'LIMIT',
+  side: 'BUY',
+  quantity: '1',
+  filledQuantity: '1',
+  status: 'FILLED',
+  limitPrice: '70000',
+  stopPrice: null,
+  terminalReason: null,
+  fills: [fill],
+  siblingOrderIds: [],
+});
+
 describe('PaperBroker decodes money fields at the boundary', () => {
   it.each(MALFORMED_DECIMALS)('rejects a wallet total of %s', async (total) => {
     const broker = new PaperBroker(
@@ -193,37 +217,48 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     const snapshot = await new PaperBroker(
       ok(
         portfolio({
-          activeOrders: [
-            {
-              id: 'order-1',
-              market: 'KR',
-              symbol: '005930',
-              type: 'LIMIT',
-              side: 'BUY',
-              quantity: '1',
-              filledQuantity: '1',
-              status: 'FILLED',
-              limitPrice: '70000',
-              stopPrice: null,
-              terminalReason: null,
-              fills: [
-                {
-                  id: 'fill-1',
-                  symbol: '005930',
-                  quantity: '1',
-                  price: '70000',
-                  fee: '10',
-                  isRecoveryFill: true,
-                },
-              ],
-              siblingOrderIds: [],
-            },
-          ],
+          activeOrders: [filledOrder({ ...FILL_BASE, isRecoveryFill: true })],
         }),
       ),
     ).getPortfolio(SESSION_ID);
 
     expect(snapshot.activeOrders[0]?.fills[0]?.isRecoveryFill).toBe(true);
+  });
+
+  // #91: every other fill field throws when absent or malformed; this one read
+  // `=== true` and turned a missing or misspelled key into an ordinary fill.
+  it.each([
+    ['absent', {}],
+    ['a string', { isRecoveryFill: 'true' }],
+    ['null', { isRecoveryFill: null }],
+    ['a number', { isRecoveryFill: 1 }],
+  ])(
+    'rejects a fill whose isRecoveryFill is %s instead of reading it as false',
+    async (_shape, override) => {
+      const broker = new PaperBroker(
+        ok(
+          portfolio({
+            activeOrders: [filledOrder({ ...FILL_BASE, ...override })],
+          }),
+        ),
+      );
+
+      await expect(codeOf(() => broker.getPortfolio(SESSION_ID))).resolves.toBe(
+        'INVARIANT_VIOLATION',
+      );
+    },
+  );
+
+  it('reads an explicit false as an ordinary fill', async () => {
+    const snapshot = await new PaperBroker(
+      ok(
+        portfolio({
+          activeOrders: [filledOrder({ ...FILL_BASE, isRecoveryFill: false })],
+        }),
+      ),
+    ).getPortfolio(SESSION_ID);
+
+    expect(snapshot.activeOrders[0]?.fills[0]?.isRecoveryFill).toBe(false);
   });
 
   it('accepts a well-formed portfolio and receipt', async () => {

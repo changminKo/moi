@@ -171,6 +171,20 @@ function readString(value: unknown, description: string): string {
 }
 
 /**
+ * A flag the API always sends as a boolean. `=== true` would read an absent
+ * or misspelled key as `false` — a recovery fill silently becoming an ordinary
+ * one is the drift class §16.32 documents (#91), so absence is malformed here
+ * like every other field of the fill.
+ */
+function readBoolean(value: unknown, description: string): boolean {
+  if (typeof value !== 'boolean') {
+    malformed(description);
+  }
+
+  return value;
+}
+
+/**
  * A money field is the whole reason this decoder exists. An unchecked balance
  * decodes fine and then detonates as a raw `DecimalError` deep inside strategy
  * arithmetic, far from the response that caused it, so every decimal the paper
@@ -276,7 +290,7 @@ function decodeFill(payload: unknown): BrokerFill {
     quantity: readQuantity(body.quantity, 'fill quantity'),
     price: readMoneyAmount(body.price, 'fill price'),
     fee: readMoneyAmount(body.fee, 'fill fee'),
-    isRecoveryFill: body.isRecoveryFill === true,
+    isRecoveryFill: readBoolean(body.isRecoveryFill, 'fill isRecoveryFill'),
   };
 }
 
