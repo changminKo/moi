@@ -38,10 +38,14 @@ export default defineConfig({
     // vite dev proxy cannot exercise. Two specs rather than the whole suite:
     // they cover session bootstrap, order placement, streamed fills and the
     // in-page snapshot read, which is every one of those paths, and the suite
-    // runs serially so a third copy of the journeys buys little.
+    // runs serially so a third copy of the journeys buys little. No retry
+    // here: a cross-origin failure that passes on the second attempt is the
+    // kind of intermittent CORS/CSRF/WebSocket fault this project exists to
+    // surface, and the single-origin projects keep the top-level retry.
     {
       name: 'cross-origin-chromium',
       testMatch: /(anonymous-session|cross-origin|order-lifecycle)\.spec\.ts$/,
+      retries: 0,
       use: {
         ...devices['Desktop Chrome'],
         baseURL: 'http://127.0.0.1:4174',
