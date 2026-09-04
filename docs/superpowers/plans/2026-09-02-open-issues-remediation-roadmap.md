@@ -42,8 +42,12 @@ acceptance criteria. Behaviour changes still follow TDD, the gates in
   outbox ~60 ms after SIGTERM; the probe polled every 50 ms), 2/7 were
   `db.destroy` outliving the shutdown budget, one was the vitest hook budget.
   Step 4 now pins an admitted request; `hookTimeout` 120 s; pool counters and
-  in-flight drain timeouts are logged (PR #111, spec §16.54). The deadlock
-  retry-count assertion in `unit-of-work` remains a separate item.
+  in-flight drain timeouts are logged (PR #111, spec §16.54).
+- [ ] **`unit-of-work` deadlock retry-count assertion (split from #65) P2.**
+  `retries a real 40P01 deadlock and applies the work once` asserted an exact
+  retry count that depends on PostgreSQL's deadlock scheduling and failed once
+  under parallel load (#65 comment, 2026-09-01). Assert the outcome (work
+  applied once, at least one retry) rather than the count, or serialise it.
 - [ ] **#34 P1 — wire HTTP mutation rate limiting.** Prove a production-shaped
   server returns the public 429 contract under a write flood.
 - [ ] **#10 P1 — finish durable cancel-all.** The audit rows exist; add
@@ -141,8 +145,8 @@ The order above is strict. PR #97 currently computes realised PnL from
 |---|---:|---|---|
 | 2026-09-02 | #44 | Complete locally | TDD RED→GREEN; `pnpm check`, `pnpm check:deployment`, and `pnpm test:deployment` (55/55) |
 | 2026-09-02 | #28 | Complete locally | TDD RED→GREEN; fresh-script exec, inherited-mutex, forged-guard, and contract-mutation coverage; deployment tests 58/58 |
-| 2026-09-04 | #44 #28 #83 | Merged and deployed | PR #108 (squash `3c22fdc`), two review lanes × 4 rounds; deployed `3c22fdc` then `95669f9` with the new deploy path verifying image and container revisions |
-| 2026-09-04 | #65 | Merged and deployed | PR #111 (`95669f9`); 3 consecutive local drills + 500 ms-delay experiment; CI drill 3/3; spec §16.54 |
-| 2026-09-04 | #112 | Merged and deployed | PR #113 (`6eb2eae`); first bot restart logged `not serving yet` → `serving waitedMs=9088`, zero `stream errored`; spec §16.55 |
-| 2026-09-04 | #64 #95 | This PR | dead `manual` flag removed; dedupe test applies LIVE and kills the dedupe-removal mutant |
 | 2026-09-02 | #83 | Complete locally | TDD RED→GREEN; publish-label and deploy-wiring mutation coverage; matching, mismatched, missing, and wrong-cardinality revision tests; deployment tests 64/64 |
+| 2026-09-04 | #44 #28 #83 | Merged and deployed | PR #108 (squash `3c22fdc`); review-lane record in the PR comments; deployment observed by the operator (host `deploy.sh` log: `release images verified`, `release containers verified`) — not reproducible from the repository |
+| 2026-09-04 | #65 | Merged and deployed | PR #111 (`95669f9`); 3 consecutive local drills + 500 ms-delay experiment; CI drill 3/3; spec §16.54 |
+| 2026-09-04 | #112 | Merged and deployed | PR #113 (`6eb2eae`), spec §16.55; the post-deploy bot log (`not serving yet` → `is serving`, no `stream errored`) is an operator observation from `docker logs`, not repository evidence |
+| 2026-09-04 | #64 #95 | This PR | dead `manual` flag removed; dedupe test applies LIVE and kills the dedupe-removal mutant |

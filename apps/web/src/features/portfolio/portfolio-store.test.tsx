@@ -20,7 +20,12 @@ const event = (eventId: string, accountSequence: string) => ({
   accountSequence,
   payload: { market: { recoveryFill: { US: true } } },
 });
-/** An event whose payload is a full snapshot patch, so it applies LIVE. */
+/**
+ * An event whose payload is a full snapshot patch, so it applies LIVE. The
+ * spread is load-bearing: `PortfolioSnapshot` is an interface and has no
+ * implicit index signature, so the interface value is not assignable to the
+ * stream message's `Record` payload — the object literal is.
+ */
 const patch = (eventId: string, accountSequence: string) => ({
   type: 'event' as const,
   eventId,
@@ -40,8 +45,11 @@ describe('portfolio reconciliation', () => {
     expect(once.snapshot.accountSequence).toBe('42');
     expect(once.seenEventIds.has('e42')).toBe(true);
 
-    // The same event id again — even with a sequence that would otherwise be
-    // a gap — is a no-op on the very same state object.
+    // The realistic duplicate: the same event redelivered as-is.
+    const duplicate = reducePortfolio(once, patch('e42', '42'));
+    expect(duplicate).toBe(once);
+    // And the stronger shape — the same id with a sequence that would
+    // otherwise be a gap — pins that dedupe runs before the sequence check.
     const twice = reducePortfolio(once, patch('e42', '43'));
     expect(twice).toBe(once);
     expect(twice.sync.status).toBe('LIVE');
@@ -49,11 +57,14 @@ describe('portfolio reconciliation', () => {
   });
 
   it('coalesces a sequence gap and ignores later events while stale', () => {
+    // A full patch, so STALE here can only come from the gap itself (#95's
+    // sibling: with the bare `event()` fixture the gap check was never
+    // reached and removing it left this test green).
     const afterGap = reducePortfolio(
       createPortfolioState(snapshot('42')),
-      event('e44', '44'),
+      patch('e44', '44'),
     );
-    const afterAnotherEvent = reducePortfolio(afterGap, event('e45', '45'));
+    const afterAnotherEvent = reducePortfolio(afterGap, patch('e45', '45'));
     expect(afterGap.sync).toEqual({ status: 'STALE', refreshRequested: true });
     expect(afterAnotherEvent).toBe(afterGap);
   });

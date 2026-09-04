@@ -54,8 +54,9 @@ describe('StartupCoordinator', () => {
       }).open(),
     ).rejects.toThrow('bad');
     expect(open).not.toHaveBeenCalled();
-    // The cause code alone decides MANUAL (repository `MANUAL_CAUSES`); the
-    // coordinator sends nothing else.
+    // The cause code alone decides MANUAL (`MANUAL_CAUSES` in
+    // ProductionRuntime, injected as the repository's `manualCauseCodes`);
+    // the coordinator sends nothing else.
     expect(activate).toHaveBeenCalledTimes(1);
     expect(activate).toHaveBeenCalledWith({
       causeCode: 'STARTUP_INVARIANT_OR_AUDIT_FAILURE',
