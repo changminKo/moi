@@ -1,5 +1,8 @@
-import { FakeCalendarSource } from '@moi/market-data';
-import { describe, expect, it } from 'vitest';
+import {
+  FakeCalendarSource,
+  type MarketCalendarSource,
+} from '@moi/market-data';
+import { describe, expect, it, vi } from 'vitest';
 import { calendarPortFromSource } from './market-calendar-port.js';
 
 describe('calendarPortFromSource', () => {
@@ -60,5 +63,50 @@ describe('calendarPortFromSource', () => {
     });
     expect((await inside.get('KR')).session).toBe('REGULAR');
     expect((await outside.get('KR')).session).toBe('CLOSED');
+  });
+
+  it('names a failed calendar read in the log and still rejects (#122)', async () => {
+    // Nothing else reports this: the session route answers 503 from an empty
+    // catch and the custom error handler replaces Fastify's own logging.
+    const source: MarketCalendarSource = {
+      getCalendarDay: async () => {
+        throw new Error(
+          'Invalid Toss calendar response: result must be an object',
+        );
+      },
+    };
+    const log = vi.fn();
+    const port = calendarPortFromSource(source, {
+      now: () => new Date('2026-08-31T20:00:00.000Z'),
+      log,
+    });
+
+    await expect(port.get('KR')).rejects.toThrow(/calendar/iu);
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('calendar.decode_failed', {
+      market: 'KR',
+      tradingDate: '2026-09-01',
+      reason: 'Invalid Toss calendar response: result must be an object',
+    });
+    // The reason, never the provider's answer.
+    const [, fields] = log.mock.calls[0] as [string, Record<string, unknown>];
+    expect(Object.keys(fields).sort()).toEqual([
+      'market',
+      'reason',
+      'tradingDate',
+    ]);
+  });
+
+  it('says nothing when the provider answers', async () => {
+    const log = vi.fn();
+    const port = calendarPortFromSource(new FakeCalendarSource(), {
+      now: () => new Date('2026-08-31T20:00:00.000Z'),
+      log,
+    });
+
+    await port.get('KR');
+
+    expect(log).not.toHaveBeenCalled();
   });
 });

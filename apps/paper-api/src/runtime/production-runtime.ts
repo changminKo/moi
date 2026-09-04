@@ -279,7 +279,9 @@ export class ProductionRuntime {
       },
     });
     this.#calendar = new MarketCalendarService(
-      calendarPortFromSource(options.bundle.calendar),
+      calendarPortFromSource(options.bundle.calendar, {
+        log: (event, fields) => this.#log(event, fields),
+      }),
     );
     // Snapshot reads for stream enrichment run in REPEATABLE READ so the nine
     // portfolio queries see one consistent state (issue #11, first step).

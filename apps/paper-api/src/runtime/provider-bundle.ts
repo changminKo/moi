@@ -137,6 +137,12 @@ export interface TossBundleOptions {
     result: 'ok' | 'auth_failed' | 'throttled' | 'error',
   ) => void;
   readonly symbols?: Readonly<Record<Market, readonly string[]>>;
+  /**
+   * Receives the REST client's decode events (`calendar.decode_lenient`).
+   * The runtime logs its own calendar failures; this is the one signal that
+   * originates inside the adapter and would otherwise be silent (#122).
+   */
+  readonly log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 /**
@@ -163,6 +169,7 @@ export function createTossProviderBundle(
   const snapshots = new TossRestClient({
     baseUrl: toss.restBaseUrl,
     tokenProvider,
+    ...(options.log ? { log: options.log } : {}),
   });
   const streams = new Map<Market, TossWebSocketMarketData>();
   for (const market of ['KR', 'US'] as const)
@@ -191,7 +198,10 @@ export function createTossProviderBundle(
 }
 
 /** Selects the provider implementation by `MARKET_DATA_ADAPTER` (§5.1). */
-export function createProviderBundle(config: AppConfig): ProviderBundle {
+export function createProviderBundle(
+  config: AppConfig,
+  options: TossBundleOptions = {},
+): ProviderBundle {
   if (config.marketDataAdapter === 'fake') return createFakeProviderBundle();
-  return createTossProviderBundle(config);
+  return createTossProviderBundle(config, options);
 }

@@ -31,6 +31,56 @@ Keep the incident open until the feed has been stable for at least 10 minutes.
 
 A `403 access_denied` from the provider means the process's egress IP is not on the provider allow list, and a `401` means the client credentials were rejected. Neither is fixed by a restart: correct the allow list (the `paper-api` egress IP must be static, registered in the Toss console, and recorded in `infra/provider-allowlist.yaml`; compare the process's current egress address with `pnpm preflight:deploy --skip-compose`) or rotate `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET` through the secret manager (`infra/secrets.env.tpl`), then let the market-local reconnect supervisor retry (or resolve `RECOVERY_RETRY_EXHAUSTED` if it tripped).
 
+## The session route says HOLIDAY on a trading day
+
+Symptoms: `GET /api/v1/markets/KR/session` answers `"phase": "HOLIDAY"` with
+`"isTradingDay": false` while the market is open; MARKET orders are rejected
+with `MARKET_CLOSED`; the strategy runner refuses every decision with `the KR
+market is in phase HOLIDAY, not REGULAR`. Market data itself is `NORMAL` — the
+feed is fine, the calendar is not.
+
+**A restart does not fix this.** The phase is derived per request from the
+provider's calendar answer, so a wrong phase is a decoding or provider problem,
+never stale in-process state.
+
+```bash
+curl -sS "$API_ORIGIN/api/v1/markets/KR/session" | jq
+curl -sS "$API_ORIGIN/api/v1/markets/US/session" | jq
+```
+
+Read the answer against the pinned contract
+(`packages/market-data/contracts/toss/openapi.json`, paths
+`/api/v1/market-calendar/{KR,US}`):
+
+- `isTradingDay` is `false` with `opensAt`/`closesAt` `null` on a day that
+  should trade — the decoder found no regular session. For KR the session lives
+  at `result.today.integrated.regularMarket`, for US at
+  `result.today.regularMarket`; both are `null` only when that session really is
+  shut, and KR's whole `integrated` is `null` only when the day is shut. This
+  was the shape mismatch behind #122 (spec §16.57).
+- `PRE_OPEN` or `POST_CLOSE` all day with a window that looks right — compare
+  `opensAt`/`closesAt` with `serverTime`. The decoder requires an explicit UTC
+  offset on both bounds, so all three are absolute instants and a disagreement
+  here is the host clock, not the calendar.
+- The route answers 503 `SERVICE_UNAVAILABLE` — the provider call failed or its
+  answer did not match the contract, and the process refuses to guess a phase.
+  Grep the application logs for `calendar.decode_failed`: it carries the market,
+  the trading date, and the reason with the offending field named. The failure
+  is remembered for 15 seconds, so a burst of requests produces one log line and
+  one provider call, not one per request. A MARKET order placed in this window
+  fails with 500 `INTERNAL_ERROR`, not `MARKET_CLOSED`.
+- `calendar.decode_lenient` appears — the provider omitted a session key
+  entirely (`today.integrated`, or the `regularMarket` inside it) and the
+  decoder read that as a closed session. That is correct on a real holiday and a
+  provider-shape change on a trading day, so check the date it names before
+  treating the market as shut.
+
+If the logs name a decode fault, escalate to engineering with those lines and
+the session-route answers. The calendar is read-only, so no admin action
+corrects a decoding fault, and reproducing the provider's raw answer is an
+operator smoke through the compose stack — never a direct call to the provider
+from anywhere else.
+
 ## After a restart
 
 A restart does not clear the incident rows. The health state machine lives in
@@ -101,9 +151,10 @@ Check Toss status pages and the hosting provider's egress health before suspecti
 - Redis answers `PING` and the lease TTL is renewing.
 - No `InvariantViolation` or `EmergencyLatchActive` alert is active; if one is, follow `emergency-cancel-only.md` first.
 
-## Verification: reservations, leader fence, outbox lag, user-stream recovery
+## Verification: reservations, leader fence, outbox lag, user-stream recovery, market session
 
-Run all four before declaring the incident over. Every query is read-only.
+Run all of these before declaring the incident over, and after a deploy. Every
+query is read-only.
 
 1. **Reservations** — no unreleased reservation may outlive its order, and every wallet's `reserved` must equal its unreleased CASH reservations (the same check `paper-api` runs at RESTORING):
    ```sql
@@ -136,7 +187,18 @@ Run all four before declaring the incident over. Every query is read-only.
    ```
    Expected: `oldest_pending_seconds` below 30 and falling; `outbox_oldest_pending_seconds` on `/metrics` agrees.
 4. **User-stream recovery** — open the web app in a fresh anonymous session, place and cancel one small order, and confirm the order list reconciles without a manual refresh. In `/metrics`, `rest_snapshot_request_total{result="ok"}` must increase (gap-triggered snapshot) and `order_event_total{status="error"}` must not.
-5. **Leader handoff drill** — proves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` with two real `dist/main.js` processes against the loopback fake provider (never live Toss):
+5. **Market session** — the phase each market reports matches the wall clock in
+   that market's own time zone:
+   ```bash
+   curl -sS "$API_ORIGIN/api/v1/markets/KR/session" | jq
+   curl -sS "$API_ORIGIN/api/v1/markets/US/session" | jq
+   ```
+   Expected: `phase` is what the current time says (`REGULAR` inside
+   `opensAt`…`closesAt`, `PRE_OPEN`/`POST_CLOSE` outside it), `isTradingDay` is
+   true on a business day, and `opensAt`/`closesAt` are non-null whenever the
+   day trades. A `HOLIDAY` on a business day is the calendar, not the feed —
+   see *The session route says HOLIDAY on a trading day* above.
+6. **Leader handoff drill** — proves `CANCEL_ONLY → old leader disconnect → new leader recovery → NORMAL` with two real `dist/main.js` processes against the loopback fake provider (never live Toss):
    ```bash
    pnpm --filter @moi/paper-api build
    pnpm --filter @moi/paper-api test:drill
