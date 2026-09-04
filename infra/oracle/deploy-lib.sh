@@ -163,6 +163,33 @@ verify_release_image_revisions() { verify_revisions image "$@"; }
 # are the last word.
 verify_running_container_revisions() { verify_revisions container "$@"; }
 
+# #25: every other verification talks to the API. The browser app is a second
+# image with its own configuration, and the first Oracle release passed all of
+# them while `/trade` was unusable — the bundle called its own origin, so
+# `POST /api/v1/sessions/anonymous` reached the static server (405, GET/HEAD
+# only) and the page showed nothing but "Retry session". `/runtime-config.js`
+# is the file the browser reads that origin from, so read it back and require
+# the API origin to appear in it. One GET, and it fails the deploy.
+#
+# What it proves is the server side: the web container was configured and the
+# edge routes the file. It cannot prove the bundle honours what it reads —
+# that is the operator browser smoke (`pnpm smoke:prod`).
+verify_runtime_config_origin() {
+  local web_domain="$1" api_origin="$2" body
+  if ! body="$(curl -fsS "https://${web_domain}/runtime-config.js")"; then
+    echo "FAIL: cannot fetch https://${web_domain}/runtime-config.js" >&2
+    return 1
+  fi
+  case "$body" in
+    *"$api_origin"*) ;;
+    *)
+      echo "FAIL: https://${web_domain}/runtime-config.js does not name ${api_origin}; the browser app would call some other origin" >&2
+      return 1
+      ;;
+  esac
+  echo "runtime config: ${web_domain} names ${api_origin}"
+}
+
 # Called by deploy.sh only after readiness, both markets NORMAL and placement
 # were observed; the exit trap treats any other exit 0 as a failure.
 deploy_verified() {

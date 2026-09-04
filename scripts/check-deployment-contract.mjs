@@ -1048,6 +1048,33 @@ check(
   },
 );
 
+// #25: every other deploy verification talks to the API, and the first Oracle
+// release passed all of them while the browser app was unusable. The web image
+// carries its own configuration, so the deploy reads back the one file the
+// browser learns the API origin from.
+check(
+  'reference deploy verifies the browser runtime config before reporting success',
+  () => {
+    const script = readShell('infra/oracle/deploy.sh');
+    const containers = script.search(
+      /^\s*verify_running_container_revisions "\$checkout_sha" "\$\{running_ids\[@\]\}"$/mu,
+    );
+    const runtimeConfig = script.search(
+      /^\s*verify_runtime_config_origin "\$WEB_DOMAIN" "https:\/\/\$\{API_DOMAIN\}"$/mu,
+    );
+    const done = script.indexOf('deploy_verified "$sha"');
+    assert.ok(
+      containers >= 0 && containers < runtimeConfig && runtimeConfig < done,
+      'deploy.sh must read https://$WEB_DOMAIN/runtime-config.js and require https://$API_DOMAIN in it, after the container check and before deploy_verified',
+    );
+    assert.match(
+      readShell('infra/oracle/deploy-lib.sh'),
+      /verify_runtime_config_origin\(\)[\s\S]*curl -fsS "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
+      'deploy-lib.sh must fetch the runtime config the browser itself reads',
+    );
+  },
+);
+
 // #34: the write limiter keys on `request.ip`. Behind the overlay's Caddy that
 // is the client only if the API trusts X-Forwarded-For; exposed directly (the
 // base compose publishes the port) it must not, or a header buys a fresh bucket.

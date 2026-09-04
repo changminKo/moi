@@ -811,6 +811,82 @@ describe('check-deployment-contract (A8)', () => {
     }
   });
 
+  // #25: the API-side probes all stay green when the browser app is the thing
+  // that is broken, so removing this one guard must not pass the checker.
+  it('fails when deploy stops verifying the browser runtime config', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+        '',
+      );
+      assert.notEqual(after, before, 'runtime-config mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must read https:\/\/\$WEB_DOMAIN\/runtime-config\.js/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when the runtime config guard is neutralised by a no-op prefix', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `    verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+        `    : verify_runtime_config_origin "$WEB_DOMAIN" "https://\${API_DOMAIN}"\n`,
+      );
+      assert.notEqual(after, before, 'no-op prefix mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must read https:\/\/\$WEB_DOMAIN\/runtime-config\.js/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The guard is only as good as the file it reads: a probe pointed at some
+  // other path would pass the wiring check while proving nothing.
+  it('fails when deploy-lib stops fetching /runtime-config.js', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      // Spelled without the shell placeholder so the needle is a plain
+      // string: the fetched path is what makes the guard mean anything.
+      const after = before.replace('/runtime-config.js"', '/"');
+      assert.notEqual(
+        after,
+        before,
+        'runtime-config fetch mutation matched nothing',
+      );
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must fetch the runtime config the browser itself reads/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails when deploy stops verifying the running containers', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/deploy.sh');
