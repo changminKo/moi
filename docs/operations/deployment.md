@@ -429,6 +429,14 @@ A failure means the deployment is serving a browser app that does not work,
 whatever `/health/*` says. Roll back (`MOI_IMAGE_TAG=<full commit sha>`, step 7
 above) rather than leave it up.
 
+**Treat a failed run's artifacts as credentials.** On failure Playwright keeps
+a trace and a screenshot under `apps/e2e/test-results/`, and because this run
+drove the real deployment that trace contains a live `moi_session` cookie and
+its CSRF token — enough to act as that session. Read them locally, then delete
+the directory. Never attach them to an issue, a pull request, or a chat
+message, and never copy them to a shared host (rule 2). The directory is
+git-ignored, so nothing stops a stray `-f` add from committing it.
+
 The smoke never runs in CI: it needs a live origin, refuses to start without
 `SMOKE_WEB_ORIGIN`, and lives in `apps/e2e/playwright.smoke.config.ts`, which
 the CI e2e run (`testDir: './specs'`) never sees. Playwright's Chromium has to
