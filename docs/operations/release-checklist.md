@@ -69,6 +69,25 @@ handoff therefore remains unchecked below.
   either verification, or the shared label key is removed or commented out.
   Rolling back to a ref older than this check runs that ref's own `deploy.sh`
   (re-exec), which verifies no revision.
+- [x] A reference-host deploy verifies the browser app, not only the API.
+  Evidence (#25): `deploy.sh` reads back `https://$WEB_DOMAIN/runtime-config.js`
+  after the running-container check and fails unless it names
+  `https://$API_DOMAIN`; `infra/oracle/status-check.test.mjs` covers a matching
+  origin, the web origin substituted for the API's, and a file that cannot be
+  fetched, and three deployment-contract mutation tests fail when the call is
+  removed, prefixed with `:`, or pointed at another path. The browser itself is
+  covered twice: the CI e2e suite runs the anonymous-session, order-lifecycle
+  and cross-origin journeys through `apps/web/server.mjs` on an origin of its
+  own (`cross-origin-chromium`, 58 tests total), and the operator runs
+  `SMOKE_WEB_ORIGIN=https://$WEB_DOMAIN pnpm smoke:prod` against the deployed
+  host after every release (`docs/operations/deployment.md`, *Post-deploy
+  browser smoke*). The smoke's own judgements are unit-tested
+  (`apps/e2e/smoke/smoke-contract.test.ts`) and it was exercised against a live
+  server: it passes on a correctly configured origin, reports "declares no
+  literal apiOrigin" against one serving the unconfigured fallback, and reports
+  "retry" against one whose configured API origin answers 405 — the shape of
+  #25. **Each release records its own production smoke run in the deploy log**;
+  the mechanism, not a particular run, is what this line attests.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`
