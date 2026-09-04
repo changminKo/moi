@@ -158,7 +158,9 @@ for _ in $(seq 1 40); do
     # Every probe above addressed API_DOMAIN. This is the deploy's only
     # request to WEB_DOMAIN, so it is the first thing to say that the edge
     # routes the web container and that the container served the runtime
-    # config it was configured with (#25; deploy-lib.sh states the limits).
+    # config it was configured with. It does not say the browser can complete
+    # a session — that is `pnpm smoke:prod` (#25; deploy-lib.sh has the full
+    # list of what this does and does not catch).
     verify_runtime_config_origin "$WEB_DOMAIN" "https://${API_DOMAIN}"
     sha="$(as_owner git rev-parse --short HEAD)"
     echo "$md"; echo "$tr"; echo "== done (${sha})"

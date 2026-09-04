@@ -1427,6 +1427,37 @@ deploy_verified abc1234`,
 
   // A web container that never came up, or an edge that does not route the
   // file, is the same class of failure and must not read as a green deploy.
+  // The likeliest real misdeploy: the copy that ships in `apps/web/public`
+  // reaching the edge instead of the one the server generates. Its body is
+  // read from that file so the test cannot drift from what would be served.
+  it('rejects the unconfigured runtime config that ships in apps/web/public', () => {
+    const sb = makeSandbox(API);
+    const shipped = readFileSync(
+      resolve(here, '../../apps/web/public/runtime-config.js'),
+      'utf8',
+    );
+    try {
+      // It names no origin at all — it assigns `window.location.origin`, so
+      // the browser calls whatever host served the page.
+      assert.doesNotMatch(shipped, /"apiOrigin"\s*:\s*"/u);
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        { extraEnv: { FAKE_CURL_RUNTIME_CONFIG: shipped } },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   // A 200 with nothing in it: the edge answered, so `curl -fsS` succeeds and
   // only the body check can catch it.
   it('fails the deploy when /runtime-config.js is served empty', () => {

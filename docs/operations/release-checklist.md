@@ -83,7 +83,9 @@ handoff therefore remains unchecked below.
   shape. The browser itself is
   covered twice: the CI e2e suite runs the anonymous-session, order-lifecycle
   and cross-origin journeys through `apps/web/server.mjs` on an origin of its
-  own (`cross-origin-chromium`, 8 of the suite's 58 tests), and the operator runs
+  own (the `cross-origin-chromium` project — list what it covers with
+  `pnpm --filter @moi/e2e exec playwright test --list --project cross-origin-chromium`
+  rather than trusting a count written here), and the operator runs
   `SMOKE_WEB_ORIGIN=https://$WEB_DOMAIN pnpm smoke:prod` against the deployed
   host after every release (`docs/operations/deployment.md`, *Post-deploy
   browser smoke*). The smoke's own judgements are unit-tested
@@ -92,8 +94,17 @@ handoff therefore remains unchecked below.
   passes against the harness cross-origin server, reports "declares no literal
   apiOrigin" against the vite preview serving the unconfigured fallback, and
   reports `Expected: "wallet" / Received: "retry"` against a static server
-  configured to call an API origin that answers 405 — the shape of #25. **Each release records its own production smoke run in the deploy log**;
-  the mechanism, not a particular run, is what this line attests.
+  configured to call an API origin that answers 405 — the shape of #25.
+  **This line attests the mechanism, not any one run.** A release's own smoke
+  result belongs in its Evidence line in this ledger, beside the gate results
+  in *Clean-room gate* — there is no separate deploy log.
+  Two limits, stated so nobody reads more into the coverage than is there.
+  The `cross-origin-chromium` project's origins are `127.0.0.1` on different
+  ports, which is cross-origin but same-site, so it exercises CORS, the CSRF
+  `Origin` check, credentialed fetch and the WebSocket `Origin` check but not
+  the cookie; the cross-site cookie loss behind §16.29 has no automated
+  coverage. And the guard in `deploy.sh` reads the served file, so it cannot
+  say a browser completes a session — that is the smoke's job alone.
 - [x] Graceful deployment preserves `CANCEL_ONLY → old leader disconnect → new
   leader recovery → NORMAL` and never creates a third provider connection.
   Evidence (2026-08-28, commit `5cf24ab`): `leader-handoff.drill.integration.test.ts`

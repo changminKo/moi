@@ -379,8 +379,16 @@ requires, and the artefacts are the same ones the local smoke uses.
    `WEB_DOMAIN`**: everything else addresses `API_DOMAIN`, so it is the first
    proof that the edge routes the web container, that the container came up,
    and that it served a generated config rather than the unconfigured copy in
-   `apps/web/public`, which names no origin at all. What it cannot prove is
-   that the bundle honours what it reads — that is the post-deploy smoke below.
+   `apps/web/public`, which names no origin at all.
+
+   Concretely, it catches an edge that does not route the web container, a web
+   container that never came up, the unconfigured `apps/web/public` copy
+   deployed in place of the generated one, and an `apiOrigin` naming a
+   different host, port or scheme. It says nothing about the API path — that
+   `/api/*` reaches paper-api is what the `/api/v1/health/trading` probe
+   above tells you, since that path is itself under `/api/*` — and nothing
+   about whether a browser can complete a session. Only the post-deploy smoke
+   below covers that, and it is the check that would have caught #25 outright.
    Roll back by pinning `MOI_IMAGE_TAG=<full commit sha>` in `/etc/moi/moi.env`
    and passing that same full SHA to `deploy.sh`; mixing a tag and a different
    ref fails before migrations.
@@ -410,6 +418,11 @@ injected runtime config, posted to the static server and got a 405 (#25). The
 runtime-config guard added to `deploy.sh` closes the server half of that — and
 only the server half, since it reads the file rather than running the bundle;
 this closes the browser half.
+
+The client was never at fault. `createApiClient` has read `/runtime-config.js`
+since the session bootstrap first shipped, and it called the page's own origin
+because that is what the config it was served named. The issue's own summary
+blames the client; it is wrong, and the fix was on the serving side.
 
 It opens `/trade` in headless Chromium and requires all of:
 
@@ -446,12 +459,21 @@ be installed once on the workstation:
 pnpm --filter @moi/e2e exec playwright install chromium
 ```
 
+`SMOKE_WEB_ORIGIN` must be HTTPS unless it is a loopback host, since the run
+carries a live session.
+
 The judgements it makes are pure functions in `apps/e2e/smoke/smoke-contract.ts`
 with their own tests, so the part that can be checked without a deployment is
 checked by `pnpm test`. CI covers the two-origin shape separately: the
 `cross-origin-chromium` Playwright project serves the bundle through
 `apps/web/server.mjs` on an origin of its own and drives the journeys across
 the boundary, which the single-origin stack and the vite dev proxy cannot do.
+That project reaches CORS, the CSRF `Origin` check, credentialed fetch and the
+WebSocket `Origin` check. It does **not** reach the cookie: its two origins are
+`127.0.0.1` on different ports, which is cross-origin but same-site, so
+`SameSite=Lax` sends the cookie either way. The cross-site cookie loss behind
+the single-origin edge decision (spec §16.29) has no automated coverage and
+stays an operator check.
 
 ## Write rate limits
 

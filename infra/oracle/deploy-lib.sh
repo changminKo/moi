@@ -165,9 +165,16 @@ verify_running_container_revisions() { verify_revisions container "$@"; }
 
 # #25: every other verification here talks to the API. The browser app is a
 # second image with its own configuration, and the first Oracle release passed
-# all of them while `/trade` was unusable — the bundle called its own origin,
-# so `POST /api/v1/sessions/anonymous` reached the static server (405, GET/HEAD
-# only) and the page showed nothing but "Retry session".
+# all of them while `/trade` was unusable: `POST /api/v1/sessions/anonymous`
+# reached the static server (405, GET/HEAD only) and the page showed nothing
+# but "Retry session".
+#
+# The cause was the served configuration, not the client. `createApiClient`
+# has read `/runtime-config.js` since the session bootstrap first shipped; it
+# called the page's own origin because that is what the config it was given
+# named — `apps/web/public/runtime-config.js` assigns
+# `window.location.origin`, and the issue's own summary blaming the client is
+# wrong.
 #
 # What this adds is narrower than it first looks, and worth stating exactly:
 #
@@ -187,8 +194,19 @@ verify_running_container_revisions() { verify_revisions container "$@"; }
 #     than the unconfigured copy in `apps/web/public` — which assigns
 #     `window.location.origin` and names no origin whatsoever.
 #
-# Either way it proves only the server side. That the bundle honours what it
-# reads is the operator browser smoke (`pnpm smoke:prod`).
+# So, concretely, what it catches: an edge that does not route the web
+# container and a container that never came up (the fetch fails); the
+# unconfigured `apps/web/public` copy deployed in place of the generated one
+# (several lines, so the prefix cannot match); and an `apiOrigin` naming a
+# different host, port or scheme.
+#
+# What it does not catch: anything about the API path. That `/api/*` reaches
+# paper-api is what the `/api/v1/health/trading` probe above says, since that
+# path is itself under `/api/*`. And neither of them says the browser can
+# complete a session: a POST-only edge fault, a CSP that blocks the bundle, a
+# stale asset hash, a JavaScript error. Only the operator browser smoke
+# (`pnpm smoke:prod`) covers that, and it is the check that would have caught
+# #25 outright.
 verify_runtime_config_origin() {
   local web_domain="$1" api_origin="$2" body
   # --max-time as everywhere else a deploy or the status timer calls curl
