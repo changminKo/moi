@@ -51,6 +51,9 @@ export async function buildApp(
     genReqId: dependencies.requestId ?? (() => randomUUID()),
     bodyLimit: 65_536,
     ajv: { customOptions: { removeAdditional: false } },
+    // Behind the deployment's own proxy `request.ip` is the client, and the
+    // rate limiter keys on it; exposed directly, the header is untrusted.
+    trustProxy: config.trustProxy,
   }) as unknown as FastifyInstance;
   app.decorate('redactedLogPaths', redactedLogPaths);
   dependencies.registerIngress?.(app);

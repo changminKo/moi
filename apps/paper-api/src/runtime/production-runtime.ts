@@ -67,7 +67,10 @@ import {
 } from '../modules/stream/stream-upgrade.js';
 import { MetricsRegistry } from '../observability/metrics.js';
 import { requireCsrf } from '../plugins/csrf.js';
-import { LayeredRateLimiter } from '../plugins/rate-limits.js';
+import {
+  LayeredRateLimiter,
+  registerRateLimits,
+} from '../plugins/rate-limits.js';
 import { cookieValue } from '../plugins/session-auth.js';
 import type { Capability, SafetyIncident } from '../safety/capabilities.js';
 import { createDbIncidentRepository } from '../safety/incident-db-repository.js';
@@ -970,7 +973,12 @@ export class ProductionRuntime {
     this.#instruments = instrumentService;
     const app = await buildApp(config, {
       clock: { now: () => Date.now() },
-      registerIngress: (instance) => this.#gate.register(instance),
+      registerIngress: (instance) => {
+        // Rate limits first: a 429 is decided before the admission gate
+        // counts the request, so a flood never inflates the drain.
+        registerRateLimits(instance, limiter);
+        this.#gate.register(instance);
+      },
       registerRoutes: async (instance) => {
         instance.addHook('preHandler', async (request) => {
           if (

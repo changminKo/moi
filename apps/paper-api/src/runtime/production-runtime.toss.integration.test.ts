@@ -51,6 +51,7 @@ function config(credentials: {
     marketDataAdapter: 'toss',
     toss: { ...credentials, restBaseUrl: rest.baseUrl, wsUrl: ws.url },
     shutdownDrainDeadlineMs: 5_000,
+    trustProxy: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
   };

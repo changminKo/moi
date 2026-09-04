@@ -81,10 +81,19 @@ export class LayeredRateLimiter {
     return { allowed: true };
   }
 }
-export async function registerRateLimits(
+/**
+ * Per-client-IP limits on `/api/v1/*` writes (#34): POST/PATCH share the
+ * `mutation` bucket (10/s), DELETE the `cancel` bucket (20/s); reads and
+ * `/health/*` are never limited. Registered as the first ingress hook, before
+ * the admission gate, so a refused request is never counted as in flight. The
+ * key is `request.ip`, which is the real client only when `TRUST_PROXY=true`
+ * (the Oracle overlay behind Caddy); the `session` kind (5/min) is defined but
+ * not applied by this hook — see spec §16.56.
+ */
+export function registerRateLimits(
   app: FastifyInstance,
   limiter: LayeredRateLimiter,
-): Promise<void> {
+): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply) => {
     const path = request.url.split('?')[0] ?? '';
     if (!path.startsWith('/api/v1/')) return;

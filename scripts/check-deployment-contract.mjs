@@ -1048,6 +1048,29 @@ check(
   },
 );
 
+// #34: the write limiter keys on `request.ip`. Behind the overlay's Caddy that
+// is the client only if the API trusts X-Forwarded-For; exposed directly (the
+// base compose publishes the port) it must not, or a header buys a fresh bucket.
+check(
+  'rate limiter sees the client address exactly where a proxy fronts the API',
+  () => {
+    const overlay = read('infra/oracle/compose.override.yaml');
+    const block =
+      overlay.match(/\n {2}paper-api:\n((?: {4}[^\n]*\n)+)/u)?.[1] ?? '';
+    assert.match(
+      block,
+      /^\s+TRUST_PROXY: "true"$/mu,
+      'the Oracle overlay must set TRUST_PROXY: "true" on paper-api (Caddy is the only ingress there)',
+    );
+    const env = compose?.services?.['paper-api']?.environment ?? {};
+    assert.notStrictEqual(
+      String(env.TRUST_PROXY ?? 'false'),
+      'true',
+      'the base compose exposes paper-api directly and must not trust X-Forwarded-For',
+    );
+  },
+);
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(

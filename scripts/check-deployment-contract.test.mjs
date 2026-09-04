@@ -860,4 +860,24 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('fails when the overlay stops trusting the proxy for the rate limiter', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/compose.override.yaml');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(/^\s+TRUST_PROXY: "true"\n/mu, '');
+      assert.notEqual(after, before, 'TRUST_PROXY mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /overlay must set TRUST_PROXY: "true" on paper-api/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

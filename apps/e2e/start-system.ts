@@ -845,6 +845,7 @@ async function main(): Promise<void> {
     adminApiKey: controlCredential,
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 30_000,
+    trustProxy: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
   };

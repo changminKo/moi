@@ -72,6 +72,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     adminApiKey: 'runtime-admin-key-at-least-32-bytes!',
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 5_000,
+    trustProxy: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
     ...overrides,
@@ -380,6 +381,46 @@ describe('ProductionRuntime', () => {
   // checked-out client, so a client nobody released pins the tail step for the
   // whole budget; the forced stop now carries the pool counters (how many were
   // out, how many callers queued — one such client, no queue, here).
+  // #34: the write limiter was registered nowhere; production had no 429.
+  it(
+    'A9: limits writes per client IP with the public 429 contract, behind a trusted proxy',
+    async () => {
+      const { origin } = await start({ config: { trustProxy: true } });
+      const client = await anonymousSession(origin);
+      const quote = (ip: string) =>
+        json(`${origin}/api/v1/fx/quotes`, {
+          method: 'POST',
+          headers: {
+            origin: 'http://127.0.0.1:0',
+            cookie: client.cookie,
+            'x-csrf-token': client.csrf,
+            'idempotency-key': randomUUID(),
+            'content-type': 'application/json',
+            'x-forwarded-for': ip,
+          },
+          body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '1000' }),
+        });
+
+      const accepted: number[] = [];
+      for (let i = 0; i < 10; i += 1)
+        accepted.push((await quote('198.51.100.7')).status);
+      expect(accepted.every((status) => status < 300)).toBe(true);
+
+      const refused = await quote('198.51.100.7');
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get('retry-after')).toBe('1');
+      expect(refused.body).toMatchObject({
+        code: 'RATE_LIMITED',
+        retryable: true,
+        retryAfter: 1,
+      });
+
+      // Another client, another bucket.
+      expect((await quote('198.51.100.8')).status).toBeLessThan(300);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it(
     'A5b: a pool client nobody released pins db.destroy, and the forced stop reports the pool counters',
     async () => {

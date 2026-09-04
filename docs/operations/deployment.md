@@ -379,6 +379,18 @@ requires, and the artefacts are the same ones the local smoke uses.
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
 
+## Write rate limits
+
+`/api/v1/*` writes are limited per client IP (#34, spec §16.56): POST/PATCH
+10 per second, DELETE 20 per second; reads and `/health/*` are never limited.
+The refusal is the public `429 RATE_LIMITED` envelope with `Retry-After`. The
+client address is `request.ip`, which behind Caddy is the proxy unless the API
+trusts `X-Forwarded-For` — so the Oracle overlay sets `TRUST_PROXY: "true"` on
+`paper-api` (Caddy is the only ingress there; the API publishes no port) and
+the base compose, which exposes the API directly, keeps the default `false`.
+The deployment-contract checker holds both. The limiter state is in-process:
+one API process, no Redis involvement.
+
 ## Strategy runner (`bot`, opt-in)
 
 The strategy runner is the compose service `bot`, behind the `bot` profile, built

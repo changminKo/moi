@@ -40,6 +40,12 @@ const environmentSchema = z.object({
   TOSS_CLIENT_SECRET: z.string().optional(),
   TOSS_REST_BASE_URL: z.url().default(TOSS_CONTRACT_SERVERS.rest),
   TOSS_WS_URL: z.url().default(TOSS_CONTRACT_SERVERS.ws),
+  /**
+   * Whether `X-Forwarded-For` names the client. Only true behind the
+   * deployment's own reverse proxy (the Oracle overlay's Caddy, the sole
+   * ingress); a directly exposed API must not trust a header anyone can send.
+   */
+  TRUST_PROXY: z.enum(['true', 'false']).default('false'),
   SHUTDOWN_DRAIN_DEADLINE_MS: z.coerce
     .number()
     .int()
@@ -174,6 +180,8 @@ export interface AppConfig {
   readonly marketDataAdapter: MarketDataAdapter;
   readonly toss?: TossConfig;
   readonly shutdownDrainDeadlineMs: number;
+  /** Fastify `trustProxy`: derive `request.ip` from `X-Forwarded-For`. */
+  readonly trustProxy: boolean;
   readonly recoveryStabilityMs: number;
   readonly fees: FeeSchedules;
 }
@@ -264,6 +272,7 @@ export function loadConfig(
     marketDataAdapter,
     ...(toss ? { toss } : {}),
     shutdownDrainDeadlineMs: parsed.SHUTDOWN_DRAIN_DEADLINE_MS,
+    trustProxy: parsed.TRUST_PROXY === 'true',
     recoveryStabilityMs: parsed.RECOVERY_STABILITY_MS,
     fees: resolveFees(parsed.NODE_ENV, parsed),
   };
