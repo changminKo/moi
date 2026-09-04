@@ -58,8 +58,8 @@ describe('portfolio reconciliation', () => {
 
   it('coalesces a sequence gap and ignores later events while stale', () => {
     // A full patch, so STALE here can only come from the gap itself (#95's
-    // sibling: with the bare `event()` fixture the gap check was never
-    // reached and removing it left this test green).
+    // sibling: with the bare `event()` fixture `!isSnapshotPatch` also forced
+    // STALE, so removing the gap check left this test green).
     const afterGap = reducePortfolio(
       createPortfolioState(snapshot('42')),
       patch('e44', '44'),

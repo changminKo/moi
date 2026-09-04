@@ -94,7 +94,7 @@ The order above is strict. PR #97 currently computes realised PnL from
   `@moi/strategy-reporter`'s `maskOutbound`; remove the app-local duplicate.
 - [x] **#86 P1 with packaging — harden tool provisioning detection.** Done in PR #105. The
   checker must not depend on one literal shell-guard spelling.
-- [x] **#93 P1 when enabling the bot — ship runner image wiring atomically.** Done in PR #101; the bot was enabled in production on 2026-09-04.
+- [x] **#93 P1 when enabling the bot — ship runner image wiring atomically.** Done in PR #101; the bot was enabled in production on 2026-09-04 (operator action — `runner.json`, `COMPOSE_PROFILES=bot`, `deploy.sh`; not reproducible from the repository).
   Dockerfile, publish workflow, compose override, deployment-contract coverage,
   and executable example-config validation land together.
 - [ ] **#96 P1 before tick logging is enabled — rotate `BOT_TICK_LOG`.** Bound
