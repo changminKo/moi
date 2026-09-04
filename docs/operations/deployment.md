@@ -389,9 +389,13 @@ trusts `X-Forwarded-For` — so the Oracle overlay sets `TRUST_PROXY: "true"` on
 `paper-api` (Caddy is the only ingress there; the API publishes no port) and
 the base compose, which exposes the API directly, keeps the default `false`.
 Trust means exactly one hop: the address Caddy appended, never one the client
-wrote first, so a forged header cannot choose its own bucket.
-The deployment-contract checker holds both. The limiter state is in-process:
-one API process, no Redis involvement.
+wrote first, so a forged header cannot choose its own bucket — and the checker
+also refuses a Caddyfile that declares `trusted_proxies`, which would make that
+appended value an upstream's word again. The limiter state is in-process and
+bounded (10 000 keys, expired entries swept first): one API process, no Redis.
+Every refusal counts `http_rate_limited_total{kind}` on `/metrics` and logs
+`http.rate_limited`. `RATE_LIMITS=off` is for test harnesses; a production
+process refuses to start with it, and no compose file may set it.
 
 ## Strategy runner (`bot`, opt-in)
 

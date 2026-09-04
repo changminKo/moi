@@ -1068,6 +1068,29 @@ check(
       'true',
       'the base compose exposes paper-api directly and must not trust X-Forwarded-For',
     );
+    // The API trusts exactly the hop Caddy appends. That is the client only
+    // while Caddy itself trusts nobody upstream: with `trusted_proxies` set,
+    // Caddy keeps an incoming X-Forwarded-For and the appended value becomes
+    // whatever the upstream forwarded — the spoof the hop-0 trust closes.
+    assert.doesNotMatch(
+      read('infra/oracle/Caddyfile'),
+      /trusted_proxies/u,
+      'infra/oracle/Caddyfile must not declare trusted_proxies while the API trusts one proxy hop',
+    );
+    // `RATE_LIMITS=off` is a test-harness setting; the config refuses it in
+    // production, and no compose file may even try.
+    for (const [file, text] of [
+      ['infra/compose.yaml', read('infra/compose.yaml')],
+      [
+        'infra/oracle/compose.override.yaml',
+        read('infra/oracle/compose.override.yaml'),
+      ],
+    ])
+      assert.doesNotMatch(
+        text,
+        /RATE_LIMITS/u,
+        `${file} must not set RATE_LIMITS (production always enforces)`,
+      );
   },
 );
 

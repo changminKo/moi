@@ -975,8 +975,16 @@ export class ProductionRuntime {
       clock: { now: () => Date.now() },
       registerIngress: (instance) => {
         // Rate limits first: a 429 is decided before the admission gate
-        // counts the request, so a flood never inflates the drain.
-        registerRateLimits(instance, limiter);
+        // counts the request, so a flood never inflates the drain. `off` is
+        // a test-harness setting the config refuses in production.
+        if (config.rateLimitsEnabled)
+          registerRateLimits(instance, limiter, {
+            publicOrigin: config.publicOrigin,
+            onRejected: ({ kind, path, requestId }) => {
+              this.metrics.counter('http_rate_limited_total', { kind });
+              this.#log('http.rate_limited', { kind, path, requestId });
+            },
+          });
         this.#gate.register(instance);
       },
       registerRoutes: async (instance) => {

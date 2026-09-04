@@ -139,6 +139,22 @@ describe('loadConfig (§5.1, A8)', () => {
       }).toss?.restBaseUrl,
     ).toBe('https://mock.example');
   });
+  it('enforces write rate limits by default and refuses to switch them off in production (#34)', () => {
+    const test = loadConfig({ ...BASE, NODE_ENV: 'test' });
+    expect(test.rateLimitsEnabled).toBe(true);
+    expect(test.trustProxy).toBe(false);
+    expect(
+      loadConfig({ ...BASE, NODE_ENV: 'test', RATE_LIMITS: 'off' })
+        .rateLimitsEnabled,
+    ).toBe(false);
+    expect(
+      loadConfig({ ...BASE, NODE_ENV: 'test', TRUST_PROXY: 'true' }).trustProxy,
+    ).toBe(true);
+    expect(() =>
+      loadConfig({ ...BASE, NODE_ENV: 'production', RATE_LIMITS: 'off' }),
+    ).toThrow(/RATE_LIMITS=off is forbidden in production/);
+  });
+
   it('bounds the tunable timers', () => {
     const config = loadConfig({ ...BASE, NODE_ENV: 'test' });
     expect(config.shutdownDrainDeadlineMs).toBe(30_000);

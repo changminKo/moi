@@ -46,6 +46,12 @@ const environmentSchema = z.object({
    * ingress); a directly exposed API must not trust a header anyone can send.
    */
   TRUST_PROXY: z.enum(['true', 'false']).default('false'),
+  /**
+   * `off` exists for test harnesses only: every integration test shares one
+   * loopback address and legitimately writes faster than a client may. A
+   * production process refuses it (see the refinement below).
+   */
+  RATE_LIMITS: z.enum(['enforce', 'off']).default('enforce'),
   SHUTDOWN_DRAIN_DEADLINE_MS: z.coerce
     .number()
     .int()
@@ -182,6 +188,8 @@ export interface AppConfig {
   readonly shutdownDrainDeadlineMs: number;
   /** Fastify `trustProxy`: derive `request.ip` from `X-Forwarded-For`. */
   readonly trustProxy: boolean;
+  /** Whether `/api/v1/*` writes are rate limited (#34); never false in production. */
+  readonly rateLimitsEnabled: boolean;
   readonly recoveryStabilityMs: number;
   readonly fees: FeeSchedules;
 }
@@ -214,6 +222,9 @@ export function loadConfig(
   const parsed = environmentSchema.parse(environment);
   if (parsed.SESSION_HASH_KEYS.length === 0) {
     throw new ConfigError('SESSION_HASH_KEYS must contain at least one key');
+  }
+  if (parsed.NODE_ENV === 'production' && parsed.RATE_LIMITS === 'off') {
+    throw new ConfigError('RATE_LIMITS=off is forbidden in production');
   }
   if (parsed.NODE_ENV === 'production' && !parsed.ADMIN_API_KEY) {
     throw new ConfigError('ADMIN_API_KEY is required in production');
@@ -273,6 +284,7 @@ export function loadConfig(
     ...(toss ? { toss } : {}),
     shutdownDrainDeadlineMs: parsed.SHUTDOWN_DRAIN_DEADLINE_MS,
     trustProxy: parsed.TRUST_PROXY === 'true',
+    rateLimitsEnabled: parsed.RATE_LIMITS === 'enforce',
     recoveryStabilityMs: parsed.RECOVERY_STABILITY_MS,
     fees: resolveFees(parsed.NODE_ENV, parsed),
   };

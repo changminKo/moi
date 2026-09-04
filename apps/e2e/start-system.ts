@@ -846,6 +846,7 @@ async function main(): Promise<void> {
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 30_000,
     trustProxy: false,
+    rateLimitsEnabled: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
   };

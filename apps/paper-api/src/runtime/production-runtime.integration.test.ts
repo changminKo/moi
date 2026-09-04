@@ -73,6 +73,7 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     marketDataAdapter: 'fake',
     shutdownDrainDeadlineMs: 5_000,
     trustProxy: false,
+    rateLimitsEnabled: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
     ...overrides,
@@ -385,7 +386,9 @@ describe('ProductionRuntime', () => {
   it(
     'A9: limits writes per client IP with the public 429 contract, behind a trusted proxy',
     async () => {
-      const { origin } = await start({ config: { trustProxy: true } });
+      const { origin } = await start({
+        config: { trustProxy: true, rateLimitsEnabled: true },
+      });
       const client = await anonymousSession(origin);
       const quote = (ip: string) =>
         json(`${origin}/api/v1/fx/quotes`, {
