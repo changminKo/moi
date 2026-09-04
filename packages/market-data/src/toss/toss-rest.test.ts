@@ -269,6 +269,11 @@ describe('TossRestClient.getCalendarDay (#122)', () => {
         { result: { today: { date: 20260325, integrated: null } } },
       ],
       [
+        'a `today` whose date is empty',
+        'KR',
+        { result: { today: { date: '', integrated: null } } },
+      ],
+      [
         'a KR `integrated` that is not an object',
         'KR',
         { result: { today: { date: '2026-03-25', integrated: 'x' } } },

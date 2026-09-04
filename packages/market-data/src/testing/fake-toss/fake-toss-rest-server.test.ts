@@ -213,13 +213,55 @@ describe('FakeTossRestServer (§9.2)', () => {
         nextBusinessDay: { date: '2026-03-26' },
       },
     });
+    // New York 09:30–16:00 rendered in KST at that date's real offset: the
+    // contract's own summer example, and one hour later in winter.
     expect(await read('US', '2026-03-25')).toMatchObject({
       result: {
         today: {
           date: '2026-03-25',
+          preMarket: {
+            startTime: '2026-03-25T17:00:00+09:00',
+            endTime: '2026-03-25T22:30:00+09:00',
+          },
           regularMarket: {
             startTime: '2026-03-25T22:30:00+09:00',
             endTime: '2026-03-26T05:00:00+09:00',
+          },
+          afterMarket: {
+            startTime: '2026-03-26T05:00:00+09:00',
+            endTime: '2026-03-26T07:00:00+09:00',
+          },
+        },
+      },
+    });
+    expect(await read('US', '2026-01-07')).toMatchObject({
+      result: {
+        today: {
+          date: '2026-01-07',
+          preMarket: {
+            startTime: '2026-01-07T18:00:00+09:00',
+            endTime: '2026-01-07T23:30:00+09:00',
+          },
+          regularMarket: {
+            startTime: '2026-01-07T23:30:00+09:00',
+            endTime: '2026-01-08T06:00:00+09:00',
+          },
+          afterMarket: {
+            startTime: '2026-01-08T06:00:00+09:00',
+            endTime: '2026-01-08T08:00:00+09:00',
+          },
+        },
+      },
+    });
+    // Seoul has no DST, so KR reads the same window in both seasons.
+    expect(await read('KR', '2026-01-07')).toMatchObject({
+      result: {
+        today: {
+          integrated: {
+            regularMarket: {
+              startTime: '2026-01-07T09:00:00+09:00',
+              endTime: '2026-01-07T15:30:00+09:00',
+            },
           },
         },
       },

@@ -67,22 +67,78 @@ function nearestWeekday(date: string, step: number): string {
   return cursor;
 }
 
+/** The zone whose local clock defines each market's session times. */
+const MARKET_TIME_ZONE: Readonly<Record<Market, string>> = {
+  KR: 'Asia/Seoul',
+  US: 'America/New_York',
+};
+
+/** Minutes `timeZone` is offset from UTC at `instant`. */
+function zoneOffsetMinutes(timeZone: string, instant: number): number {
+  const name = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    timeZoneName: 'longOffset',
+  })
+    .formatToParts(new Date(instant))
+    .find((part) => part.type === 'timeZoneName')?.value;
+  const parsed = /^GMT([+-])(\d{2}):(\d{2})$/u.exec(name ?? '');
+  // A bare "GMT" means the zone sits at UTC on that date.
+  if (!parsed) return 0;
+  return (
+    (parsed[1] === '-' ? -1 : 1) * (Number(parsed[2]) * 60 + Number(parsed[3]))
+  );
+}
+
 /**
- * The regular session a market runs on an unseeded weekday, in the contract's
- * canonical times (KR 09:00–15:30 KST; US 22:30 KST through 05:00 KST the next
- * day). Weekends are closed.
+ * The instant `hh:mm` local time falls on, on `date`, in `timeZone`. The offset
+ * is read twice: once for the wall time read as UTC, then again at the instant
+ * that produced, so a date on the far side of a DST change resolves correctly.
+ */
+function marketInstant(
+  date: string,
+  timeZone: string,
+  hh: number,
+  mm: number,
+): number {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const naive = Date.parse(`${date}T${pad(hh)}:${pad(mm)}:00Z`);
+  const first = naive - zoneOffsetMinutes(timeZone, naive) * 60_000;
+  return naive - zoneOffsetMinutes(timeZone, first) * 60_000;
+}
+
+/**
+ * The contract renders every calendar time in KST (`+09:00`), for both markets.
+ * Seoul has no DST, so the rendering is a fixed nine-hour shift.
+ */
+function kst(instant: number): string {
+  return `${new Date(instant + 9 * 3_600_000).toISOString().slice(0, 19)}+09:00`;
+}
+
+function localSession(
+  date: string,
+  market: Market,
+  opens: readonly [number, number],
+  closes: readonly [number, number],
+): FakeCalendarSession {
+  const zone = MARKET_TIME_ZONE[market];
+  return {
+    startTime: kst(marketInstant(date, zone, opens[0], opens[1])),
+    endTime: kst(marketInstant(date, zone, closes[0], closes[1])),
+  };
+}
+
+/**
+ * The regular session a market runs on an unseeded weekday, defined in the
+ * market's *own* clock (Seoul 09:00–15:30, New York 09:30–16:00) and rendered
+ * in KST at that date's real offset. Hard-coding the KST window instead would
+ * pin the US session to daylight time and put January's 08:45 EST inside the
+ * regular session. Weekends are closed.
  */
 const DEFAULT_REGULAR_SESSION: Readonly<
   Record<Market, (date: string) => FakeCalendarSession>
 > = {
-  KR: (date) => ({
-    startTime: `${date}T09:00:00+09:00`,
-    endTime: `${date}T15:30:00+09:00`,
-  }),
-  US: (date) => ({
-    startTime: `${date}T22:30:00+09:00`,
-    endTime: `${shiftDate(date, 1)}T05:00:00+09:00`,
-  }),
+  KR: (date) => localSession(date, 'KR', [9, 0], [15, 30]),
+  US: (date) => localSession(date, 'US', [9, 30], [16, 0]),
 };
 
 /**
@@ -117,7 +173,11 @@ function krMarketDay(
   };
 }
 
-/** One `UsMarketDay`; a holiday is all four sessions null. */
+/**
+ * One `UsMarketDay`; a holiday is all four sessions null. Pre- and after-market
+ * follow New York's clock like the regular session does; `dayMarket` is Toss's
+ * own Korean-daytime session and stays anchored to the KST date.
+ */
 function usMarketDay(
   date: string,
   regular: FakeCalendarSession | null,
@@ -136,15 +196,9 @@ function usMarketDay(
       startTime: `${date}T09:00:00+09:00`,
       endTime: `${date}T16:50:00+09:00`,
     },
-    preMarket: {
-      startTime: `${date}T17:00:00+09:00`,
-      endTime: `${date}T22:30:00+09:00`,
-    },
+    preMarket: localSession(date, 'US', [4, 0], [9, 30]),
     regularMarket: { startTime: regular.startTime, endTime: regular.endTime },
-    afterMarket: {
-      startTime: `${shiftDate(date, 1)}T05:00:00+09:00`,
-      endTime: `${shiftDate(date, 1)}T07:00:00+09:00`,
-    },
+    afterMarket: localSession(date, 'US', [16, 0], [18, 0]),
   };
 }
 
