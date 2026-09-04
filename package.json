@@ -15,7 +15,8 @@
     "check:deployment": "node scripts/check-deployment-contract.mjs",
     "test:deployment": "node --test scripts/check-deployment-contract.test.mjs infra/oracle/status-check.test.mjs infra/oracle/notify.test.mjs",
     "preflight:deploy": "node scripts/preflight-deploy.mjs",
-    "test:preflight": "node --test scripts/preflight-deploy.test.mjs"
+    "test:preflight": "node --test scripts/preflight-deploy.test.mjs",
+    "smoke:prod": "pnpm --filter @moi/e2e test:smoke"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.11",
