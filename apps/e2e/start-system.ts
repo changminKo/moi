@@ -68,9 +68,29 @@ import { stateFilePath } from './state-file.js';
 const API_PORT = 3100;
 const WEB_PORT = 4173;
 const CONTROL_PORT = 3101;
+// The second deployment shape (#25). Production comes in two:
+//
+//   * the Oracle reference host, where Caddy serves the app and the API from
+//     one hostname and routes by path (spec §16.29) — modelled by the vite
+//     preview proxy on WEB_PORT, which is what every project used to use;
+//   * the base compose, where `apps/web/server.mjs` serves the bundle on its
+//     own origin and injects `PUBLIC_API_ORIGIN` into `/runtime-config.js`,
+//     so the browser talks to the API cross-origin.
+//
+// Only the first was ever exercised, and it is the one that cannot see a
+// wrong API origin: every request goes to the page's own origin either way.
+// These two ports carry the second shape. A different port is a different
+// origin, so the browser really performs CORS preflight, credentialed fetch,
+// the CSRF `Origin` check and the WebSocket `Origin` check. The API's
+// `publicOrigin` is per-instance, so the shape needs its own listener rather
+// than a second web server pointed at the first.
+const CROSS_API_PORT = 3102;
+const CROSS_WEB_PORT = 4174;
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(packageRoot, '../..');
 const publicOrigin = `http://127.0.0.1:${WEB_PORT}`;
+const crossWebOrigin = `http://127.0.0.1:${CROSS_WEB_PORT}`;
+const crossApiOrigin = `http://127.0.0.1:${CROSS_API_PORT}`;
 const controlCredential = randomBytes(32).toString('base64url');
 
 type Market = 'KR' | 'US';
@@ -86,6 +106,7 @@ const streamHub = new StreamHub();
 const streamEvents = new Map<string, DurableAccountEvent[]>();
 const streamSessions = new Set<string>();
 let streamBridge: StreamUpgradeHandler | undefined;
+let crossStreamBridge: StreamUpgradeHandler | undefined;
 let streamHeartbeat: StreamHeartbeatLoop | undefined;
 let mode: Mode = 'NORMAL';
 let snapshotRequestCount = 0;
@@ -98,8 +119,10 @@ let pool: Pool;
 let postgres: StartedTestContainer;
 let redis: StartedTestContainer;
 let apiApp: FastifyInstance;
+let crossApiApp: FastifyInstance | undefined;
 let controlServer: Server;
 let webProcess: ChildProcess | undefined;
+let crossWebProcess: ChildProcess | undefined;
 let database: Database | undefined;
 let unitOfWork: UnitOfWork | undefined;
 let sessionService: SessionService | undefined;
@@ -670,18 +693,18 @@ async function runPnpm(args: readonly string[]): Promise<void> {
   });
 }
 
-async function waitForWeb(): Promise<void> {
+async function waitForWeb(origin: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(publicOrigin);
+      const response = await fetch(origin);
       if (response.ok) return;
     } catch {
       // The condition is polled until the bounded readiness deadline.
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
-  throw new Error('web preview did not become ready');
+  throw new Error(`web server at ${origin} did not become ready`);
 }
 
 async function stopChild(child: ChildProcess | undefined): Promise<void> {
@@ -727,9 +750,13 @@ function cleanup(): Promise<void> {
     );
     streamHeartbeat?.stop();
     streamBridge?.detach();
+    crossStreamBridge?.detach();
     await settle(() => streamHub.closeAll(1012, 'SERVICE_RESTART'));
     await settle(apiApp ? () => apiApp.close() : undefined);
+    const crossApi = crossApiApp;
+    await settle(crossApi ? () => crossApi.close() : undefined);
     await settle(() => stopChild(webProcess));
+    await settle(() => stopChild(crossWebProcess));
     const feed = fakeMarketData;
     const ledger = database;
     await settle(feed ? () => feed.close() : undefined);
@@ -786,7 +813,11 @@ async function executeCancelOrAmend(command: {
 }
 
 async function main(): Promise<void> {
-  await Promise.all([API_PORT, WEB_PORT, CONTROL_PORT].map(assertPortFree));
+  await Promise.all(
+    [API_PORT, WEB_PORT, CONTROL_PORT, CROSS_API_PORT, CROSS_WEB_PORT].map(
+      assertPortFree,
+    ),
+  );
   postgres = await new GenericContainer('postgres:16-alpine')
     .withEnvironment({
       POSTGRES_USER: 'moi',
@@ -849,6 +880,12 @@ async function main(): Promise<void> {
     rateLimitsEnabled: false,
     recoveryStabilityMs: 0,
     fees: ZERO_FEE_SCHEDULES,
+  };
+  // Same everything, one different port and one different browser origin.
+  const crossConfig: AppConfig = {
+    ...config,
+    port: CROSS_API_PORT,
+    publicOrigin: crossWebOrigin,
   };
   database = createDatabase(config.databaseUrl);
   unitOfWork = new UnitOfWork(database, { backoff: async () => undefined });
@@ -960,119 +997,133 @@ async function main(): Promise<void> {
       await drainOutbox();
     },
   });
-  apiApp = await buildApp(config, {
-    clock: { now: () => Date.now() },
-    registerRoutes: async (app) => {
-      app.addHook('preHandler', async (request) => {
-        if (
-          request.method === 'GET' &&
-          request.url.startsWith('/api/v1/portfolio')
-        ) {
-          snapshotRequestCount += 1;
-          snapshotInFlight += 1;
-          snapshotMaxConcurrency = Math.max(
-            snapshotMaxConcurrency,
-            snapshotInFlight,
-          );
-          await snapshotBarrier;
-        }
-        if (
-          request.method === 'POST' &&
-          request.url.startsWith('/api/v1/sessions/anonymous')
-        )
-          return;
-        if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
-          return;
-        const authenticated = await principal(request);
-        const csrf = request.headers['x-csrf-token'];
-        if (
-          request.headers.origin !== publicOrigin ||
-          typeof csrf !== 'string' ||
-          !verifyCsrfToken(config.csrfSecret, authenticated.id, csrf)
-        )
-          throw Object.assign(new Error('CSRF validation failed'), {
-            code: 'FORBIDDEN',
-            statusCode: 403,
-          });
-      });
-      app.addHook('onResponse', async (request) => {
-        if (
-          request.method === 'GET' &&
-          request.url.startsWith('/api/v1/portfolio')
-        ) {
-          snapshotInFlight -= 1;
-          snapshotCompletedCount += 1;
-        }
-      });
-      await registerSessionRoutes(app, sessionService as SessionService);
-      await registerHealthRoutes(app, {
-        db: async () => {
-          await pool.query('select 1');
-          return true;
-        },
-        audit: () => true,
-        marketData: () => ({ mode }),
-        trading: () => health(),
-      });
-      await registerInstrumentRoutes(
-        app,
-        new InstrumentService({
-          catalog: [
-            {
-              market: 'KR',
-              symbol: '005930',
-              name: 'Samsung Electronics',
-              tradable: true,
-              currency: 'KRW',
-            },
-            {
-              market: 'US',
-              symbol: 'AAPL',
-              name: 'Apple',
-              tradable: true,
-              currency: 'USD',
-            },
-          ],
-        }),
-        // Mirrors `ProductionRuntime.#quote` field for field, including the
-        // book: a harness that answers in a shape production never serves
-        // cannot catch a wire/type mismatch, and this one used to answer
-        // `bids`/`asks` spelled `size` — the web's spelling, not the wire's —
-        // which is precisely why e2e stayed green through the crash.
-        (market, symbol) => {
-          const current = books.get(`${market}:${symbol}`) ?? {
-            bids: [{ price: market === 'KR' ? '69900' : '199', volume: '10' }],
-            asks: [{ price: market === 'KR' ? '70000' : '200', volume: '10' }],
-          };
-          return {
-            market,
-            symbol,
-            price: current.asks[0]?.price ?? null,
-            asOf: new Date().toISOString(),
-            health: mode === 'NORMAL' ? 'HEALTHY' : mode,
-            recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
-            marketDataVersion: marketVersion.toString(),
-            currency: market === 'KR' ? 'KRW' : 'USD',
-            bids: current.bids,
-            asks: current.asks,
-          };
-        },
-      );
-      await registerPortfolioRoutes(app, {
-        principal,
-        unitOfWork: unitOfWork as UnitOfWork,
-      });
-      await registerFxRoutes(app, fxService, {
-        principal,
-        canFx: () => mode !== 'CANCEL_ONLY',
-      });
-      await registerOrderRoutes(app, {
-        principal,
-        service: orderService,
-      });
-    },
-  });
+  // Both deployment shapes are the same system — one database, one engine
+  // set, one control server — and differ only in the origin the browser
+  // sits on. The API bakes that origin into `publicOrigin` (CORS, the
+  // `Origin` fence in `buildApp`, the CSRF hook below and the WebSocket
+  // upgrade all compare against it), so each shape gets its own listener
+  // over the shared services.
+  const buildPaperApi = (instanceConfig: AppConfig) =>
+    buildApp(instanceConfig, {
+      clock: { now: () => Date.now() },
+      registerRoutes: async (app) => {
+        app.addHook('preHandler', async (request) => {
+          if (
+            request.method === 'GET' &&
+            request.url.startsWith('/api/v1/portfolio')
+          ) {
+            snapshotRequestCount += 1;
+            snapshotInFlight += 1;
+            snapshotMaxConcurrency = Math.max(
+              snapshotMaxConcurrency,
+              snapshotInFlight,
+            );
+            await snapshotBarrier;
+          }
+          if (
+            request.method === 'POST' &&
+            request.url.startsWith('/api/v1/sessions/anonymous')
+          )
+            return;
+          if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method))
+            return;
+          const authenticated = await principal(request);
+          const csrf = request.headers['x-csrf-token'];
+          if (
+            request.headers.origin !== instanceConfig.publicOrigin ||
+            typeof csrf !== 'string' ||
+            !verifyCsrfToken(instanceConfig.csrfSecret, authenticated.id, csrf)
+          )
+            throw Object.assign(new Error('CSRF validation failed'), {
+              code: 'FORBIDDEN',
+              statusCode: 403,
+            });
+        });
+        app.addHook('onResponse', async (request) => {
+          if (
+            request.method === 'GET' &&
+            request.url.startsWith('/api/v1/portfolio')
+          ) {
+            snapshotInFlight -= 1;
+            snapshotCompletedCount += 1;
+          }
+        });
+        await registerSessionRoutes(app, sessionService as SessionService);
+        await registerHealthRoutes(app, {
+          db: async () => {
+            await pool.query('select 1');
+            return true;
+          },
+          audit: () => true,
+          marketData: () => ({ mode }),
+          trading: () => health(),
+        });
+        await registerInstrumentRoutes(
+          app,
+          new InstrumentService({
+            catalog: [
+              {
+                market: 'KR',
+                symbol: '005930',
+                name: 'Samsung Electronics',
+                tradable: true,
+                currency: 'KRW',
+              },
+              {
+                market: 'US',
+                symbol: 'AAPL',
+                name: 'Apple',
+                tradable: true,
+                currency: 'USD',
+              },
+            ],
+          }),
+          // Mirrors `ProductionRuntime.#quote` field for field, including the
+          // book: a harness that answers in a shape production never serves
+          // cannot catch a wire/type mismatch, and this one used to answer
+          // `bids`/`asks` spelled `size` — the web's spelling, not the wire's —
+          // which is precisely why e2e stayed green through the crash.
+          (market, symbol) => {
+            const current = books.get(`${market}:${symbol}`) ?? {
+              bids: [
+                { price: market === 'KR' ? '69900' : '199', volume: '10' },
+              ],
+              asks: [
+                { price: market === 'KR' ? '70000' : '200', volume: '10' },
+              ],
+            };
+            return {
+              market,
+              symbol,
+              price: current.asks[0]?.price ?? null,
+              asOf: new Date().toISOString(),
+              health: mode === 'NORMAL' ? 'HEALTHY' : mode,
+              recoveryEpoch: mode === 'NORMAL' ? '2' : '1',
+              marketDataVersion: marketVersion.toString(),
+              currency: market === 'KR' ? 'KRW' : 'USD',
+              bids: current.bids,
+              asks: current.asks,
+            };
+          },
+        );
+        await registerPortfolioRoutes(app, {
+          principal,
+          unitOfWork: unitOfWork as UnitOfWork,
+        });
+        await registerFxRoutes(app, fxService, {
+          principal,
+          canFx: () => mode !== 'CANCEL_ONLY',
+        });
+        await registerOrderRoutes(app, {
+          principal,
+          service: orderService,
+        });
+      },
+    });
+  apiApp = await buildPaperApi(config);
+  crossApiApp = await buildPaperApi(crossConfig);
   await apiApp.ready();
+  await crossApiApp.ready();
   const streamSessionService = sessionService;
   streamBridge = createStreamUpgradeHandler({
     server: apiApp.server,
@@ -1091,6 +1142,26 @@ async function main(): Promise<void> {
     tradableSymbols: new Set(['KR:005930', 'US:AAPL']),
   });
   streamBridge.attach();
+  // The same hub behind the second listener: a browser on the cross-origin
+  // page upgrades against `crossApiOrigin`, and the upgrade handler checks the
+  // `Origin` header against that listener's own public origin.
+  crossStreamBridge = createStreamUpgradeHandler({
+    server: crossApiApp.server,
+    publicOrigin: crossWebOrigin,
+    sessionService: {
+      authenticate: async (token) => {
+        const result = await streamSessionService.authenticate(token);
+        streamSessions.add(result.session.id);
+        return result;
+      },
+    },
+    limiter: new LayeredRateLimiter(),
+    hub: streamHub,
+    gate: { isOpen: () => true },
+    source: streamSource,
+    tradableSymbols: new Set(['KR:005930', 'US:AAPL']),
+  });
+  crossStreamBridge.attach();
   streamHeartbeat = new StreamHeartbeatLoop({ hub: streamHub });
   streamHeartbeat.start();
   controlServer = createServer((request, response) => {
@@ -1102,6 +1173,7 @@ async function main(): Promise<void> {
   });
   await Promise.all([
     apiApp.listen({ host: config.host, port: config.port }),
+    crossApiApp.listen({ host: crossConfig.host, port: crossConfig.port }),
     listen(controlServer, CONTROL_PORT),
   ]);
   await writeFile(
@@ -1133,14 +1205,36 @@ async function main(): Promise<void> {
       stdio: 'inherit',
     },
   );
-  await waitForWeb();
-  console.log(`Moi E2E system ready at ${publicOrigin}`);
+  // The second shape serves the very same `dist` through the production static
+  // server, which is what generates `/runtime-config.js` from
+  // `PUBLIC_API_ORIGIN`. Nothing proxies `/api` here: the bundle reads that
+  // origin and goes to the other listener itself.
+  crossWebProcess = spawn(
+    'node',
+    [resolve(workspaceRoot, 'apps/web/server.mjs')],
+    {
+      cwd: workspaceRoot,
+      env: {
+        ...process.env,
+        WEB_DIST_DIR: resolve(workspaceRoot, 'apps/web/dist'),
+        HOST: '127.0.0.1',
+        PORT: String(CROSS_WEB_PORT),
+        PUBLIC_API_ORIGIN: crossApiOrigin,
+      },
+      stdio: 'inherit',
+    },
+  );
+  await Promise.all([waitForWeb(publicOrigin), waitForWeb(crossWebOrigin)]);
+  console.log(
+    `Moi E2E system ready at ${publicOrigin} (single origin) and ${crossWebOrigin} → ${crossApiOrigin} (cross origin)`,
+  );
 }
 
 process.once('SIGTERM', () => void cleanup().finally(() => process.exit(0)));
 process.once('SIGINT', () => void cleanup().finally(() => process.exit(0)));
 process.once('exit', () => {
   webProcess?.kill('SIGTERM');
+  crossWebProcess?.kill('SIGTERM');
 });
 
 await main().catch(async (error: unknown) => {

@@ -10,6 +10,33 @@ async function selectInstrument(
     .click();
 }
 
+/**
+ * Reads the authoritative snapshot from inside the page. It has to name the
+ * API rather than use a relative path: under the cross-origin project the
+ * page's own origin is the static web server, which answers 404 for `/api`,
+ * and a cross-origin fetch sends no cookie unless it asks. `apiOrigin` is read
+ * where the bundle reads it — the injected runtime config.
+ */
+async function portfolioReservations(
+  page: import('@playwright/test').Page,
+): Promise<readonly Record<string, unknown>[]> {
+  return page.evaluate(async () => {
+    const injected = (
+      window as unknown as {
+        __MOI_RUNTIME_CONFIG__?: { apiOrigin?: string };
+      }
+    ).__MOI_RUNTIME_CONFIG__;
+    const response = await fetch(
+      new URL('/api/v1/portfolio', injected?.apiOrigin ?? location.origin),
+      { credentials: 'include' },
+    );
+    const snapshot = (await response.json()) as {
+      reservations: readonly Record<string, unknown>[];
+    };
+    return snapshot.reservations;
+  });
+}
+
 async function submitOrder(page: import('@playwright/test').Page) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -95,13 +122,7 @@ test('cancels the OCO sibling and releases its reservation', async ({
   const orderId = await paperSystem.latestOrderId();
   await page.getByRole('link', { name: 'Portfolio' }).click();
   await expect(page.getByRole('row', { name: /AAPL 0 2 2/ })).toBeVisible();
-  const reservation = await page.evaluate(async () => {
-    const response = await fetch('/api/v1/portfolio');
-    const snapshot = (await response.json()) as {
-      reservations: readonly Record<string, unknown>[];
-    };
-    return snapshot.reservations[0];
-  });
+  const [reservation] = await portfolioReservations(page);
   expect(reservation).toMatchObject({
     kind: 'POSITION',
     market: 'US',
@@ -125,13 +146,7 @@ test('cancels the OCO sibling and releases its reservation', async ({
       .getByRole('region', { name: 'Closed positions' })
       .getByRole('row', { name: /AAPL/ }),
   ).toBeVisible();
-  const liveReservations = await page.evaluate(async () => {
-    const response = await fetch('/api/v1/portfolio');
-    const snapshot = (await response.json()) as {
-      reservations: readonly Record<string, unknown>[];
-    };
-    return snapshot.reservations;
-  });
+  const liveReservations = await portfolioReservations(page);
   expect(liveReservations).toEqual([]);
 });
 
