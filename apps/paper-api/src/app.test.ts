@@ -3,7 +3,7 @@ import { type AppDependencies, buildApp } from './app.js';
 import type { AppConfig } from './config.js';
 import { ZERO_FEE_SCHEDULES } from './config.js';
 
-const testConfig = (): AppConfig => ({
+const testConfig = (overrides: Partial<AppConfig> = {}): AppConfig => ({
   nodeEnv: 'test',
   host: '127.0.0.1',
   port: 0,
@@ -14,8 +14,11 @@ const testConfig = (): AppConfig => ({
   csrfSecret: 'test-csrf-secret',
   marketDataAdapter: 'fake',
   shutdownDrainDeadlineMs: 30_000,
+  trustProxy: false,
+  rateLimitsEnabled: false,
   recoveryStabilityMs: 0,
   fees: ZERO_FEE_SCHEDULES,
+  ...overrides,
 });
 
 const fakeDependencies = (): AppDependencies => ({
@@ -116,4 +119,52 @@ describe('paper API application', () => {
     );
     await app.close();
   });
+
+  // #34: only the nearest hop is trusted. A client that writes its own
+  // X-Forwarded-For before the proxy appends the real address must not be able
+  // to choose `request.ip` (and with it, its rate-limit bucket).
+  it('takes the address the proxy appended, not the one the client wrote', async () => {
+    const seen: string[] = [];
+    const app = await buildApp(testConfig({ trustProxy: true }), {
+      ...fakeDependencies(),
+      registerIngress: (instance) => {
+        instance.addHook('onRequest', async (request) => {
+          seen.push(request.ip);
+        });
+      },
+    });
+    await app.inject({
+      method: 'GET',
+      url: '/missing',
+      // client-forged value, then the proxy's own observation
+      headers: { 'x-forwarded-for': '198.51.100.99, 203.0.113.10' },
+    });
+    expect(seen).toStrictEqual(['203.0.113.10']);
+  });
+
+  // #34: the rate limiter keys on `request.ip`. Behind the deployment's own
+  // proxy that has to be the client, and nowhere else may a header decide it.
+  it.each([
+    [true, '203.0.113.10'],
+    [false, '127.0.0.1'],
+  ])(
+    'with trustProxy=%s, request.ip behind X-Forwarded-For is %s',
+    async (trustProxy, expected) => {
+      const seen: string[] = [];
+      const app = await buildApp(testConfig({ trustProxy }), {
+        ...fakeDependencies(),
+        registerIngress: (instance) => {
+          instance.addHook('onRequest', async (request) => {
+            seen.push(request.ip);
+          });
+        },
+      });
+      await app.inject({
+        method: 'GET',
+        url: '/missing',
+        headers: { 'x-forwarded-for': '203.0.113.10' },
+      });
+      expect(seen).toStrictEqual([expected]);
+    },
+  );
 });

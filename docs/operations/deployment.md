@@ -379,6 +379,24 @@ requires, and the artefacts are the same ones the local smoke uses.
    *Backup and restore*). Oracle may reclaim Always Free compute that stays
    idle; a serving `paper-api` is never idle by that measure.
 
+## Write rate limits
+
+`/api/v1/*` writes are limited per client IP (#34, spec §16.56): POST/PATCH
+10 per second, DELETE 20 per second; reads and `/health/*` are never limited.
+The refusal is the public `429 RATE_LIMITED` envelope with `Retry-After`. The
+client address is `request.ip`, which behind Caddy is the proxy unless the API
+trusts `X-Forwarded-For` — so the Oracle overlay sets `TRUST_PROXY: "true"` on
+`paper-api` (Caddy is the only ingress there; the API publishes no port) and
+the base compose, which exposes the API directly, keeps the default `false`.
+Trust means exactly one hop: the address Caddy appended, never one the client
+wrote first, so a forged header cannot choose its own bucket — and the checker
+also refuses a Caddyfile that declares `trusted_proxies`, which would make that
+appended value an upstream's word again. The limiter state is in-process and
+bounded (10 000 keys, expired entries swept first): one API process, no Redis.
+Every refusal counts `http_rate_limited_total{kind}` on `/metrics` and logs
+`http.rate_limited`. `RATE_LIMITS=off` is for test harnesses; a production
+process refuses to start with it, and no compose file may set it.
+
 ## Strategy runner (`bot`, opt-in)
 
 The strategy runner is the compose service `bot`, behind the `bot` profile, built

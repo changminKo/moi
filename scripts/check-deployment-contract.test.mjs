@@ -860,4 +860,68 @@ describe('check-deployment-contract (A8)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('fails when the overlay stops trusting the proxy for the rate limiter', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/compose.override.yaml');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(/^\s+TRUST_PROXY: "true"\n/mu, '');
+      assert.notEqual(after, before, 'TRUST_PROXY mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must set TRUST_PROXY: "true" under paper-api environment/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when Caddy starts trusting upstream proxies', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/Caddyfile');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'reverse_proxy paper-api:3000 {\n',
+        'reverse_proxy paper-api:3000 {\n\t\t\ttrusted_proxies private_ranges\n',
+      );
+      assert.notEqual(
+        after,
+        before,
+        'trusted_proxies mutation matched nothing',
+      );
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /must not declare trusted_proxies/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when a compose file tries to switch rate limits off', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/compose.override.yaml');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        '      TRUST_PROXY: "true"\n',
+        '      TRUST_PROXY: "true"\n      RATE_LIMITS: off\n',
+      );
+      assert.notEqual(after, before, 'RATE_LIMITS mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, /must not set RATE_LIMITS/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

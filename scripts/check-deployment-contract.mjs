@@ -1048,6 +1048,54 @@ check(
   },
 );
 
+// #34: the write limiter keys on `request.ip`. Behind the overlay's Caddy that
+// is the client only if the API trusts X-Forwarded-For; exposed directly (the
+// base compose publishes the port) it must not, or a header buys a fresh bucket.
+check(
+  'rate limiter sees the client address exactly where a proxy fronts the API',
+  () => {
+    const overlay = read('infra/oracle/compose.override.yaml');
+    const block =
+      overlay.match(/\n {2}paper-api:\n((?: {4}[^\n]*\n)+)/u)?.[1] ?? '';
+    const environment =
+      block.match(/\n {4}environment:\n((?: {6}[^\n]*\n)+)/u)?.[1] ?? '';
+    assert.match(
+      environment,
+      /^ {6}TRUST_PROXY: "true"$/mu,
+      'the Oracle overlay must set TRUST_PROXY: "true" under paper-api environment (Caddy is the only ingress there)',
+    );
+    const env = compose?.services?.['paper-api']?.environment ?? {};
+    assert.notStrictEqual(
+      String(env.TRUST_PROXY ?? 'false'),
+      'true',
+      'the base compose exposes paper-api directly and must not trust X-Forwarded-For',
+    );
+    // The API trusts exactly the hop Caddy appends. That is the client only
+    // while Caddy itself trusts nobody upstream: with `trusted_proxies` set,
+    // Caddy keeps an incoming X-Forwarded-For and the appended value becomes
+    // whatever the upstream forwarded — the spoof the hop-0 trust closes.
+    assert.doesNotMatch(
+      read('infra/oracle/Caddyfile'),
+      /trusted_proxies/u,
+      'infra/oracle/Caddyfile must not declare trusted_proxies while the API trusts one proxy hop',
+    );
+    // `RATE_LIMITS=off` is a test-harness setting; the config refuses it in
+    // production, and no compose file may even try.
+    for (const [file, text] of [
+      ['infra/compose.yaml', read('infra/compose.yaml')],
+      [
+        'infra/oracle/compose.override.yaml',
+        read('infra/oracle/compose.override.yaml'),
+      ],
+    ])
+      assert.doesNotMatch(
+        text,
+        /RATE_LIMITS/u,
+        `${file} must not set RATE_LIMITS (production always enforces)`,
+      );
+  },
+);
+
 check('provider egress allow list', () => {
   const doc = readYaml('infra/provider-allowlist.yaml');
   assert.strictEqual(

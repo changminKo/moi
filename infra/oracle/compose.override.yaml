@@ -46,6 +46,11 @@ services:
     ports: !override []
     expose:
       - "3000"
+    environment:
+      # Caddy is the only ingress here (ports are overridden away), so the
+      # X-Forwarded-For it sets is the client and the rate limiter keys on it.
+      # The base compose exposes the API directly and must keep this false.
+      TRUST_PROXY: "true"
 
   # The bot (profile `bot`, design §7.3/§8.1). Same rule as the two above: the
   # host pulls, never builds. It starts only when the host's /etc/moi/moi.env
