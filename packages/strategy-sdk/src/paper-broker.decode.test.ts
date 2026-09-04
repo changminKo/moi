@@ -217,32 +217,7 @@ describe('PaperBroker decodes money fields at the boundary', () => {
     const snapshot = await new PaperBroker(
       ok(
         portfolio({
-          activeOrders: [
-            {
-              id: 'order-1',
-              market: 'KR',
-              symbol: '005930',
-              type: 'LIMIT',
-              side: 'BUY',
-              quantity: '1',
-              filledQuantity: '1',
-              status: 'FILLED',
-              limitPrice: '70000',
-              stopPrice: null,
-              terminalReason: null,
-              fills: [
-                {
-                  id: 'fill-1',
-                  symbol: '005930',
-                  quantity: '1',
-                  price: '70000',
-                  fee: '10',
-                  isRecoveryFill: true,
-                },
-              ],
-              siblingOrderIds: [],
-            },
-          ],
+          activeOrders: [filledOrder({ ...FILL_BASE, isRecoveryFill: true })],
         }),
       ),
     ).getPortfolio(SESSION_ID);
