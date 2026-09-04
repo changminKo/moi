@@ -1057,10 +1057,12 @@ check(
     const overlay = read('infra/oracle/compose.override.yaml');
     const block =
       overlay.match(/\n {2}paper-api:\n((?: {4}[^\n]*\n)+)/u)?.[1] ?? '';
+    const environment =
+      block.match(/\n {4}environment:\n((?: {6}[^\n]*\n)+)/u)?.[1] ?? '';
     assert.match(
-      block,
-      /^\s+TRUST_PROXY: "true"$/mu,
-      'the Oracle overlay must set TRUST_PROXY: "true" on paper-api (Caddy is the only ingress there)',
+      environment,
+      /^ {6}TRUST_PROXY: "true"$/mu,
+      'the Oracle overlay must set TRUST_PROXY: "true" under paper-api environment (Caddy is the only ingress there)',
     );
     const env = compose?.services?.['paper-api']?.environment ?? {};
     assert.notStrictEqual(

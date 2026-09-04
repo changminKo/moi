@@ -989,9 +989,12 @@ export class ProductionRuntime {
       },
       registerRoutes: async (instance) => {
         instance.addHook('preHandler', async (request) => {
+          // Route pattern, not the raw URL — a percent-encoded path routes to
+          // the same handler but would skip a raw-prefix test (#34 review).
+          const route = request.routeOptions.url ?? '';
           if (
-            !request.url.startsWith('/api/v1/') ||
-            request.url.startsWith('/api/v1/sessions/anonymous') ||
+            !route.startsWith('/api/v1/') ||
+            route === '/api/v1/sessions/anonymous' ||
             !['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)
           )
             return;

@@ -22,11 +22,15 @@ describe('layered rate limits', () => {
   });
 });
 
+/** How many times each guarded handler actually ran (double-execution guard). */
+const handled = { orders: 0 };
+
 /** A Fastify app with only the rate-limit hook and echo routes (#34). */
 async function app(options: {
   trustProxy: boolean;
   now?: () => number;
   publicOrigin?: string;
+  awaitingOnSend?: boolean;
   onRejected?: Parameters<typeof registerRateLimits>[2] extends
     | { onRejected?: infer F }
     | undefined
@@ -46,11 +50,23 @@ async function app(options: {
         : { onRejected: options.onRejected }),
     },
   );
-  instance.post('/api/v1/orders', async () => ({ ok: true }));
+  instance.post('/api/v1/orders', async () => {
+    handled.orders += 1;
+
+    return { ok: true };
+  });
   instance.patch('/api/v1/orders/:id', async () => ({ ok: true }));
   instance.delete('/api/v1/orders/:id', async () => ({ ok: true }));
   instance.get('/api/v1/portfolio', async () => ({ ok: true }));
   instance.post('/health/probe', async () => ({ ok: true }));
+  if (options.awaitingOnSend)
+    // A later hook that yields to the event loop — the shape under which a
+    // 429 sent without `return reply` used to let the handler run anyway.
+    instance.addHook('onSend', async (_request, _reply, payload) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+
+      return payload;
+    });
   await instance.ready();
   return instance;
 }
@@ -237,6 +253,40 @@ describe('registerRateLimits (#34)', () => {
       path: '/api/v1/orders',
     });
     expect(typeof rejected[0]?.requestId).toBe('string');
+  });
+});
+
+describe('registerRateLimits closes the bypasses the review found (#34)', () => {
+  it('counts a percent-encoded path that routes to a guarded handler', async () => {
+    const instance = await app({ trustProxy: true, now: () => 1_000 });
+    await flood(instance, 10, {
+      method: 'POST',
+      url: '/%61pi/v1/orders',
+      ip: '203.0.113.10',
+    });
+
+    const refused = await instance.inject({
+      method: 'POST',
+      url: '/api/v1/orders',
+      headers: { 'x-forwarded-for': '203.0.113.10' },
+    });
+    expect(refused.statusCode).toBe(429);
+  });
+
+  it('never runs the handler for a refused request, even when a later hook yields', async () => {
+    handled.orders = 0;
+    const instance = await app({
+      trustProxy: true,
+      now: () => 1_000,
+      awaitingOnSend: true,
+    });
+    const statuses = await flood(instance, 11, {
+      method: 'POST',
+      url: '/api/v1/orders',
+      ip: '203.0.113.10',
+    });
+    expect(statuses.filter((s) => s === 429)).toHaveLength(1);
+    expect(handled.orders).toBe(10);
   });
 });
 

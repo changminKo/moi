@@ -404,13 +404,15 @@ describe('ProductionRuntime', () => {
           body: JSON.stringify({ from: 'KRW', to: 'USD', amount: '1000' }),
         });
 
-      const accepted: number[] = [];
-      for (let i = 0; i < 10; i += 1)
-        accepted.push((await quote('198.51.100.7')).status);
-      expect(accepted.every((status) => status < 300)).toBe(true);
-
-      const refused = await quote('198.51.100.7');
-      expect(refused.status).toBe(429);
+      // Eleven at once, so the assertion does not ride on how fast ten
+      // sequential ledger writes finish inside the limiter's 1 s window.
+      const responses = await Promise.all(
+        Array.from({ length: 11 }, () => quote('198.51.100.7')),
+      );
+      const refusedAll = responses.filter((r) => r.status === 429);
+      expect(responses.filter((r) => r.status < 300)).toHaveLength(10);
+      expect(refusedAll).toHaveLength(1);
+      const refused = refusedAll[0] as (typeof responses)[number];
       expect(refused.headers.get('retry-after')).toBe('1');
       expect(refused.body).toMatchObject({
         code: 'RATE_LIMITED',

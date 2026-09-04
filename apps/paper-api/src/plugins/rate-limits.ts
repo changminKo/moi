@@ -149,7 +149,12 @@ export function registerRateLimits(
   options: RegisterRateLimitsOptions = {},
 ): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply) => {
-    const path = request.url.split('?')[0] ?? '';
+    // The matched route pattern, not the raw URL: find-my-way decodes
+    // percent-escapes for routing, so `POST /%61pi/v1/orders` reaches the
+    // orders handler while `request.url` still reads `/%61pi/…` and a raw
+    // prefix test would never count it (#34 review). An unmatched request has
+    // no route and is a 404 that spends nothing.
+    const path = request.routeOptions.url ?? '';
     if (!path.startsWith('/api/v1/')) return;
     const kind =
       request.method === 'DELETE'

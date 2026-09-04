@@ -874,7 +874,7 @@ describe('check-deployment-contract (A8)', () => {
       assert.equal(result.status, 1, result.stdout);
       assert.match(
         result.stderr,
-        /overlay must set TRUST_PROXY: "true" on paper-api/u,
+        /must set TRUST_PROXY: "true" under paper-api environment/u,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
