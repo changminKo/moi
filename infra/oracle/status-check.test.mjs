@@ -1301,6 +1301,125 @@ deploy_verified abc1234`,
     }
   });
 
+  // Codex review (#25, HIGH): the first cut accepted the API origin as a
+  // substring of the whole body. `apps/web/server.mjs` emits exactly one
+  // controlled assignment, so the guard parses that assignment and compares
+  // the `apiOrigin` value for equality — a longer origin, a URL that merely
+  // ends in the origin, or the origin mentioned somewhere else in the file
+  // would each have passed while the browser called some other host.
+  const runtimeConfigOf = (apiOrigin) =>
+    `window.__MOI_RUNTIME_CONFIG__ = Object.freeze(${JSON.stringify({ apiOrigin })});`;
+
+  it('rejects an apiOrigin that merely starts with the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG: runtimeConfigOf(
+              'https://api.moi.example.attacker.example',
+            ),
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js does not name https:\/\/api\.moi\.example \(apiOrigin is https:\/\/api\.moi\.example\.attacker\.example\)/,
+      );
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an apiOrigin that merely ends with the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG: runtimeConfigOf(
+              'https://app.moi.example/?next=https://api.moi.example',
+            ),
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js does not name https:\/\/api\.moi\.example \(apiOrigin is https:\/\/app\.moi\.example\/\?next=https:\/\/api\.moi\.example\)/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a runtime config that names the API origin outside apiOrigin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG:
+              'window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"https://app.moi.example","docs":"https://api.moi.example"});',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  // An edge that answers every path with the SPA's index.html serves a 200
+  // whose CSP meta names the API origin. That is not the runtime config.
+  it('rejects an index.html fallback even when its markup mentions the API origin', () => {
+    const sb = makeSandbox(API);
+    try {
+      const r = runDeploy(
+        sb,
+        `deploy_begin main
+verify_runtime_config_origin app.moi.example https://api.moi.example
+deploy_verified abc1234`,
+        {
+          extraEnv: {
+            FAKE_CURL_RUNTIME_CONFIG:
+              '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="connect-src \'self\' https://api.moi.example"></head><body></body></html>',
+          },
+        },
+      );
+
+      assert.equal(r.status, 1, r.stdout);
+      assert.match(
+        r.stderr,
+        /runtime-config\.js is not the runtime config apps\/web\/server\.mjs emits/,
+      );
+      assert.deepEqual(titles(sb), ['배포 시작: main', '배포 실패: main']);
+    } finally {
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   // A web container that never came up, or an edge that does not route the
   // file, is the same class of failure and must not read as a green deploy.
   it('fails the deploy when /runtime-config.js cannot be fetched at all', () => {

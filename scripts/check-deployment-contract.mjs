@@ -1067,10 +1067,34 @@ check(
       containers >= 0 && containers < runtimeConfig && runtimeConfig < done,
       'deploy.sh must read https://$WEB_DOMAIN/runtime-config.js and require https://$API_DOMAIN in it, after the container check and before deploy_verified',
     );
+    const guard =
+      readShell('infra/oracle/deploy-lib.sh').match(
+        /verify_runtime_config_origin\(\) \{\n([\s\S]*?)\n\}/u,
+      )?.[1] ?? '';
     assert.match(
-      readShell('infra/oracle/deploy-lib.sh'),
-      /verify_runtime_config_origin\(\)[\s\S]*curl -fsS "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
+      guard,
+      /curl -fsS "https:\/\/\$\{web_domain\}\/runtime-config\.js"/u,
       'deploy-lib.sh must fetch the runtime config the browser itself reads',
+    );
+    // Codex review (#25, HIGH): "contains the origin" passed for a longer
+    // origin, a URL ending in the origin, and the origin named elsewhere in
+    // the body. The guard parses the one assignment the web server emits and
+    // compares the value for equality; both halves are pinned here so neither
+    // file can drift without the other.
+    const template = 'window.__MOI_RUNTIME_CONFIG__ = Object.freeze(';
+    assert.ok(
+      read('apps/web/server.mjs').includes(`${template}\${json});`),
+      `deploy-lib.sh must parse the runtime-config assignment apps/web/server.mjs emits: the server no longer renders ${template}<json>);`,
+    );
+    assert.ok(
+      guard.includes(`local prefix='${template}{"apiOrigin":"'`) &&
+        guard.includes(`local suffix='"});'`),
+      `deploy-lib.sh must parse the runtime-config assignment apps/web/server.mjs emits (prefix ${template}{"apiOrigin":" and suffix "});)`,
+    );
+    assert.ok(
+      guard.includes('[ "$named_origin" != "$api_origin" ]') &&
+        !/\*"\$\{?api_origin\}?"\*/u.test(guard),
+      'deploy-lib.sh must compare the parsed apiOrigin with the API origin for equality, never as a substring of the body',
     );
   },
 );

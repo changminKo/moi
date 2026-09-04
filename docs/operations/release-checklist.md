@@ -71,11 +71,16 @@ handoff therefore remains unchecked below.
   (re-exec), which verifies no revision.
 - [x] A reference-host deploy verifies the browser app, not only the API.
   Evidence (#25): `deploy.sh` reads back `https://$WEB_DOMAIN/runtime-config.js`
-  after the running-container check and fails unless it names
-  `https://$API_DOMAIN`; `infra/oracle/status-check.test.mjs` covers a matching
-  origin, the web origin substituted for the API's, and a file that cannot be
-  fetched, and three deployment-contract mutation tests fail when the call is
-  removed, prefixed with `:`, or pointed at another path. The browser itself is
+  after the running-container check, parses the one assignment
+  `apps/web/server.mjs` emits and fails unless its `apiOrigin` equals
+  `https://$API_DOMAIN` exactly; `infra/oracle/status-check.test.mjs` covers a
+  matching origin, the web origin substituted for the API's, an origin that
+  merely starts or ends with the API's, the origin named outside `apiOrigin`,
+  an index.html fallback, and a file that cannot be fetched, and six
+  deployment-contract mutation tests fail when the call is removed, prefixed
+  with `:`, pointed at another path, reverted to a substring test, parsing a
+  shape the server does not emit, or when the server stops emitting that
+  shape. The browser itself is
   covered twice: the CI e2e suite runs the anonymous-session, order-lifecycle
   and cross-origin journeys through `apps/web/server.mjs` on an origin of its
   own (`cross-origin-chromium`, 58 tests total), and the operator runs

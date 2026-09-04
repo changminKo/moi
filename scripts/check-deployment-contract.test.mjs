@@ -887,6 +887,81 @@ describe('check-deployment-contract (A8)', () => {
     }
   });
 
+  // Codex review (#25, HIGH): the first guard accepted the API origin as a
+  // substring of the body. The checker pins the parse of the controlled
+  // assignment and the exact comparison, so a regression to either shape of
+  // "contains" fails the build rather than the next release.
+  it('fails when deploy-lib accepts the API origin as a substring again', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        '  if [ "$named_origin" != "$api_origin" ]; then\n',
+        '  if [[ "$body" != *"$api_origin"* ]]; then\n',
+      );
+      assert.notEqual(after, before, 'substring mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must compare the parsed apiOrigin with the API origin for equality/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails when deploy-lib parses a shape apps/web/server.mjs does not emit', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'infra/oracle/deploy-lib.sh');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        `local prefix='window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"'`,
+        `local prefix='window.__MOI_CONFIG__ = Object.freeze({"apiOrigin":"'`,
+      );
+      assert.notEqual(after, before, 'prefix mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must parse the runtime-config assignment apps\/web\/server\.mjs emits/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The other side of the same pin: if the web server changes what it emits,
+  // the deploy guard would reject every release — the checker says so first.
+  it('fails when apps/web/server.mjs stops emitting the assignment deploy-lib parses', () => {
+    const dir = copyRepo((d) => {
+      const file = join(d, 'apps/web/server.mjs');
+      const before = readFileSync(file, 'utf8');
+      const after = before.replace(
+        'window.__MOI_RUNTIME_CONFIG__ = Object.freeze(',
+        'window.__MOI_RUNTIME_CONFIG__ = (',
+      );
+      assert.notEqual(after, before, 'server.mjs mutation matched nothing');
+      writeFileSync(file, after);
+    });
+    try {
+      const result = run(dir);
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(
+        result.stderr,
+        /must parse the runtime-config assignment apps\/web\/server\.mjs emits/u,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails when deploy stops verifying the running containers', () => {
     const dir = copyRepo((d) => {
       const file = join(d, 'infra/oracle/deploy.sh');

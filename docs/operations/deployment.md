@@ -365,7 +365,10 @@ requires, and the artefacts are the same ones the local smoke uses.
    recreates containers stop-then-start, the 45 s grace period lets the leader
    drain) → readiness, both markets `NORMAL`, placement enabled, every
    running runtime container carries the checked-out revision label, and
-   `https://$WEB_DOMAIN/runtime-config.js` names `https://$API_DOMAIN`. That
+   `https://$WEB_DOMAIN/runtime-config.js` is the assignment
+   `apps/web/server.mjs` emits and its `apiOrigin` equals
+   `https://$API_DOMAIN` exactly (a longer origin, a URL ending in it, or the
+   origin mentioned elsewhere in the body all fail). That
    last one is the browser's half: the web app is a second image with its own
    configuration, every other check talks to the API, and #25 was a release
    where all of them passed while `/trade` was unusable. It proves the file

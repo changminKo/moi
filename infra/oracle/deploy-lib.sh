@@ -180,13 +180,36 @@ verify_runtime_config_origin() {
     echo "FAIL: cannot fetch https://${web_domain}/runtime-config.js" >&2
     return 1
   fi
+  # apps/web/server.mjs emits exactly one controlled assignment,
+  #   window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"<origin>"});
+  # so the guard parses that shape and compares the value for equality. A
+  # substring test accepted an origin that merely began or ended with the
+  # expected one, or the expected one mentioned anywhere else in the body
+  # (Codex review of #25). No eval: the body is never executed. The contract
+  # checker pins this prefix to the template in apps/web/server.mjs.
+  local prefix='window.__MOI_RUNTIME_CONFIG__ = Object.freeze({"apiOrigin":"'
+  local suffix='"});'
+  local named_origin
   case "$body" in
-    *"$api_origin"*) ;;
+    "${prefix}"*"${suffix}") ;;
     *)
-      echo "FAIL: https://${web_domain}/runtime-config.js does not name ${api_origin}; the browser app would call some other origin" >&2
+      echo "FAIL: https://${web_domain}/runtime-config.js is not the runtime config apps/web/server.mjs emits; refusing to guess the API origin" >&2
       return 1
       ;;
   esac
+  named_origin="${body#"$prefix"}"
+  named_origin="${named_origin%"$suffix"}"
+  # A quote inside the value means the object carried more than apiOrigin.
+  case "$named_origin" in
+    *'"'*)
+      echo "FAIL: https://${web_domain}/runtime-config.js is not the runtime config apps/web/server.mjs emits; refusing to guess the API origin" >&2
+      return 1
+      ;;
+  esac
+  if [ "$named_origin" != "$api_origin" ]; then
+    echo "FAIL: https://${web_domain}/runtime-config.js does not name ${api_origin} (apiOrigin is ${named_origin}); the browser app would call some other origin" >&2
+    return 1
+  fi
   echo "runtime config: ${web_domain} names ${api_origin}"
 }
 
