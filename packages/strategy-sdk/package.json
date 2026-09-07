@@ -35,6 +35,6 @@
     "@moi/trading-core": "workspace:*"
   },
   "devDependencies": {
-    "vitest": "4.1.11"
+    "vitest": "5.0.0"
   }
 }
