@@ -609,6 +609,11 @@ chat, or a shell history line that echoes it.
      a transition that hits a Discord outage is retried on the next tick. A
      `heartbeat` embed goes out when nothing has been delivered for 24 hours
      (`MOI_STATUS_HEARTBEAT_HOURS`), so silence is never mistaken for health.
+     A fail caused only by a market state (KR/US DEGRADED or RECOVERING) is
+     held for `MOI_STATUS_MARKET_GRACE_TICKS` consecutive ticks (default 2)
+     before it posts, so a feed that reconnects within five minutes does not
+     produce a FAIL/recovered pair; readiness, runtime, placement and bot
+     failures still post at once.
      This is the only producer that sees a container dying after start-up
      (compose `restart: unless-stopped` restarts it; a restart loop shows up as
      readiness/market flapping in the status line). The check is skipped while

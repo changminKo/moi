@@ -224,35 +224,110 @@ describe('status-check.sh', () => {
     }
   });
 
-  it('posts fail once when a market leaves NORMAL and recovery when it returns', () => {
+  const withUS = (state) =>
+    makeSandbox({
+      ...API,
+      marketData: API.marketData.replace(
+        '"US":{"state":"NORMAL"',
+        `"US":{"state":"${state}"`,
+      ),
+    });
+
+  it('posts a market fail only once it persists for the grace window, then recovery', () => {
     const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
     try {
       runStatus(sb); // baseline ok
-      const degraded = makeSandbox({
-        ...API,
-        marketData: API.marketData.replace(
-          '"US":{"state":"NORMAL"',
-          '"US":{"state":"DEGRADED"',
-        ),
-      });
+      // Tick 1: the feed just dropped. The line says fail, Discord hears nothing.
       const r1 = runStatus({ ...degraded, state: sb.state });
       assert.equal(r1.status, 0, r1.stderr);
       assert.match(r1.stdout, /^fail /);
       assert.match(r1.stdout, /US=DEGRADED/);
+      assert.match(r1.stderr, /market fail pending \(1\/2\)/);
+      assert.equal(posted(degraded).length, 0, 'first observation is held');
+      assert.match(stateLines(sb)[0], /^ok /, 'delivered status untouched');
+      assert.equal(stateLines(sb)[2], '1', 'pending count recorded');
+      // Tick 2: still down → the sustained failure is announced once.
       const r2 = runStatus({ ...degraded, state: sb.state });
-      assert.equal(r2.status, 0);
+      assert.equal(r2.status, 0, r2.stderr);
       const degradedPosts = posted(degraded);
-      assert.equal(degradedPosts.length, 1, 'same failure is not re-posted');
+      assert.equal(degradedPosts.length, 1, 'sustained failure posts once');
       assert.equal(embed(degradedPosts[0]).color, 0xe5484d);
       assert.match(embed(degradedPosts[0]).title, /상태 FAIL/);
-      rmSync(degraded.dir, { recursive: true, force: true });
+      const r3 = runStatus({ ...degraded, state: sb.state });
+      assert.equal(r3.status, 0);
+      assert.equal(posted(degraded).length, 1, 'same failure is not re-posted');
 
       const recovered = runStatus(sb);
       assert.match(recovered.stdout, /^ok /);
       const all = posted(sb);
       assert.equal(all.length, 2, 'recovery is announced');
       assert.match(embed(all[1]).title, /상태 복구/);
+      assert.equal(stateLines(sb)[2], '0', 'pending count cleared');
     } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never posts a market blip that heals within the grace window', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const recovering = withUS('RECOVERING');
+    try {
+      runStatus(sb); // baseline ok
+      assert.equal(runStatus({ ...degraded, state: sb.state }).status, 0);
+      assert.equal(runStatus(sb).status, 0); // healed after one tick
+      assert.equal(posted(sb).length, 1, 'blip stays silent');
+      assert.equal(stateLines(sb)[2], '0', 'pending count reset on NORMAL');
+      // A second blip a little later starts the window from scratch.
+      assert.equal(runStatus({ ...recovering, state: sb.state }).status, 0);
+      assert.equal(posted(recovering).length, 0, 'second blip held again');
+      assert.equal(runStatus(sb).status, 0);
+      assert.equal(posted(sb).length, 1, 'still only the baseline post');
+    } finally {
+      rmSync(recovering.dir, { recursive: true, force: true });
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('posts readiness or placement failures at once even while a market is not NORMAL', () => {
+    const sb = makeSandbox(API);
+    const broken = makeSandbox({
+      ...API,
+      ready: 503,
+      marketData: API.marketData.replace(
+        '"US":{"state":"NORMAL"',
+        '"US":{"state":"DEGRADED"',
+      ),
+    });
+    try {
+      runStatus(sb); // baseline ok
+      const r = runStatus({ ...broken, state: sb.state });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /^fail ready=503 .*US=DEGRADED/);
+      assert.equal(posted(broken).length, 1, 'hard failure bypasses the grace');
+      assert.match(embed(posted(broken)[0]).title, /상태 FAIL/);
+    } finally {
+      rmSync(broken.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('MOI_STATUS_MARKET_GRACE_TICKS=1 restores posting on the first observation', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      runStatus(sb); // baseline ok
+      const r = runStatus(
+        { ...degraded, state: sb.state },
+        { MOI_STATUS_MARKET_GRACE_TICKS: '1' },
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(posted(degraded).length, 1, 'no grace when set to 1');
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });
@@ -413,6 +488,7 @@ describe('status-check.sh', () => {
       ),
     });
     try {
+      runStatus(sb); // market fail held by the grace window
       runStatus(sb); // FAIL delivered at epoch 1000000000
       const due = runStatus(sb, {
         MOI_STATUS_NOW: String(1000000000 + 25 * 3600),
