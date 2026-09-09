@@ -184,7 +184,12 @@ post() { NOTIFY_STRICT=1 "$here/notify.sh" "$@"; }
 ensure_dir() { [ -d "$1" ] || { mkdir -p "$1" && chmod 0700 "$1"; }; }
 # Write-then-rename: a tick killed mid-write must not leave a truncated file
 # that reads as "nothing delivered yet" and re-posts the current status.
-write_file() { ensure_dir "$(dirname "$1")"; printf '%s' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+write_file() {
+  # A directory at the target would swallow the rename and report success.
+  [ ! -d "$1" ] || return 1
+  ensure_dir "$(dirname "$1")"
+  printf '%s' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"
+}
 record() { write_file "$state_file" "$1"$'\n'"$now"$'\n'; }
 # A held tick still owes the heartbeat: it goes out with the level Discord is
 # showing (the delivered one), the current line underneath, so "silence never

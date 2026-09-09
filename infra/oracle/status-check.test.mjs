@@ -584,6 +584,35 @@ describe('status-check.sh', () => {
     }
   });
 
+  it('posts without grace when the window file cannot be written', () => {
+    // (a) the temp file cannot be created; (b) the window path is a directory,
+    // where a bare `mv` would "succeed" by moving the file inside it.
+    for (const blocker of ['tmp', 'dir']) {
+      const sb = makeSandbox(API);
+      const degraded = withUS('DEGRADED');
+      try {
+        tick(sb, 0); // baseline ok
+        rmSync(graceFile(sb), { force: true, recursive: true });
+        mkdirSync(blocker === 'tmp' ? `${graceFile(sb)}.tmp` : graceFile(sb));
+        const r = tick({ ...degraded, state: sb.state }, 1);
+        assert.equal(r.status, 0, `${blocker}: ${r.stderr}`);
+        assert.match(
+          r.stderr,
+          /cannot write .*posting market changes without grace/,
+          blocker,
+        );
+        assert.equal(
+          posted(degraded).length,
+          1,
+          `${blocker}: fail-open posts at once`,
+        );
+      } finally {
+        rmSync(degraded.dir, { recursive: true, force: true });
+        rmSync(sb.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('treats an unusable grace setting or a corrupt window file as "no grace"', () => {
     const sb = makeSandbox(API);
     const degraded = withUS('DEGRADED');
