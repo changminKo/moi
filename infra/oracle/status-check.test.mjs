@@ -224,39 +224,443 @@ describe('status-check.sh', () => {
     }
   });
 
-  it('posts fail once when a market leaves NORMAL and recovery when it returns', () => {
+  const withUS = (state) =>
+    makeSandbox({
+      ...API,
+      marketData: API.marketData.replace(
+        '"US":{"state":"NORMAL"',
+        `"US":{"state":"${state}"`,
+      ),
+    });
+  const graceFile = (sb) => `${sb.state}.grace`;
+  const graceLine = (sb) =>
+    existsSync(graceFile(sb)) ? readFileSync(graceFile(sb), 'utf8').trim() : '';
+  // Ticks advance MOI_STATUS_NOW by five minutes so the window sees a live timer.
+  const T0 = 1000000000;
+  const tick = (sb, n, extraEnv = {}) =>
+    runStatus(sb, { MOI_STATUS_NOW: String(T0 + n * 300), ...extraEnv });
+
+  it('posts a market fail only once the window holds enough bad ticks, then recovery', () => {
     const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
     try {
-      runStatus(sb); // baseline ok
-      const degraded = makeSandbox({
-        ...API,
-        marketData: API.marketData.replace(
-          '"US":{"state":"NORMAL"',
-          '"US":{"state":"DEGRADED"',
-        ),
-      });
-      const r1 = runStatus({ ...degraded, state: sb.state });
+      tick(sb, 0); // baseline ok
+      // Tick 1: the feed just dropped. The line says fail, Discord hears nothing.
+      const r1 = tick({ ...degraded, state: sb.state }, 1);
       assert.equal(r1.status, 0, r1.stderr);
       assert.match(r1.stdout, /^fail /);
       assert.match(r1.stdout, /US=DEGRADED/);
-      const r2 = runStatus({ ...degraded, state: sb.state });
-      assert.equal(r2.status, 0);
+      assert.match(
+        r1.stderr,
+        /market fail pending \(1\/2 bad ticks in the last 6\)/,
+      );
+      assert.equal(posted(degraded).length, 0, 'first observation is held');
+      assert.match(stateLines(sb)[0], /^ok /, 'delivered status untouched');
+      assert.equal(stateLines(sb).length, 2, 'state file keeps its two lines');
+      assert.match(
+        graceLine(sb),
+        /^0*1 \d+$/,
+        'window recorded beside the state',
+      );
+      // Tick 2: still down → the sustained failure is announced once.
+      const r2 = tick({ ...degraded, state: sb.state }, 2);
+      assert.equal(r2.status, 0, r2.stderr);
       const degradedPosts = posted(degraded);
-      assert.equal(degradedPosts.length, 1, 'same failure is not re-posted');
+      assert.equal(degradedPosts.length, 1, 'sustained failure posts once');
       assert.equal(embed(degradedPosts[0]).color, 0xe5484d);
       assert.match(embed(degradedPosts[0]).title, /상태 FAIL/);
-      rmSync(degraded.dir, { recursive: true, force: true });
+      assert.equal(tick({ ...degraded, state: sb.state }, 3).status, 0);
+      assert.equal(posted(degraded).length, 1, 'same failure is not re-posted');
 
-      const recovered = runStatus(sb);
-      assert.match(recovered.stdout, /^ok /);
+      // Recovery is announced only once the window is clean again (6 ticks).
+      for (let n = 4; n <= 8; n += 1) {
+        const held = tick(sb, n);
+        assert.equal(held.status, 0, held.stderr);
+        assert.match(held.stdout, /^ok /);
+        assert.match(held.stderr, /market recovery pending/);
+        assert.equal(posted(sb).length, 1, `tick ${n}: recovery still held`);
+        assert.match(
+          stateLines(sb)[0],
+          /^fail /,
+          'Discord still shows the fail',
+        );
+      }
+      const recovered = tick(sb, 9);
+      assert.equal(recovered.status, 0, recovered.stderr);
       const all = posted(sb);
       assert.equal(all.length, 2, 'recovery is announced');
       assert.match(embed(all[1]).title, /상태 복구/);
+      assert.match(graceLine(sb), /^0+ \d+$/, 'window is clean');
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never posts a market blip that heals within the window', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 0); // baseline ok
+      assert.equal(tick({ ...degraded, state: sb.state }, 1).status, 0);
+      const healed = tick(sb, 2); // healed after one tick
+      assert.equal(healed.status, 0, healed.stderr);
+      assert.doesNotMatch(
+        healed.stderr,
+        /pending/,
+        'nothing announced, nothing to hold',
+      );
+      assert.equal(posted(sb).length, 1, 'blip stays silent');
+      assert.match(graceLine(sb), /^0*10 \d+$/);
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('announces a feed that flaps every other tick instead of hiding it forever', () => {
+    const sb = makeSandbox(API);
+    const recovering = withUS('RECOVERING');
+    try {
+      tick(sb, 0); // baseline ok
+      assert.equal(tick({ ...recovering, state: sb.state }, 1).status, 0);
+      assert.equal(tick(sb, 2).status, 0);
+      assert.equal(posted(sb).length, 1, 'one blip is still a blip');
+      // Second bad tick inside the window: two of the last three → announce.
+      const r3 = tick({ ...recovering, state: sb.state }, 3);
+      assert.equal(r3.status, 0, r3.stderr);
+      const posts = posted(recovering);
+      assert.equal(posts.length, 1, 'flapping is announced');
+      assert.match(embed(posts[0]).description, /US=RECOVERING/);
+      // Keeps flapping: no FAIL/recovered pairs, and the heartbeat says fail.
+      const t4 = tick(sb, 4);
+      assert.match(t4.stderr, /market recovery pending/, `t4 ${t4.stderr}`);
+      assert.match(stateLines(sb)[0], /^fail /, 'after t4');
+      const t5 = tick({ ...recovering, state: sb.state }, 5);
+      assert.equal(t5.status, 0, t5.stderr);
+      assert.match(stateLines(sb)[0], /^fail /, 'after t5');
+      const t6 = tick(sb, 6);
+      assert.match(t6.stderr, /market recovery pending/, `t6 ${t6.stderr}`);
+      assert.match(stateLines(sb)[0], /^fail /, 'after t6');
+      assert.equal(
+        posted(sb).length,
+        1,
+        'no recovered while the window is dirty',
+      );
+      assert.equal(posted(recovering).length, 1, 'no second FAIL either');
+      const beat = tick(sb, 7, { MOI_STATUS_HEARTBEAT_HOURS: '0' });
+      assert.equal(beat.status, 0, beat.stderr);
+      assert.match(embed(posted(sb).at(-1)).title, /하트비트 \(fail\)/);
+    } finally {
+      rmSync(recovering.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets the window across a gap in ticks such as a deploy or a stopped timer', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 0); // baseline ok
+      assert.equal(tick({ ...degraded, state: sb.state }, 1).status, 0); // blip
+      // 30 minutes of silence (deploy lock), then a single fresh blip.
+      const r = tick({ ...degraded, state: sb.state }, 8);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /market fail pending \(1\/2/);
+      assert.equal(
+        posted(degraded).length,
+        0,
+        'stale count must not fire the alert',
+      );
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('posts readiness, placement, runtime and unknown-market failures at once even while a market is not NORMAL', () => {
+    const degradedUS = API.marketData.replace(
+      '"US":{"state":"NORMAL"',
+      '"US":{"state":"DEGRADED"',
+    );
+    const variants = [
+      {
+        name: 'ready',
+        api: { ready: 503, marketData: degradedUS },
+        line: /^fail ready=503 .*US=DEGRADED/,
+      },
+      {
+        name: 'placement',
+        api: {
+          marketData: degradedUS,
+          trading:
+            '{"placement":false,"cancellation":true,"fx":true,"reasons":["X"]}',
+        },
+        line: /^fail .*US=DEGRADED placement=false/,
+      },
+      {
+        name: 'runtime',
+        api: {
+          marketData: degradedUS.replace(
+            '"runtime":"SERVING"',
+            '"runtime":"RECOVERING"',
+          ),
+        },
+        line: /^fail .*runtime=RECOVERING .*US=DEGRADED/,
+      },
+      // A market key the API stopped sending is not a feed blip: fail closed.
+      {
+        name: 'unknown',
+        api: {
+          marketData:
+            '{"KR":{"state":"NORMAL","reasons":[]},"runtime":"SERVING"}',
+        },
+        line: /^fail .*US=unknown/,
+      },
+    ];
+    for (const v of variants) {
+      const sb = makeSandbox(API);
+      const broken = makeSandbox({ ...API, ...v.api });
+      try {
+        tick(sb, 0); // baseline ok
+        const r = tick({ ...broken, state: sb.state }, 1);
+        assert.equal(r.status, 0, `${v.name}: ${r.stderr}`);
+        assert.match(r.stdout, v.line, v.name);
+        assert.equal(
+          posted(broken).length,
+          1,
+          `${v.name}: hard failure bypasses the grace`,
+        );
+        assert.match(embed(posted(broken)[0]).title, /상태 FAIL/);
+      } finally {
+        rmSync(broken.dir, { recursive: true, force: true });
+        rmSync(sb.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('announces the recovery of a hard failure at once even while the market window is dirty', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const down = makeSandbox({ ...API, ready: 503 });
+    try {
+      tick(sb, 0); // baseline ok
+      assert.equal(tick({ ...degraded, state: sb.state }, 1).status, 0); // blip, held
+      const hard = tick({ ...down, state: sb.state }, 2); // markets NORMAL, readiness down
+      assert.equal(hard.status, 0, hard.stderr);
+      assert.match(
+        embed(posted(down)[0]).description,
+        /^fail ready=503 .*KR=NORMAL US=NORMAL/m,
+      );
+      // Readiness is back and the markets were never the delivered cause: the
+      // recovery must not wait for the market window to clear.
+      const back = tick(sb, 3);
+      assert.equal(back.status, 0, back.stderr);
+      assert.doesNotMatch(back.stderr, /recovery pending/);
+      assert.equal(posted(sb).length, 2, 'recovered posted at once');
+      assert.match(embed(posted(sb)[1]).title, /상태 복구/);
+    } finally {
+      rmSync(down.dir, { recursive: true, force: true });
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets the window when the clock goes backwards', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 100); // baseline ok, far in the future
+      assert.equal(tick({ ...degraded, state: sb.state }, 101).status, 0); // blip
+      // NTP step / snapshot restore: the clock is now earlier than the last tick.
+      const r = tick({ ...degraded, state: sb.state }, 1);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /market fail pending \(1\/2/);
+      assert.equal(
+        posted(degraded).length,
+        0,
+        'a rewound clock must not fire the alert',
+      );
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('posts at once when a hard failure clears but the market stays bad during an announced outage', () => {
+    // grace 3 so the window alone (two bad ticks) would still hold: only the
+    // "a fail is already on the board" rule can make this post.
+    const grace = { MOI_STATUS_MARKET_GRACE_TICKS: '3' };
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const broken = makeSandbox({
+      ...API,
+      ready: 503,
+      marketData: API.marketData.replace(
+        '"US":{"state":"NORMAL"',
+        '"US":{"state":"DEGRADED"',
+      ),
+    });
+    try {
+      tick(sb, 0, grace); // baseline ok
+      const hard = tick({ ...broken, state: sb.state }, 1, grace);
+      assert.equal(hard.status, 0, hard.stderr);
+      assert.equal(posted(broken).length, 1, 'hard failure announced');
+      // Readiness recovers, the market is still DEGRADED: the operator must
+      // learn that ready=503 is over now, not one grace window later.
+      const partial = tick({ ...degraded, state: sb.state }, 2, grace);
+      assert.equal(partial.status, 0, partial.stderr);
+      assert.doesNotMatch(partial.stderr, /market fail pending/);
+      const degradedPosts = posted(degraded);
+      assert.equal(degradedPosts.length, 1, 'signature change posted at once');
+      assert.match(
+        embed(degradedPosts[0]).description,
+        /^fail ready=200 .*US=DEGRADED/m,
+      );
+      assert.match(stateLines(sb)[0], /^fail ready=200 /);
+    } finally {
+      rmSync(broken.dir, { recursive: true, force: true });
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('MOI_STATUS_MARKET_GRACE_TICKS=1 switches the grace off in both directions', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const off = { MOI_STATUS_MARKET_GRACE_TICKS: '1' };
+    try {
+      tick(sb, 0, off); // baseline ok
+      const r = tick({ ...degraded, state: sb.state }, 1, off);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(posted(degraded).length, 1, 'no grace when set to 1');
+      // No hysteresis either: the recovery is announced on the next tick.
+      const back = tick(sb, 2, off);
+      assert.equal(back.status, 0, back.stderr);
+      assert.doesNotMatch(back.stderr, /pending/);
+      assert.equal(posted(sb).length, 2, 'recovery posted at once');
+      assert.match(embed(posted(sb)[1]).title, /상태 복구/);
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets a window file that carries no tick epoch', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 0); // baseline ok
+      writeFileSync(graceFile(sb), '111111\n'); // hand-edited, age unknown
+      const r = tick({ ...degraded, state: sb.state }, 1);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /market fail pending \(1\/2/);
+      assert.equal(
+        posted(degraded).length,
+        0,
+        'a window of unknown age must not fire',
+      );
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a corrupt delivered-status line as nothing delivered and posts the current status once', () => {
+    const sb = makeSandbox(API);
+    try {
+      tick(sb, 0); // baseline ok
+      writeFileSync(sb.state, 'garbage line\n1000000000\n');
+      const r = tick(sb, 1);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stderr, /post failed/);
+      assert.equal(posted(sb).length, 2, 'current status re-announced once');
+      assert.match(embed(posted(sb)[1]).title, /상태 OK/);
+      assert.match(stateLines(sb)[0], /^ok /, 'state file repaired');
+      assert.equal(tick(sb, 2).status, 0);
+      assert.equal(posted(sb).length, 2, 'quiet again');
     } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });
 
+  it('posts without grace when the window file cannot be written', () => {
+    // (a) the temp file cannot be created; (b) the window path is a directory,
+    // where a bare `mv` would "succeed" by moving the file inside it.
+    for (const blocker of ['tmp', 'dir']) {
+      const sb = makeSandbox(API);
+      const degraded = withUS('DEGRADED');
+      try {
+        tick(sb, 0); // baseline ok
+        rmSync(graceFile(sb), { force: true, recursive: true });
+        mkdirSync(blocker === 'tmp' ? `${graceFile(sb)}.tmp` : graceFile(sb));
+        const r = tick({ ...degraded, state: sb.state }, 1);
+        assert.equal(r.status, 0, `${blocker}: ${r.stderr}`);
+        assert.match(
+          r.stderr,
+          /cannot write .*posting market changes without grace/,
+          blocker,
+        );
+        assert.equal(
+          posted(degraded).length,
+          1,
+          `${blocker}: fail-open posts at once`,
+        );
+        // Fail-open in both directions: the recovery must not wait for a
+        // window that cannot be kept.
+        const back = tick(sb, 2);
+        assert.equal(back.status, 0, `${blocker}: ${back.stderr}`);
+        assert.doesNotMatch(back.stderr, /recovery pending/, blocker);
+        assert.equal(
+          posted(sb).length,
+          2,
+          `${blocker}: recovery posted at once`,
+        );
+      } finally {
+        rmSync(degraded.dir, { recursive: true, force: true });
+        rmSync(sb.dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('treats an unusable grace setting or a corrupt window file as "no grace"', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 0); // baseline ok
+      const bad = tick({ ...degraded, state: sb.state }, 1, {
+        MOI_STATUS_MARKET_GRACE_TICKS: 'soon',
+      });
+      assert.equal(bad.status, 0, bad.stderr);
+      assert.equal(
+        posted(degraded).length,
+        1,
+        'a setting that is not a count fails open',
+      );
+      rmSync(degraded.dir, { recursive: true, force: true });
+
+      const sb2 = makeSandbox(API);
+      const degraded2 = withUS('DEGRADED');
+      try {
+        tick(sb2, 0);
+        writeFileSync(graceFile(sb2), 'garbage in\n');
+        const r = tick({ ...degraded2, state: sb2.state }, 1);
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(
+          r.stderr,
+          /market fail pending \(1\/2/,
+          'corrupt window restarts from one',
+        );
+        assert.equal(posted(degraded2).length, 0);
+      } finally {
+        rmSync(degraded2.dir, { recursive: true, force: true });
+        rmSync(sb2.dir, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
   it('warns on low memory, high swap or a full disk', () => {
     const sb = makeSandbox({
       ...API,
@@ -413,6 +817,7 @@ describe('status-check.sh', () => {
       ),
     });
     try {
+      runStatus(sb); // market fail held by the grace window
       runStatus(sb); // FAIL delivered at epoch 1000000000
       const due = runStatus(sb, {
         MOI_STATUS_NOW: String(1000000000 + 25 * 3600),

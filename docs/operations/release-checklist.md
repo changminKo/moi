@@ -69,6 +69,16 @@ handoff therefore remains unchecked below.
   either verification, or the shared label key is removed or commented out.
   Rolling back to a ref older than this check runs that ref's own `deploy.sh`
   (re-exec), which verifies no revision.
+- [x] The Discord status line bounds market-feed noise without hiding a broken
+  feed. Evidence (#133): `infra/oracle/status-check.sh` announces a
+  market-only FAIL once `MOI_STATUS_MARKET_GRACE_TICKS` of the last
+  `MOI_STATUS_MARKET_WINDOW_TICKS` observations were bad and holds the
+  recovery until the window is clean; `infra/oracle/status-check.test.mjs`
+  covers a single blip (silent), a sustained fail (one FAIL, one recovery), a
+  feed flapping every other tick (one FAIL, a `(fail)` heartbeat, no pairs),
+  a tick gap (window forgotten), hard failures and `unknown` market states
+  with a bad market (posted at once), a hard cause clearing mid-outage (posted
+  at once), a corrupt window file and an unusable knob (no grace).
 - [x] A reference-host deploy verifies the browser app, not only the API.
   Evidence (#25): `deploy.sh` reads back `https://$WEB_DOMAIN/runtime-config.js`
   after the running-container check, parses the one assignment

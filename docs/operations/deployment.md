@@ -609,6 +609,19 @@ chat, or a shell history line that echoes it.
      a transition that hits a Discord outage is retried on the next tick. A
      `heartbeat` embed goes out when nothing has been delivered for 24 hours
      (`MOI_STATUS_HEARTBEAT_HOURS`), so silence is never mistaken for health.
+     A fail caused only by a market state (KR/US DEGRADED or RECOVERING) is
+     announced once `MOI_STATUS_MARKET_GRACE_TICKS` (default 2) of the last
+     `MOI_STATUS_MARKET_WINDOW_TICKS` (default 6) observations were bad, and
+     its recovery is held until that window is clean again, so a feed that
+     reconnects within five minutes does not produce a FAIL/recovered pair
+     and a flapping feed is one FAIL line rather than a stream of pairs; the
+     window lives in `status.last.grace` and is forgotten across a gap of more
+     than two ticks. Readiness, runtime, placement and bot failures still post
+     at once — as does an `unknown` market state, which is a contract problem
+     rather than a blip — and so does any change while a FAIL is already on
+     the board. The knobs (`MOI_STATUS_MARKET_GRACE_TICKS`,
+     `MOI_STATUS_MARKET_WINDOW_TICKS`, `MOI_STATUS_TICK_SEC`) are set in
+     `/etc/moi/moi.env`, the `EnvironmentFile` of `moi-status.service`.
      This is the only producer that sees a container dying after start-up
      (compose `restart: unless-stopped` restarts it; a restart loop shows up as
      readiness/market flapping in the status line). The check is skipped while
