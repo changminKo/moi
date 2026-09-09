@@ -35,7 +35,8 @@
 #   MOI_STATUS_API_BASE         default https://$API_DOMAIN (the Caddy edge)
 #   MOI_STATUS_STATE_FILE       default /var/lib/moi/status.last (line + epoch of last post; .grace beside it)
 #   MOI_STATUS_HEARTBEAT_HOURS  default 24
-#   MOI_STATUS_MARKET_GRACE_TICKS   default 2; 1 (or anything not a 1-3 digit count) posts on first sight
+#   MOI_STATUS_MARKET_GRACE_TICKS   default 2; 1 (or anything not a 1-3 digit count) switches the grace
+#                                   off in both directions (post on first sight, recover at once)
 #   MOI_STATUS_MARKET_WINDOW_TICKS  default 6 observations (1-3 digits)
 #   MOI_STATUS_TICK_SEC             default 300; a gap over twice this forgets the window
 #   (the production values live in /etc/moi/moi.env, the EnvironmentFile of moi-status.service)
@@ -169,6 +170,13 @@ if [ -f "$state_file" ]; then
   case "$last_post" in ''|*[!0-9]*) last_post=0 ;; esac
 fi
 prev_level="${previous%% *}"
+# A delivered line that does not start with a level is a damaged file, not a
+# status: treat it as "nothing delivered yet" so the current status is posted
+# once and the file repaired, instead of feeding notify.sh an unknown level.
+case "$prev_level" in
+  ok|warn|fail) ;;
+  *) previous=""; prev_level="" ;;
+esac
 heartbeat_due=0
 [ $(( now - last_post )) -ge $(( heartbeat_hours * 3600 )) ] && heartbeat_due=1
 
@@ -204,7 +212,8 @@ fi
 case "$history" in ''|*[!01]*) history="" ;; esac
 case "$last_tick" in ''|*[!0-9]*) last_tick=0 ;; esac
 # A clock that went backwards (NTP step, snapshot restore) is a gap too.
-if [ "$last_tick" -gt 0 ] && { [ $(( now - last_tick )) -gt $(( 2 * tick_sec )) ] || [ "$now" -lt "$last_tick" ]; }; then
+# A window whose age is unknown (no epoch) is not trusted either.
+if [ "$last_tick" -eq 0 ] || [ $(( now - last_tick )) -gt $(( 2 * tick_sec )) ] || [ "$now" -lt "$last_tick" ]; then
   history=""
 fi
 history="${history}${market_fail}"
@@ -232,8 +241,9 @@ case "$previous" in
   ''|*" KR=NORMAL US=NORMAL "*) prev_market_fail=0 ;;
   *) prev_market_fail=1 ;;
 esac
-if [ "$level" != fail ] && [ "$prev_level" = fail ] && [ "$prev_market_fail" = 1 ] \
-   && [ "$bad_ticks" -gt 0 ]; then
+# MOI_STATUS_MARKET_GRACE_TICKS=1 switches the whole mechanism off, this half too.
+if [ "$market_grace_ticks" -gt 1 ] && [ "$level" != fail ] && [ "$prev_level" = fail ] \
+   && [ "$prev_market_fail" = 1 ] && [ "$bad_ticks" -gt 0 ]; then
   hold "market recovery pending ($bad_ticks bad ticks in the last $market_window_ticks)"
 fi
 

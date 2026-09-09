@@ -525,18 +525,61 @@ describe('status-check.sh', () => {
     }
   });
 
-  it('MOI_STATUS_MARKET_GRACE_TICKS=1 restores posting on the first observation', () => {
+  it('MOI_STATUS_MARKET_GRACE_TICKS=1 switches the grace off in both directions', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const off = { MOI_STATUS_MARKET_GRACE_TICKS: '1' };
+    try {
+      tick(sb, 0, off); // baseline ok
+      const r = tick({ ...degraded, state: sb.state }, 1, off);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(posted(degraded).length, 1, 'no grace when set to 1');
+      // No hysteresis either: the recovery is announced on the next tick.
+      const back = tick(sb, 2, off);
+      assert.equal(back.status, 0, back.stderr);
+      assert.doesNotMatch(back.stderr, /pending/);
+      assert.equal(posted(sb).length, 2, 'recovery posted at once');
+      assert.match(embed(posted(sb)[1]).title, /상태 복구/);
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets a window file that carries no tick epoch', () => {
     const sb = makeSandbox(API);
     const degraded = withUS('DEGRADED');
     try {
       tick(sb, 0); // baseline ok
-      const r = tick({ ...degraded, state: sb.state }, 1, {
-        MOI_STATUS_MARKET_GRACE_TICKS: '1',
-      });
+      writeFileSync(graceFile(sb), '111111\n'); // hand-edited, age unknown
+      const r = tick({ ...degraded, state: sb.state }, 1);
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(posted(degraded).length, 1, 'no grace when set to 1');
+      assert.match(r.stderr, /market fail pending \(1\/2/);
+      assert.equal(
+        posted(degraded).length,
+        0,
+        'a window of unknown age must not fire',
+      );
     } finally {
       rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a corrupt delivered-status line as nothing delivered and posts the current status once', () => {
+    const sb = makeSandbox(API);
+    try {
+      tick(sb, 0); // baseline ok
+      writeFileSync(sb.state, 'garbage line\n1000000000\n');
+      const r = tick(sb, 1);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stderr, /post failed/);
+      assert.equal(posted(sb).length, 2, 'current status re-announced once');
+      assert.match(embed(posted(sb)[1]).title, /상태 OK/);
+      assert.match(stateLines(sb)[0], /^ok /, 'state file repaired');
+      assert.equal(tick(sb, 2).status, 0);
+      assert.equal(posted(sb).length, 2, 'quiet again');
+    } finally {
       rmSync(sb.dir, { recursive: true, force: true });
     }
   });
