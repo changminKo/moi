@@ -18,18 +18,27 @@
 # swap used > 50 % or the root disk > 85 %; ok otherwise.
 #
 # A fail whose only cause is a market state (feed DEGRADED/RECOVERING while
-# readiness, runtime and placement are fine) is held for
-# MOI_STATUS_MARKET_GRACE_TICKS consecutive observations (default 2, so ≥ 5
-# minutes on the 5-minute timer) before it is posted: the feed reconnects on
-# its own in a few minutes most of the time, and announcing every blip as
-# FAIL + recovered buried the alerts that matter. The held ticks still print
-# their line to the journal. Every other fail posts at once.
+# readiness, runtime and placement are fine) is announced only once the window
+# of the last MOI_STATUS_MARKET_WINDOW_TICKS observations (default 6 = 30 min)
+# holds at least MOI_STATUS_MARKET_GRACE_TICKS bad ones (default 2): the feed
+# reconnects on its own in a few minutes most of the time, and announcing every
+# blip as FAIL + recovered buried the alerts that matter, while a feed that
+# flaps every other tick must still be seen. Once announced, the recovery is
+# held until the window is clean again, so a flapping feed is one FAIL line
+# and a `(fail)` heartbeat, not a stream of pairs. The window lives in
+# <state file>.grace as `<0/1 per tick, newest last> <epoch of last tick>` and
+# is forgotten after a gap of more than two ticks (deploy lock, stopped
+# timer). Held ticks still print their line to the journal. Every other fail
+# posts at once, and so does any change while a fail is already announced.
 #
 # Every collector is overridable for tests:
 #   MOI_STATUS_API_BASE         default https://$API_DOMAIN (the Caddy edge)
-#   MOI_STATUS_STATE_FILE       default /var/lib/moi/status.last (line + epoch of last post + pending market ticks)
+#   MOI_STATUS_STATE_FILE       default /var/lib/moi/status.last (line + epoch of last post; .grace beside it)
 #   MOI_STATUS_HEARTBEAT_HOURS  default 24
-#   MOI_STATUS_MARKET_GRACE_TICKS  default 2; 1 posts a market fail on first sight
+#   MOI_STATUS_MARKET_GRACE_TICKS   default 2; 1 (or anything not a 1-3 digit count) posts on first sight
+#   MOI_STATUS_MARKET_WINDOW_TICKS  default 6 observations (1-3 digits)
+#   MOI_STATUS_TICK_SEC             default 300; a gap over twice this forgets the window
+#   (the production values live in /etc/moi/moi.env, the EnvironmentFile of moi-status.service)
 #   MOI_STATUS_NOW              epoch seconds override (tests)
 #   MOI_STATUS_DEPLOY_LOCK      default /run/moi-deploy.lock (fresh → exit 0, no probe)
 #   MOI_STATUS_LOCK_MAX_AGE     default 1800 s; an older lock is ignored (stale deploy)
@@ -42,7 +51,13 @@ api="${MOI_STATUS_API_BASE:-https://${API_DOMAIN:-localhost}}"
 state_file="${MOI_STATUS_STATE_FILE:-/var/lib/moi/status.last}"
 heartbeat_hours="${MOI_STATUS_HEARTBEAT_HOURS:-24}"
 market_grace_ticks="${MOI_STATUS_MARKET_GRACE_TICKS:-2}"
-case "$market_grace_ticks" in ''|*[!0-9]*|0) market_grace_ticks=1 ;; esac
+case "$market_grace_ticks" in ''|*[!0-9]*|0|????*) market_grace_ticks=1 ;; esac
+market_window_ticks="${MOI_STATUS_MARKET_WINDOW_TICKS:-6}"
+case "$market_window_ticks" in ''|*[!0-9]*|0|????*) market_window_ticks=6 ;; esac
+[ "$market_window_ticks" -ge "$market_grace_ticks" ] || market_window_ticks="$market_grace_ticks"
+tick_sec="${MOI_STATUS_TICK_SEC:-300}"
+case "$tick_sec" in ''|*[!0-9]*|0|???????*) tick_sec=300 ;; esac
+grace_file="${state_file}.grace"
 now="${MOI_STATUS_NOW:-$(date -u +%s)}"
 
 # deploy.sh holds this lock for the whole release (deploy-lib.sh); the restart
@@ -111,12 +126,20 @@ disk_used_pct="$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')"
 disk_used_pct="${disk_used_pct:-0}"
 
 # hard_fail posts at once; market_fail alone waits out the grace window below.
+# Only a feed that is on its way back (DEGRADED/RECOVERING) is graced; an
+# unknown or unexpected market state is a contract problem and fails closed.
 hard_fail=0; market_fail=0
+for market_state in "$kr" "$us"; do
+  case "$market_state" in
+    NORMAL) ;;
+    DEGRADED|RECOVERING) market_fail=1 ;;
+    *) hard_fail=1 ;;
+  esac
+done
 if [ "$ready" != 200 ] || [ "$runtime" != SERVING ] || [ "$placement" != true ] \
    || { [ "$bot_status" != n/a ] && [ "$bot_status" != running ]; }; then
   hard_fail=1
 fi
-[ "$kr" = NORMAL ] && [ "$us" = NORMAL ] || market_fail=1
 
 level=ok
 if [ "$hard_fail" = 1 ] || [ "$market_fail" = 1 ]; then
@@ -138,67 +161,95 @@ disk_flag=ok; [ "$disk_used_pct" -gt "$DISK_USED_MAX" ] && disk_flag=high
 signature="$level ready=$ready runtime=$runtime KR=$kr US=$us placement=$placement bot=$bot_status mem=$mem_flag swap=$swap_flag disk=$disk_flag"
 
 # State file: line 1 = signature of the last delivered status, line 2 = epoch
-# of that post, line 3 = consecutive ticks a market-only fail has been observed
-# (0 or absent when the markets are NORMAL or something harder is failing).
-previous=""; last_post=0; pending=0
+# of that post. Written only after a successful post.
+previous=""; last_post=0
 if [ -f "$state_file" ]; then
   previous="$(sed -n 1p "$state_file")"
   last_post="$(sed -n 2p "$state_file")"
-  pending="$(sed -n 3p "$state_file")"
   case "$last_post" in ''|*[!0-9]*) last_post=0 ;; esac
-  case "$pending" in ''|*[!0-9]*) pending=0 ;; esac
 fi
-stored_pending="$pending"
+prev_level="${previous%% *}"
 heartbeat_due=0
 [ $(( now - last_post )) -ge $(( heartbeat_hours * 3600 )) ] && heartbeat_due=1
 
 post() { NOTIFY_STRICT=1 "$here/notify.sh" "$@"; }
-write_state() {
-  local dir; dir="$(dirname "$state_file")"
-  [ -d "$dir" ] || mkdir -p -m 0700 "$dir"
-  printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$state_file"
-}
-record() {
-  write_state "$signature" "$now" "$pending"
-  previous="$signature"; last_post="$now"; stored_pending="$pending"
+ensure_dir() { [ -d "$1" ] || { mkdir -p "$1" && chmod 0700 "$1"; }; }
+# Write-then-rename: a tick killed mid-write must not leave a truncated file
+# that reads as "nothing delivered yet" and re-posts the current status.
+write_file() { ensure_dir "$(dirname "$1")"; printf '%s' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+record() { write_file "$state_file" "$1"$'\n'"$now"$'\n'; }
+# A held tick still owes the heartbeat: it goes out with the level Discord is
+# showing (the delivered one), the current line underneath, so "silence never
+# means healthy" survives a 30-minute hold.
+hold() {
+  echo "status-check: $1, not posted" >&2
+  if [ "$heartbeat_due" = 1 ] && [ -n "$prev_level" ]; then
+    if post "$prev_level" "Moi status heartbeat ($prev_level)" "$line"$'\n'"$1"; then
+      record "$previous"
+    else
+      echo "status-check: heartbeat post failed, will retry next tick" >&2
+    fi
+  fi
+  exit 0
 }
 
-# Market grace: count the ticks a market-only fail has lasted and stay quiet
-# until the window is full. Lines 1–2 (the delivered status) are untouched, so
-# a blip that heals on the next tick leaves no trace in Discord.
-if [ "$market_fail" = 1 ] && [ "$hard_fail" = 0 ]; then
-  pending=$(( pending + 1 ))
-  if [ "$pending" -lt "$market_grace_ticks" ]; then
-    echo "status-check: market fail pending ($pending/$market_grace_ticks), not posted" >&2
-    write_state "$previous" "$last_post" "$pending"
-    exit 0
-  fi
-  pending="$market_grace_ticks"
-else
-  pending=0
+# Market window: `<history> <last tick epoch>`; history is one 0/1 per tick,
+# newest last, trimmed to the window. Anything unreadable starts a fresh window,
+# as does a gap of more than two ticks — a count that survived a deploy or a
+# stopped timer would fire on the first blip afterwards.
+history=""; last_tick=0
+if [ -f "$grace_file" ]; then
+  read -r history last_tick _ < "$grace_file" || true
+fi
+case "$history" in ''|*[!01]*) history="" ;; esac
+case "$last_tick" in ''|*[!0-9]*) last_tick=0 ;; esac
+if [ "$last_tick" -gt 0 ] && [ $(( now - last_tick )) -gt $(( 2 * tick_sec )) ]; then
+  history=""
+fi
+history="${history}${market_fail}"
+history="${history:$(( ${#history} > market_window_ticks ? ${#history} - market_window_ticks : 0 ))}"
+bad_ticks="${history//0/}"; bad_ticks="${#bad_ticks}"
+write_file "$grace_file" "$history $now"$'\n'
+
+# The grace only delays the *first* announcement of a market-only fail; once a
+# fail of any kind has been delivered, every later change (a hard cause clearing
+# while the market stays bad, DEGRADED→RECOVERING) posts at once.
+if [ "$market_fail" = 1 ] && [ "$hard_fail" = 0 ] && [ "$prev_level" != fail ] \
+   && [ "$bad_ticks" -lt "$market_grace_ticks" ]; then
+  hold "market fail pending ($bad_ticks/$market_grace_ticks bad ticks in the last $market_window_ticks)"
+fi
+# Hysteresis: a delivered market fail stays on the board until the window has
+# been clean for its whole length, so a flapping feed is one line, not pairs.
+case " $previous " in
+  *" KR=NORMAL "*" US=NORMAL "*) prev_market_fail=0 ;;
+  "  ") prev_market_fail=0 ;;
+  *) prev_market_fail=1 ;;
+esac
+if [ "$level" != fail ] && [ "$prev_level" = fail ] && [ "$prev_market_fail" = 1 ] \
+   && [ "$bad_ticks" -gt 0 ]; then
+  hold "market recovery pending ($bad_ticks bad ticks in the last $market_window_ticks)"
 fi
 
 if [ "$signature" != "$previous" ]; then
-  prev_level="${previous%% *}"
   title="Moi status $(printf %s "$level" | tr '[:lower:]' '[:upper:]')"
   if [ "$level" = ok ] && [ -n "$prev_level" ] && [ "$prev_level" != ok ]; then
     title="Moi status recovered"
   fi
   description="$line"
   [ -n "$previous" ] && description="$line"$'\n'"이전: $previous"
+  # A market fail arrives late by design; show the window so the operator can
+  # line the alert up with the feed's own timeline.
+  [ "$market_fail" = 1 ] && description="$description"$'\n'"시장 창: $history (최근 ${market_window_ticks}틱, 불량 $bad_ticks — ${market_grace_ticks}틱부터 게시)"
   if post "$level" "$title" "$description"; then
-    record
+    record "$signature"
   else
     echo "status-check: post failed, will retry next tick" >&2
   fi
 elif [ "$heartbeat_due" = 1 ]; then
   if post "$level" "Moi status heartbeat ($level)" "$line"; then
-    record
+    record "$signature"
   else
     echo "status-check: heartbeat post failed, will retry next tick" >&2
   fi
 fi
-# The pending count is state of its own: a heal that posts nothing must still
-# reset it, or the next blip would inherit the old count and post at once.
-[ "$pending" = "$stored_pending" ] || write_state "$previous" "$last_post" "$pending"
 exit 0
