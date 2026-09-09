@@ -225,10 +225,11 @@ history="${history}${market_fail}"
 history="${history:$(( ${#history} > market_window_ticks ? ${#history} - market_window_ticks : 0 ))}"
 bad_ticks="${history//0/}"; bad_ticks="${#bad_ticks}"
 # A window that cannot be persisted would restart from one tick every run and
-# never announce anything: fail open and post as if the window were full.
+# never announce anything — nor release a delivered FAIL: fail open in both
+# directions by switching the grace off for this tick, as grace=1 does.
 if ! write_file "$grace_file" "$history $now"$'\n'; then
   echo "status-check: cannot write $grace_file, posting market changes without grace" >&2
-  bad_ticks="$market_grace_ticks"
+  market_grace_ticks=1
 fi
 
 # The grace only delays the *first* announcement of a market-only fail; once a

@@ -606,6 +606,16 @@ describe('status-check.sh', () => {
           1,
           `${blocker}: fail-open posts at once`,
         );
+        // Fail-open in both directions: the recovery must not wait for a
+        // window that cannot be kept.
+        const back = tick(sb, 2);
+        assert.equal(back.status, 0, `${blocker}: ${back.stderr}`);
+        assert.doesNotMatch(back.stderr, /recovery pending/, blocker);
+        assert.equal(
+          posted(sb).length,
+          2,
+          `${blocker}: recovery posted at once`,
+        );
       } finally {
         rmSync(degraded.dir, { recursive: true, force: true });
         rmSync(sb.dir, { recursive: true, force: true });
