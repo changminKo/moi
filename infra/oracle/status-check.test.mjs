@@ -439,6 +439,54 @@ describe('status-check.sh', () => {
     }
   });
 
+  it('announces the recovery of a hard failure at once even while the market window is dirty', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    const down = makeSandbox({ ...API, ready: 503 });
+    try {
+      tick(sb, 0); // baseline ok
+      assert.equal(tick({ ...degraded, state: sb.state }, 1).status, 0); // blip, held
+      const hard = tick({ ...down, state: sb.state }, 2); // markets NORMAL, readiness down
+      assert.equal(hard.status, 0, hard.stderr);
+      assert.match(
+        embed(posted(down)[0]).description,
+        /^fail ready=503 .*KR=NORMAL US=NORMAL/m,
+      );
+      // Readiness is back and the markets were never the delivered cause: the
+      // recovery must not wait for the market window to clear.
+      const back = tick(sb, 3);
+      assert.equal(back.status, 0, back.stderr);
+      assert.doesNotMatch(back.stderr, /recovery pending/);
+      assert.equal(posted(sb).length, 2, 'recovered posted at once');
+      assert.match(embed(posted(sb)[1]).title, /상태 복구/);
+    } finally {
+      rmSync(down.dir, { recursive: true, force: true });
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets the window when the clock goes backwards', () => {
+    const sb = makeSandbox(API);
+    const degraded = withUS('DEGRADED');
+    try {
+      tick(sb, 100); // baseline ok, far in the future
+      assert.equal(tick({ ...degraded, state: sb.state }, 101).status, 0); // blip
+      // NTP step / snapshot restore: the clock is now earlier than the last tick.
+      const r = tick({ ...degraded, state: sb.state }, 1);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /market fail pending \(1\/2/);
+      assert.equal(
+        posted(degraded).length,
+        0,
+        'a rewound clock must not fire the alert',
+      );
+    } finally {
+      rmSync(degraded.dir, { recursive: true, force: true });
+      rmSync(sb.dir, { recursive: true, force: true });
+    }
+  });
+
   it('posts at once when a hard failure clears but the market stays bad during an announced outage', () => {
     // grace 3 so the window alone (two bad ticks) would still hold: only the
     // "a fail is already on the board" rule can make this post.

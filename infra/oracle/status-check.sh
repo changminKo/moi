@@ -203,13 +203,19 @@ if [ -f "$grace_file" ]; then
 fi
 case "$history" in ''|*[!01]*) history="" ;; esac
 case "$last_tick" in ''|*[!0-9]*) last_tick=0 ;; esac
-if [ "$last_tick" -gt 0 ] && [ $(( now - last_tick )) -gt $(( 2 * tick_sec )) ]; then
+# A clock that went backwards (NTP step, snapshot restore) is a gap too.
+if [ "$last_tick" -gt 0 ] && { [ $(( now - last_tick )) -gt $(( 2 * tick_sec )) ] || [ "$now" -lt "$last_tick" ]; }; then
   history=""
 fi
 history="${history}${market_fail}"
 history="${history:$(( ${#history} > market_window_ticks ? ${#history} - market_window_ticks : 0 ))}"
 bad_ticks="${history//0/}"; bad_ticks="${#bad_ticks}"
-write_file "$grace_file" "$history $now"$'\n'
+# A window that cannot be persisted would restart from one tick every run and
+# never announce anything: fail open and post as if the window were full.
+if ! write_file "$grace_file" "$history $now"$'\n'; then
+  echo "status-check: cannot write $grace_file, posting market changes without grace" >&2
+  bad_ticks="$market_grace_ticks"
+fi
 
 # The grace only delays the *first* announcement of a market-only fail; once a
 # fail of any kind has been delivered, every later change (a hard cause clearing
@@ -220,9 +226,10 @@ if [ "$market_fail" = 1 ] && [ "$hard_fail" = 0 ] && [ "$prev_level" != fail ] \
 fi
 # Hysteresis: a delivered market fail stays on the board until the window has
 # been clean for its whole length, so a flapping feed is one line, not pairs.
-case " $previous " in
-  *" KR=NORMAL "*" US=NORMAL "*) prev_market_fail=0 ;;
-  "  ") prev_market_fail=0 ;;
+# The signature writes the two markets side by side (`KR=… US=…`), so one
+# adjacent literal is the test; two separate globs would never match.
+case "$previous" in
+  ''|*" KR=NORMAL US=NORMAL "*) prev_market_fail=0 ;;
   *) prev_market_fail=1 ;;
 esac
 if [ "$level" != fail ] && [ "$prev_level" = fail ] && [ "$prev_market_fail" = 1 ] \
