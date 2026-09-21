@@ -22,7 +22,7 @@
     "@moi/trading-core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "vitest": "4.1.11"
+    "@types/node": "24.13.5",
+    "vitest": "5.0.1"
   }
 }
