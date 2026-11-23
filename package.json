@@ -19,12 +19,12 @@
     "smoke:prod": "pnpm --filter @moi/e2e test:smoke"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.11",
-    "@types/node": "24.13.3",
-    "fast-check": "4.9.0",
-    "turbo": "2.10.12",
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "24.19.2",
+    "fast-check": "4.10.3",
+    "turbo": "2.11.13",
     "typescript": "7.0.2",
-    "vitest": "4.1.11",
-    "yaml": "2.9.0"
+    "vitest": "5.1.1",
+    "yaml": "2.9.1"
   }
 }
